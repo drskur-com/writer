@@ -1,11 +1,15 @@
+use gpui_kit::component::button::*;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::*;
 use gpui_kit::gpui::prelude::FluentBuilder;
 use gpui_kit::gpui::*;
+use std::path::PathBuf;
 
 #[cfg(not(target_os = "macos"))]
 use gpui_kit::component::menu::AppMenuBar;
 
+mod config;
+mod library;
 mod theme;
 
 actions!(
@@ -13,6 +17,8 @@ actions!(
     [
         NewSheet,
         SaveSheet,
+        OpenLibrary,
+        CloseLibrary,
         OpenSettings,
         ToggleSidebar,
         TogglePreview,
@@ -59,6 +65,9 @@ fn build_menus(theme_names: &[SharedString], active_theme: &str) -> Vec<Menu> {
     let mut file_items = vec![
         MenuItem::action("New Sheet", NewSheet),
         MenuItem::action("Save", SaveSheet),
+        MenuItem::separator(),
+        MenuItem::action("Open Library…", OpenLibrary),
+        MenuItem::action("Close Library", CloseLibrary),
     ];
     #[cfg(not(target_os = "macos"))]
     {
@@ -87,9 +96,6 @@ fn build_menus(theme_names: &[SharedString], active_theme: &str) -> Vec<Menu> {
 }
 
 /// 현재 테마를 반영해 앱 메뉴를 (재)설치한다.
-///
-/// macOS는 네이티브 메뉴, Windows/Linux는 인윈도우 `AppMenuBar`가 읽는
-/// `GlobalState` 메뉴를 함께 갱신한다.
 fn install_menus(cx: &mut App) {
     let theme_names = theme::theme_names(cx);
     let active = theme::active_name(cx);
@@ -102,10 +108,68 @@ fn install_menus(cx: &mut App) {
     GlobalState::global_mut(cx).set_app_menus(owned);
 }
 
+// --- 사이드바 렌더 헬퍼 -----------------------------------------------------
+
+fn sheet_row(title: &str, indent: f32, foreground: Hsla) -> impl IntoElement {
+    div()
+        .pl(px(indent))
+        .pr_2()
+        .py_1()
+        .rounded_md()
+        .text_sm()
+        .text_color(foreground)
+        .child(title.to_string())
+}
+
+fn render_section(section: &library::Section, muted: Hsla, foreground: Hsla) -> AnyElement {
+    let mut rows: Vec<AnyElement> = Vec::new();
+    for entry in &section.entries {
+        match entry {
+            library::Entry::Sheet(sheet) => {
+                rows.push(sheet_row(&sheet.title, 8.0, foreground).into_any_element());
+            }
+            library::Entry::Group(group) => {
+                rows.push(
+                    div()
+                        .pl(px(8.0))
+                        .py_1()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(format!("📁 {}", group.name))
+                        .into_any_element(),
+                );
+                for sheet in &group.sheets {
+                    rows.push(sheet_row(&sheet.title, 24.0, foreground).into_any_element());
+                }
+            }
+        }
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .mb_2()
+        .child(
+            div()
+                .px_2()
+                .py_1()
+                .text_xs()
+                .font_semibold()
+                .text_color(muted)
+                .child(format!("{} {}", section.kind.icon(), section.kind.title())),
+        )
+        .children(rows)
+        .into_any_element()
+}
+
 struct WriterApp {
     status_text: String,
     sidebar_visible: bool,
     preview_visible: bool,
+    library: Option<library::Library>,
+    /// 온보딩 화면에 표시할 안내/오류 문구.
+    notice: Option<SharedString>,
     #[cfg(not(target_os = "macos"))]
     menu_bar: Entity<AppMenuBar>,
 }
@@ -123,12 +187,107 @@ impl WriterApp {
         cx.notify();
     }
 
+    fn set_notice(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.notice = Some(message.into());
+        cx.notify();
+    }
+
+    // --- 라이브러리 폴더 설정 ---------------------------------------------
+
+    /// 기본 제안 경로에 새 라이브러리를 만든다.
+    fn create_default_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = config::default_library_root() else {
+            self.set_notice("기본 라이브러리 위치를 찾을 수 없습니다.", cx);
+            return;
+        };
+        self.initialize_at(root, window, cx);
+    }
+
+    /// 라이브러리 골격을 만든 뒤 연다.
+    fn initialize_at(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        match library::initialize(&root) {
+            Ok(()) => self.adopt(root, window, cx),
+            Err(err) => self.set_notice(format!("라이브러리를 만들 수 없습니다: {err}"), cx),
+        }
+    }
+
+    /// 기존 폴더를 검사해 알맞게 연다.
+    fn open_folder(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        match library::inspect(&path) {
+            Ok(library::FolderKind::Library) => self.adopt(path, window, cx),
+            Ok(library::FolderKind::Empty) | Ok(library::FolderKind::MarkdownOnly) => {
+                self.initialize_at(path, window, cx);
+            }
+            // 비어 있지 않은 폴더: 하위에 Writer/ 를 만든다 (ADR-0003 D3).
+            Ok(library::FolderKind::NonEmpty) => {
+                self.initialize_at(path.join(APP_NAME), window, cx);
+            }
+            Err(err) => self.set_notice(format!("폴더를 사용할 수 없습니다: {err}"), cx),
+        }
+    }
+
+    /// 라이브러리를 현재 라이브러리로 채택하고 설정에 저장한다.
+    fn adopt(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        match library::scan(&root) {
+            Ok(opened) => {
+                let mut config = config::Config::load();
+                config.set_library(opened.root.clone());
+                if let Err(err) = config.save() {
+                    eprintln!("설정 저장 실패: {err}");
+                }
+                window.push_notification(
+                    Notification::info(format!("라이브러리 열기: {}", opened.root.display())),
+                    cx,
+                );
+                self.library = Some(opened);
+                self.notice = None;
+                cx.notify();
+            }
+            Err(err) => self.set_notice(format!("라이브러리를 읽을 수 없습니다: {err}"), cx),
+        }
+    }
+
+    /// OS 네이티브 폴더 선택기로 라이브러리 폴더를 고른다.
+    fn pick_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("라이브러리 폴더 선택".into()),
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let picked = match receiver.await {
+                Ok(Ok(Some(mut paths))) => paths.pop(),
+                _ => None,
+            };
+            let Some(path) = picked else {
+                return;
+            };
+            this.update_in(cx, |this, window, cx| this.open_folder(path, window, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    // --- 액션 핸들러 --------------------------------------------------------
+
     fn on_new_sheet(&mut self, _: &NewSheet, window: &mut Window, cx: &mut Context<Self>) {
         self.notify("새 문서를 준비했습니다.", window, cx);
     }
 
     fn on_save_sheet(&mut self, _: &SaveSheet, window: &mut Window, cx: &mut Context<Self>) {
         self.notify("문서가 저장되었습니다.", window, cx);
+    }
+
+    fn on_open_library(&mut self, _: &OpenLibrary, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_library(window, cx);
+    }
+
+    fn on_close_library(&mut self, _: &CloseLibrary, _: &mut Window, cx: &mut Context<Self>) {
+        self.library = None;
+        self.notice = None;
+        cx.notify();
     }
 
     fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
@@ -166,7 +325,6 @@ impl WriterApp {
         self.after_theme_change(format!("테마: {next}"), window, cx);
     }
 
-    /// 테마 변경 후 메뉴(체크 표시)를 갱신하고 알린다.
     fn after_theme_change(
         &mut self,
         message: impl Into<SharedString>,
@@ -182,6 +340,126 @@ impl WriterApp {
     fn on_quit(&mut self, _: &QuitApp, _: &mut Window, cx: &mut Context<Self>) {
         cx.quit();
     }
+
+    // --- 렌더 헬퍼 ---------------------------------------------------------
+
+    fn render_sidebar(
+        &self,
+        muted: Hsla,
+        foreground: Hsla,
+        background: Hsla,
+        border: Hsla,
+    ) -> impl IntoElement {
+        let sections: Vec<AnyElement> = self
+            .library
+            .as_ref()
+            .map(|lib| {
+                lib.sections
+                    .iter()
+                    .map(|section| render_section(section, muted, foreground))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        div()
+            .w(px(220.0))
+            .h_full()
+            .p_3()
+            .border_r_1()
+            .border_color(border)
+            .bg(background)
+            .child(
+                div()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(muted)
+                    .mb_2()
+                    .child("LIBRARY"),
+            )
+            .children(sections)
+    }
+
+    fn render_workspace(
+        &self,
+        muted: Hsla,
+        foreground: Hsla,
+        sidebar_background: Hsla,
+        border: Hsla,
+        panel_background: Hsla,
+    ) -> impl IntoElement {
+        let root_label = self
+            .library
+            .as_ref()
+            .map(|lib| lib.root.display().to_string())
+            .unwrap_or_default();
+
+        div()
+            .flex_1()
+            .flex()
+            .size_full()
+            .when(self.sidebar_visible, |this| {
+                this.child(self.render_sidebar(
+                    muted,
+                    foreground,
+                    sidebar_background,
+                    border,
+                ))
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .p_6()
+                    .flex()
+                    .flex_col()
+                    .bg(panel_background)
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_bold()
+                            .mb_4()
+                            .child("라이브러리 준비됨"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .mb_3()
+                            .child(root_label),
+                    )
+                    .child(
+                        div()
+                            .text_color(muted)
+                            .line_height(relative(1.6))
+                            .child("왼쪽에서 시트를 선택하면 여기에 표시됩니다.\n에디터 연결은 M2에서 진행합니다."),
+                    ),
+            )
+            .when(self.preview_visible, |this| {
+                this.child(
+                    div()
+                        .w(px(320.0))
+                        .h_full()
+                        .p_4()
+                        .border_l_1()
+                        .border_color(border)
+                        .bg(sidebar_background)
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(muted)
+                                .mb_2()
+                                .child("PREVIEW"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child("프리뷰 영역 (M4)"),
+                        ),
+                )
+            })
+    }
 }
 
 impl Render for WriterApp {
@@ -193,13 +471,12 @@ impl Render for WriterApp {
         let border = theme.border;
         let muted_foreground = theme.muted_foreground;
         let sidebar_background = theme.sidebar;
-        let sidebar_foreground = theme.sidebar_foreground;
         let panel_background = theme.popover;
-        let selected_background = theme.secondary;
         let status_background = theme.status_bar;
         let status_border = theme.status_bar_border;
         let title_bar_background = theme.title_bar;
         let title_bar_border = theme.title_bar_border;
+        let danger = theme.danger;
 
         let root = div()
             .flex()
@@ -209,6 +486,8 @@ impl Render for WriterApp {
             .text_color(foreground)
             .on_action(cx.listener(Self::on_new_sheet))
             .on_action(cx.listener(Self::on_save_sheet))
+            .on_action(cx.listener(Self::on_open_library))
+            .on_action(cx.listener(Self::on_close_library))
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_show_about))
             .on_action(cx.listener(Self::on_toggle_sidebar))
@@ -226,111 +505,92 @@ impl Render for WriterApp {
                 .child(self.menu_bar.clone()),
         );
 
-        // 2. 메인 바디 (사이드바 + 에디터 + 프리뷰)
-        root.child(
-            div()
-                .flex_1()
-                .flex()
-                .size_full()
-                .when(self.sidebar_visible, |this| {
-                    this.child(
-                        div()
-                            .w(px(220.0))
-                            .h_full()
-                            .p_3()
-                            .border_r_1()
-                            .border_color(border)
-                            .bg(sidebar_background)
-                            .text_color(sidebar_foreground)
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_semibold()
-                                    .text_color(muted_foreground)
-                                    .mb_2()
-                                    .child("EXPLORER"),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .px_2()
-                                            .py_1()
-                                            .rounded_md()
-                                            .bg(selected_background)
-                                            .text_sm()
-                                            .child("📄 Untitled-1.md"),
-                                    ),
-                            ),
-                    )
-                })
-                .child(
-                    div()
-                        .flex_1()
-                        .h_full()
-                        .p_6()
-                        .flex()
-                        .flex_col()
-                        .bg(panel_background)
-                        .child(
-                            div()
-                                .text_xl()
-                                .font_bold()
-                                .mb_4()
-                                .child("GPUI Editor Ready"),
-                        )
-                        .child(
-                            div()
-                                .text_color(muted_foreground)
-                                .line_height(relative(1.6))
-                                .child("gpui-kit 기반 에디터 앱 껍데기가 성공적으로 구동되었습니다.\n여기에 에디터 버퍼와 컴포넌트를 연결할 수 있습니다."),
-                        ),
+        // 2. 바디: 라이브러리가 있으면 워크스페이스, 없으면 온보딩
+        let body: AnyElement =
+            if self.library.is_some() {
+                self.render_workspace(
+                    muted_foreground,
+                    foreground,
+                    sidebar_background,
+                    border,
+                    panel_background,
                 )
-                .when(self.preview_visible, |this| {
-                    this.child(
+                .into_any_element()
+            } else {
+                let suggested = config::default_library_root()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "(위치를 찾을 수 없음)".to_string());
+
+                div()
+                    .flex_1()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_4()
+                    .child(div().text_2xl().font_bold().child(APP_NAME))
+                    .child(
                         div()
-                            .w(px(320.0))
-                            .h_full()
-                            .p_4()
-                            .border_l_1()
+                            .text_sm()
+                            .text_color(muted_foreground)
+                            .child("모든 메모와 프로젝트를 담을 폴더를 선택하세요."),
+                    )
+                    .child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .border_1()
                             .border_color(border)
-                            .bg(sidebar_background)
+                            .bg(panel_background)
+                            .text_xs()
+                            .text_color(muted_foreground)
+                            .child(format!("제안 위치: {suggested}")),
+                    )
+                    .when_some(self.notice.clone(), |this, notice| {
+                        this.child(div().text_sm().text_color(danger).child(notice))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
                             .child(
-                                div()
-                                    .text_xs()
-                                    .font_semibold()
-                                    .text_color(muted_foreground)
-                                    .mb_2()
-                                    .child("PREVIEW"),
+                                Button::new("create-library")
+                                    .primary()
+                                    .label("라이브러리 만들기")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.create_default_library(window, cx)
+                                    })),
                             )
                             .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(muted_foreground)
-                                    .child("프리뷰 영역 (M4)"),
+                                Button::new("open-library")
+                                    .label("기존 라이브러리 열기")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.pick_library(window, cx)
+                                    })),
                             ),
                     )
-                }),
-        )
-        // 3. 하단 상태 바
-        .child(
-            div()
-                .h(px(26.0))
-                .px_3()
-                .flex()
-                .items_center()
-                .justify_between()
-                .bg(status_background)
-                .border_t_1()
-                .border_color(status_border)
-                .text_xs()
-                .text_color(muted_foreground)
-                .child(div().child(self.status_text.clone()))
-                .child(div().child("UTF-8 | Markdown | GPUI")),
-        )
+                    .into_any_element()
+            };
+
+        root.child(body)
+            // 3. 하단 상태 바
+            .child(
+                div()
+                    .h(px(26.0))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .bg(status_background)
+                    .border_t_1()
+                    .border_color(status_border)
+                    .text_xs()
+                    .text_color(muted_foreground)
+                    .child(div().child(self.status_text.clone()))
+                    .child(div().child("UTF-8 | Markdown | GPUI")),
+            )
     }
 }
 
@@ -351,10 +611,25 @@ fn main() {
             cx.bind_keys([
                 KeyBinding::new("ctrl-n", NewSheet, None),
                 KeyBinding::new("ctrl-s", SaveSheet, None),
+                KeyBinding::new("ctrl-o", OpenLibrary, None),
                 KeyBinding::new("ctrl-,", OpenSettings, None),
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),
                 KeyBinding::new("ctrl-shift-l", ToggleTheme, None),
             ]);
+
+            // 저장된 라이브러리를 열어본다(없거나 실패하면 온보딩).
+            let config = config::Config::load();
+            let library = config
+                .library_root
+                .as_deref()
+                .and_then(|root| library::scan(root).ok());
+            let notice = if config.library_root.is_some() && library.is_none() {
+                Some(SharedString::from(
+                    "저장된 라이브러리를 열 수 없습니다. 폴더를 다시 선택하세요.",
+                ))
+            } else {
+                None
+            };
 
             let window_bounds = Some(WindowBounds::Windowed(Bounds::centered(
                 None,
@@ -387,6 +662,8 @@ fn main() {
                     status_text: "준비 완료".to_string(),
                     sidebar_visible: true,
                     preview_visible: false,
+                    library,
+                    notice,
                     #[cfg(not(target_os = "macos"))]
                     menu_bar: AppMenuBar::new(_cx),
                 })
