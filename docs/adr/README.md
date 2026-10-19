@@ -15,6 +15,7 @@
 | [0001](./0001-theme-colors-single-source.md) | 테마 색상은 JSON 을 단일 출처로 한다 | Accepted | 2026-10-20 |
 | [0002](./0002-custom-window-chrome.md) | Windows 창 크롬은 커스텀 타이틀바로 대체하고 아이콘 에셋을 등록한다 | Accepted | 2026-10-20 |
 | [0003](./0003-library-layout-and-folder-ux.md) | 라이브러리는 단일 루트 + 섹션(Inbox/Notes/Projects) 하위 폴더로 둔다 | Accepted | 2026-10-20 |
+| [0004](./0004-icon-pack.md) | 아이콘 팩은 Lucide 전체 카탈로그(AllAssets)를 쓰고 매핑을 한 곳에 둔다 | Accepted | 2026-10-20 |
 
 ## 작성 규칙
 
