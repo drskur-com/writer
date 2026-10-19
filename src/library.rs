@@ -1,15 +1,15 @@
 //! 라이브러리 도메인 모델과 폴더 검증/초기화/스캔.
 //!
-//! 레이아웃(ADR-0003):
+//! 레이아웃:
 //! ```text
 //! <LibraryRoot>/
-//! ├─ .writer/library.toml
-//! ├─ Inbox/
-//! ├─ Notes/
-//! └─ Projects/<Project>/<Group>/<Sheet>.md
+//! ├─ .writer/library.toml          # 라이브러리 마커
+//! ├─ Notes/<Group>/.writer.toml    # 그룹 메타(아이콘·시트 순서)
+//! │  └─ <Sheet>.md
+//! └─ Projects/<Group>/.writer.toml
+//!    └─ <Sheet>.md
 //! ```
 
-use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,9 @@ use std::path::{Path, PathBuf};
 /// 라이브러리 표식 디렉터리/파일.
 pub const MARKER_DIR: &str = ".writer";
 pub const MARKER_FILE: &str = "library.toml";
+
+/// 그룹 폴더 안의 메타 파일 이름.
+pub const GROUP_META_FILE: &str = ".writer.toml";
 
 /// 고정 섹션 순서.
 pub const SECTIONS: [SectionKind; 2] = [SectionKind::Notes, SectionKind::Projects];
@@ -93,9 +96,21 @@ pub struct Group {
     /// 그룹 디렉터리 경로 (CRUD는 후속 단계에서 사용).
     #[allow(dead_code)]
     pub path: PathBuf,
-    /// `library.toml` 에 지정된 아이콘 이름(없으면 기본).
+    /// 그룹 메타(`.writer.toml`)에 지정된 아이콘 이름(없으면 기본).
     pub icon: Option<String>,
     pub sheets: Vec<Sheet>,
+}
+
+/// 그룹 폴더의 `.writer.toml` 스키마.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct GroupMeta {
+    /// 아이콘 이름(예: inbox, folder, book).
+    icon: Option<String>,
+    /// 표시 이름(없으면 폴더 이름).
+    title: Option<String>,
+    /// 시트 파일명 순서. 나열되지 않은 파일은 뒤에 이름순으로 붙는다.
+    sheets: Vec<String>,
 }
 
 /// 폴더 검증 결과.
@@ -210,11 +225,14 @@ pub fn ensure_layout(root: &Path) -> io::Result<()> {
         let _ = std::fs::remove_dir(&legacy_inbox);
     }
     std::fs::create_dir_all(&notes_inbox)?;
+    write_group_meta_if_absent(&notes_inbox, Some("inbox"), None)?;
 
     // 프로젝트가 하나도 없으면 샘플 생성
     let projects_dir = root.join(SectionKind::Projects.dir());
     if is_empty_dir(&projects_dir)? {
-        std::fs::create_dir_all(projects_dir.join(DEFAULT_PROJECT))?;
+        let sample = projects_dir.join(DEFAULT_PROJECT);
+        std::fs::create_dir_all(&sample)?;
+        write_group_meta_if_absent(&sample, Some("folder"), None)?;
     }
 
     Ok(())
@@ -234,33 +252,42 @@ pub fn open(root: &Path) -> io::Result<Library> {
     scan(root)
 }
 
-/// `.writer/library.toml` 마커를 보장하고 기본 노드 메타를 채운다(멱등).
-///
-/// 기존 파일이 있으면 보존하며 필요한 키만 추가한다.
+/// `.writer/library.toml` 마커를 보장한다(멱등).
 fn write_default_meta(root: &Path) -> io::Result<()> {
     let dir = root.join(MARKER_DIR);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(MARKER_FILE);
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::write(path, "schema_version = 1\n")
+}
 
-    let mut table: toml::Table = std::fs::read_to_string(&path)
+/// 그룹 폴더의 `.writer.toml` 을 읽는다. 없거나 깨지면 기본값.
+fn read_group_meta(dir: &Path) -> GroupMeta {
+    std::fs::read_to_string(dir.join(GROUP_META_FILE))
         .ok()
         .and_then(|text| toml::from_str(&text).ok())
-        .unwrap_or_default();
-    if !table.contains_key("schema_version") {
-        table.insert("schema_version".to_string(), toml::Value::Integer(1));
-    }
-    if !table.contains_key("nodes") {
-        table.insert("nodes".to_string(), toml::Value::Table(toml::Table::new()));
-    }
-    if let Some(nodes) = table.get_mut("nodes").and_then(|value| value.as_table_mut()) {
-        let inbox_key = format!("{}/{}", SectionKind::Notes.dir(), DEFAULT_INBOX);
-        if !nodes.contains_key(&inbox_key) {
-            let mut entry = toml::Table::new();
-            entry.insert("icon".to_string(), toml::Value::String("inbox".to_string()));
-            nodes.insert(inbox_key, toml::Value::Table(entry));
-        }
-    }
+        .unwrap_or_default()
+}
 
+/// 그룹 메타 파일이 없으면 기본값으로 만든다(멱등).
+fn write_group_meta_if_absent(
+    dir: &Path,
+    icon: Option<&str>,
+    title: Option<&str>,
+) -> io::Result<()> {
+    let path = dir.join(GROUP_META_FILE);
+    if path.exists() {
+        return Ok(());
+    }
+    let mut table = toml::Table::new();
+    if let Some(icon) = icon {
+        table.insert("icon".to_string(), toml::Value::String(icon.to_string()));
+    }
+    if let Some(title) = title {
+        table.insert("title".to_string(), toml::Value::String(title.to_string()));
+    }
     let text = toml::to_string_pretty(&table)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     std::fs::write(path, text)
@@ -268,12 +295,11 @@ fn write_default_meta(root: &Path) -> io::Result<()> {
 
 /// 라이브러리를 스캔해 모델로 읽는다.
 pub fn scan(root: &Path) -> io::Result<Library> {
-    let icons = load_node_icons(root);
     let mut sections = Vec::with_capacity(SECTIONS.len());
     for kind in SECTIONS {
         sections.push(Section {
             kind,
-            entries: scan_section(root, &root.join(kind.dir()), kind, &icons)?,
+            entries: scan_section(&root.join(kind.dir()), kind)?,
         });
     }
     Ok(Library {
@@ -282,12 +308,7 @@ pub fn scan(root: &Path) -> io::Result<Library> {
     })
 }
 
-fn scan_section(
-    root: &Path,
-    dir: &Path,
-    kind: SectionKind,
-    icons: &HashMap<String, String>,
-) -> io::Result<Vec<Entry>> {
+fn scan_section(dir: &Path, kind: SectionKind) -> io::Result<Vec<Entry>> {
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -298,7 +319,7 @@ fn scan_section(
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if path.is_dir() {
-            groups.push(scan_group(root, &path, icons)?);
+            groups.push(scan_group(&path)?);
         } else if is_markdown(&path) {
             sheets.push(sheet_from_path(&path));
         }
@@ -315,11 +336,9 @@ fn scan_section(
     Ok(entries)
 }
 
-fn scan_group(
-    root: &Path,
-    dir: &Path,
-    icons: &HashMap<String, String>,
-) -> io::Result<Group> {
+fn scan_group(dir: &Path) -> io::Result<Group> {
+    let meta = read_group_meta(dir);
+
     let mut sheets = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
@@ -327,43 +346,38 @@ fn scan_group(
             sheets.push(sheet_from_path(&path));
         }
     }
+
+    // 메타에 나열된 파일을 그 순서대로 앞에 두고, 나머지는 이름순으로 뒤에 붙인다.
     sheets.sort_by_key(|sheet| sheet.title.to_lowercase());
+    if !meta.sheets.is_empty() {
+        let mut ordered = Vec::with_capacity(sheets.len());
+        for name in &meta.sheets {
+            if let Some(index) = sheets
+                .iter()
+                .position(|sheet| sheet_file_name(sheet) == *name)
+            {
+                ordered.push(sheets.remove(index));
+            }
+        }
+        ordered.append(&mut sheets);
+        sheets = ordered;
+    }
+
     Ok(Group {
-        name: file_name(dir),
+        name: meta.title.unwrap_or_else(|| file_name(dir)),
         path: dir.to_path_buf(),
-        icon: icons.get(&relative_key(root, dir)).cloned(),
+        icon: meta.icon,
         sheets,
     })
 }
 
-/// 라이브러리 루트 기준 상대 경로를 `/` 구분자 키로 만든다.
-fn relative_key(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-/// `.writer/library.toml` 의 `[nodes]` 아이콘 매핑(키: 상대 경로)을 읽는다.
-fn load_node_icons(root: &Path) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    let text = match std::fs::read_to_string(root.join(MARKER_DIR).join(MARKER_FILE)) {
-        Ok(text) => text,
-        Err(_) => return map,
-    };
-    let table: toml::Table = match toml::from_str(&text) {
-        Ok(table) => table,
-        Err(_) => return map,
-    };
-    let Some(nodes) = table.get("nodes").and_then(|value| value.as_table()) else {
-        return map;
-    };
-    for (key, value) in nodes {
-        if let Some(icon) = value.get("icon").and_then(|value| value.as_str()) {
-            map.insert(key.clone(), icon.to_string());
-        }
-    }
-    map
+/// 시트의 파일명(확장자 포함).
+fn sheet_file_name(sheet: &Sheet) -> String {
+    sheet
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn sheet_from_path(path: &Path) -> Sheet {
@@ -474,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_reads_icon_from_library_toml() {
+    fn scan_reads_group_icon_from_meta() {
         let root = temp_dir("icon");
         initialize(&root).unwrap();
 
@@ -493,6 +507,42 @@ mod tests {
             })
             .expect("Inbox 그룹이 있어야 한다");
         assert_eq!(inbox.icon.as_deref(), Some("inbox"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scan_applies_group_meta_sheet_order() {
+        let root = temp_dir("order");
+        initialize(&root).unwrap();
+
+        let inbox = root.join("Notes").join(DEFAULT_INBOX);
+        std::fs::write(inbox.join("a.md"), "a").unwrap();
+        std::fs::write(inbox.join("b.md"), "b").unwrap();
+        std::fs::write(inbox.join("c.md"), "c").unwrap();
+        // 메타 순서: c, a (b는 미나열 -> 뒤에 이름순)
+        std::fs::write(
+            inbox.join(GROUP_META_FILE),
+            "icon = \"inbox\"\nsheets = [\"c.md\", \"a.md\"]\n",
+        )
+        .unwrap();
+
+        let library = scan(&root).unwrap();
+        let notes = library
+            .sections
+            .iter()
+            .find(|section| section.kind == SectionKind::Notes)
+            .unwrap();
+        let group = notes
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                Entry::Group(group) if group.name == DEFAULT_INBOX => Some(group),
+                _ => None,
+            })
+            .unwrap();
+        let titles: Vec<_> = group.sheets.iter().map(|sheet| sheet.title.clone()).collect();
+        assert_eq!(titles, vec!["c", "a", "b"]);
 
         std::fs::remove_dir_all(&root).ok();
     }
