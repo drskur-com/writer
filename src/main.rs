@@ -111,21 +111,11 @@ fn install_menus(cx: &mut App) {
     GlobalState::global_mut(cx).set_app_menus(owned);
 }
 
-// --- 사이드바 렌더 헬퍼 -----------------------------------------------------
-
-fn sheet_row(title: &str, indent: f32, foreground: Hsla) -> impl IntoElement {
-    div()
-        .pl(px(indent))
-        .pr_2()
-        .py_1()
-        .rounded_md()
-        .flex()
-        .items_center()
-        .gap_2()
-        .text_sm()
-        .text_color(foreground)
-        .child(Icon::new(icons::sheet()).small().text_color(foreground))
-        .child(title.to_string())
+/// 사이드바에서 선택된 항목(섹션 또는 그룹).
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Selection {
+    Section(library::SectionKind),
+    Group(PathBuf),
 }
 
 struct WriterApp {
@@ -135,6 +125,10 @@ struct WriterApp {
     library: Option<library::Library>,
     /// 접힌 최상위 섹션(UI 상태; 추후 registry에 저장).
     collapsed_sections: std::collections::HashSet<library::SectionKind>,
+    /// 사이드바에서 선택한 항목(섹션/그룹). None이면 기본 선택을 쓴다.
+    selected: Option<Selection>,
+    /// 선택한 시트.
+    selected_sheet: Option<PathBuf>,
     /// 온보딩 화면에 표시할 안내/오류 문구.
     notice: Option<SharedString>,
     #[cfg(not(target_os = "macos"))]
@@ -208,6 +202,8 @@ impl WriterApp {
                 );
                 self.library = Some(opened);
                 self.notice = None;
+                self.selected = None;
+                self.selected_sheet = None;
                 cx.notify();
             }
             Err(err) => self.set_notice(format!("라이브러리를 읽을 수 없습니다: {err}"), cx),
@@ -254,6 +250,8 @@ impl WriterApp {
     fn on_close_library(&mut self, _: &CloseLibrary, _: &mut Window, cx: &mut Context<Self>) {
         self.library = None;
         self.notice = None;
+        self.selected = None;
+        self.selected_sheet = None;
         cx.notify();
     }
 
@@ -323,85 +321,71 @@ impl WriterApp {
 
     // --- 렌더 헬퍼 ---------------------------------------------------------
 
-    /// 최상위 섹션 하나를 헤더+항목으로 렌더한다. 헤더 클릭으로 접기/펴기.
-    fn render_section(
-        &self,
-        section: &library::Section,
-        cx: &mut Context<Self>,
-        muted: Hsla,
-        foreground: Hsla,
-    ) -> AnyElement {
-        let kind = section.kind;
-        let collapsed = self.collapsed_sections.contains(&kind);
+    /// 선택 상태에 해당하는 시트 목록.
+    fn sheets_for(&self, selection: &Selection) -> Vec<library::Sheet> {
+        let Some(lib) = &self.library else {
+            return Vec::new();
+        };
+        match selection {
+            Selection::Section(kind) => lib
+                .sections
+                .iter()
+                .find(|section| section.kind == *kind)
+                .map(|section| {
+                    section
+                        .entries
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            library::Entry::Sheet(sheet) => Some(sheet.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Selection::Group(path) => lib
+                .sections
+                .iter()
+                .flat_map(|section| &section.entries)
+                .find_map(|entry| match entry {
+                    library::Entry::Group(group) if &group.path == path => {
+                        Some(group.sheets.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default(),
+        }
+    }
 
-        let mut rows: Vec<AnyElement> = Vec::new();
-        if !collapsed {
+    /// 기본 선택: 첫 그룹, 없으면 첫 섹션.
+    fn effective_selection(&self) -> Option<Selection> {
+        if let Some(selection) = &self.selected {
+            return Some(selection.clone());
+        }
+        let lib = self.library.as_ref()?;
+        for section in &lib.sections {
             for entry in &section.entries {
-                match entry {
-                    library::Entry::Sheet(sheet) => {
-                        rows.push(sheet_row(&sheet.title, 16.0, foreground).into_any_element());
-                    }
-                    library::Entry::Group(group) => {
-                        rows.push(
-                            div()
-                                .pl(px(16.0))
-                                .py_1()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_sm()
-                                .text_color(muted)
-                                .child(
-                                    Icon::new(icons::group_icon(group.icon.as_deref()))
-                                        .small()
-                                        .text_color(muted),
-                                )
-                                .child(group.name.clone())
-                                .into_any_element(),
-                        );
-                        for sheet in &group.sheets {
-                            rows.push(
-                                sheet_row(&sheet.title, 32.0, foreground).into_any_element(),
-                            );
-                        }
-                    }
+                if let library::Entry::Group(group) = entry {
+                    return Some(Selection::Group(group.path.clone()));
                 }
             }
         }
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .mb_2()
-            .child(
-                div()
-                    .id(kind.dir())
-                    .w_full()
-                    .px_2()
-                    .py_1()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .rounded_md()
-                    .text_xs()
-                    .text_color(muted.opacity(0.75))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_section(kind, cx);
-                    }))
-                    .child(kind.title())
-                    .child(
-                        Icon::new(icons::disclosure(collapsed))
-                            .small()
-                            .text_color(muted.opacity(0.75)),
-                    ),
-            )
-            .children(rows)
-            .into_any_element()
+        lib.sections
+            .first()
+            .map(|section| Selection::Section(section.kind))
     }
 
+    /// 선택 항목의 표시 이름.
+    fn selection_label(&self, selection: &Selection) -> String {
+        match selection {
+            Selection::Section(kind) => kind.title().to_string(),
+            Selection::Group(path) => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// 2컴럼 사이드바: [섹션+그룹] | [선택한 그룹의 시트 목록].
     fn render_sidebar(
         &self,
         cx: &mut Context<Self>,
@@ -409,45 +393,188 @@ impl WriterApp {
         foreground: Hsla,
         background: Hsla,
         border: Hsla,
+        selection: Hsla,
     ) -> impl IntoElement {
-        let sections: Vec<AnyElement> = self
-            .library
+        let current = self.effective_selection();
+
+        // ---- 컬럼 1: 섹션 + 그룹 ----
+        let mut tree: Vec<AnyElement> = Vec::new();
+        if let Some(lib) = &self.library {
+            for section in &lib.sections {
+                let kind = section.kind;
+                let collapsed = self.collapsed_sections.contains(&kind);
+
+                tree.push(
+                    div()
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .rounded_md()
+                        .text_xs()
+                        .text_color(muted.opacity(0.75))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("section-label-{}", kind.dir())))
+                                .flex_1()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.selected = Some(Selection::Section(kind));
+                                    this.selected_sheet = None;
+                                    cx.notify();
+                                }))
+                                .child(kind.title()),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("section-chevron-{}", kind.dir())))
+                                .px_1()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_section(kind, cx);
+                                }))
+                                .child(
+                                    Icon::new(icons::disclosure(collapsed))
+                                        .small()
+                                        .text_color(muted.opacity(0.75)),
+                                ),
+                        )
+                        .into_any_element(),
+                );
+
+                if collapsed {
+                    continue;
+                }
+
+                for entry in &section.entries {
+                    let library::Entry::Group(group) = entry else {
+                        continue;
+                    };
+                    let path = group.path.clone();
+                    let is_selected = matches!(
+                        &current,
+                        Some(Selection::Group(selected)) if selected == &path
+                    );
+                    tree.push(
+                        div()
+                            .id(SharedString::from(format!("group-{}", path.display())))
+                            .w_full()
+                            .pl(px(16.0))
+                            .pr_2()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded_md()
+                            .text_sm()
+                            .text_color(foreground)
+                            .when(is_selected, |this| this.bg(selection))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.selected = Some(Selection::Group(path.clone()));
+                                this.selected_sheet = None;
+                                cx.notify();
+                            }))
+                            .child(
+                                Icon::new(icons::group_icon(group.icon.as_deref()))
+                                    .small()
+                                    .text_color(muted),
+                            )
+                            .child(group.name.clone())
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+
+        // ---- 컬럼 2: 시트 목록 ----
+        let list_title = current
             .as_ref()
-            .map(|lib| {
-                lib.sections
-                    .iter()
-                    .map(|section| self.render_section(section, cx, muted, foreground))
-                    .collect()
-            })
-            .unwrap_or_default();
+            .map(|current_selection| self.selection_label(current_selection))
+            .unwrap_or_else(|| "시트".to_string());
+        let mut list: Vec<AnyElement> = Vec::new();
+        if let Some(current_selection) = &current {
+            for sheet in self.sheets_for(current_selection) {
+                let path = sheet.path.clone();
+                let is_selected = self.selected_sheet.as_ref() == Some(&path);
+                list.push(
+                    div()
+                        .id(SharedString::from(format!("sheet-{}", path.display())))
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(foreground)
+                        .when(is_selected, |this| this.bg(selection))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.selected_sheet = Some(path.clone());
+                            cx.notify();
+                        }))
+                        .child(Icon::new(icons::sheet()).small().text_color(muted))
+                        .child(sheet.title.clone())
+                        .into_any_element(),
+                );
+            }
+        }
 
         div()
-            .w(px(220.0))
             .h_full()
-            .p_3()
+            .flex()
             .border_r_1()
             .border_color(border)
             .bg(background)
-            .flex()
-            .flex_col()
             .child(
                 div()
+                    .w(px(200.0))
+                    .h_full()
+                    .p_2()
                     .flex()
-                    .items_center()
-                    .justify_end()
-                    .mb_1()
+                    .flex_col()
+                    .border_r_1()
+                    .border_color(border)
                     .child(
-                        Button::new("toggle-sidebar")
-                            .ghost()
-                            .compact()
-                            .icon(Icon::new(icons::panel()))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.sidebar_visible = false;
-                                cx.notify();
-                            })),
-                    ),
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .mb_1()
+                            .child(
+                                Button::new("toggle-sidebar")
+                                    .ghost()
+                                    .compact()
+                                    .icon(Icon::new(icons::panel()))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.sidebar_visible = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .children(tree),
             )
-            .children(sections)
+            .child(
+                div()
+                    .w(px(220.0))
+                    .h_full()
+                    .p_2()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .px_2()
+                            .pb_2()
+                            .text_xs()
+                            .text_color(muted.opacity(0.75))
+                            .child(list_title),
+                    )
+                    .children(list),
+            )
     }
 
     fn render_workspace(
@@ -457,6 +584,7 @@ impl WriterApp {
         foreground: Hsla,
         sidebar_background: Hsla,
         border: Hsla,
+        selection: Hsla,
         panel_background: Hsla,
     ) -> impl IntoElement {
         let root_label = self
@@ -476,6 +604,7 @@ impl WriterApp {
                     foreground,
                     sidebar_background,
                     border,
+                    selection,
                 ))
             })
             .child(
@@ -557,6 +686,7 @@ impl Render for WriterApp {
         let foreground = theme.foreground;
         let border = theme.border;
         let muted_foreground = theme.muted_foreground;
+        let selection_color = theme.selection;
         let sidebar_background = theme.sidebar;
         let panel_background = theme.popover;
         let status_background = theme.status_bar;
@@ -601,6 +731,7 @@ impl Render for WriterApp {
                     foreground,
                     sidebar_background,
                     border,
+                    selection_color,
                     panel_background,
                 )
                 .into_any_element()
@@ -753,6 +884,8 @@ fn main() {
                     library,
                     notice,
                     collapsed_sections: std::collections::HashSet::new(),
+                    selected: None,
+                    selected_sheet: None,
                     #[cfg(not(target_os = "macos"))]
                     menu_bar: AppMenuBar::new(_cx),
                 })
