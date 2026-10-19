@@ -1,7 +1,9 @@
 use gpui_kit::component::button::*;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::*;
-use gpui_kit::gpui::prelude::FluentBuilder;
+use gpui_kit::gpui::prelude::{
+    FluentBuilder, InteractiveElement as _, StatefulInteractiveElement as _,
+};
 use gpui_kit::gpui::*;
 use std::path::PathBuf;
 
@@ -126,65 +128,13 @@ fn sheet_row(title: &str, indent: f32, foreground: Hsla) -> impl IntoElement {
         .child(title.to_string())
 }
 
-fn render_section(section: &library::Section, muted: Hsla, foreground: Hsla) -> AnyElement {
-    let mut rows: Vec<AnyElement> = Vec::new();
-    for entry in &section.entries {
-        match entry {
-            library::Entry::Sheet(sheet) => {
-                rows.push(sheet_row(&sheet.title, 8.0, foreground).into_any_element());
-            }
-            library::Entry::Group(group) => {
-                rows.push(
-                    div()
-                        .pl(px(8.0))
-                        .py_1()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_sm()
-                        .text_color(muted)
-                        .child(Icon::new(icons::group()).small().text_color(muted))
-                        .child(group.name.clone())
-                        .into_any_element(),
-                );
-                for sheet in &group.sheets {
-                    rows.push(sheet_row(&sheet.title, 24.0, foreground).into_any_element());
-                }
-            }
-        }
-    }
-
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .mb_2()
-        .child(
-            div()
-                .px_2()
-                .py_1()
-                .flex()
-                .items_center()
-                .gap_2()
-                .text_xs()
-                .font_semibold()
-                .text_color(muted)
-                .child(
-                    Icon::new(icons::section(section.kind))
-                        .small()
-                        .text_color(muted),
-                )
-                .child(section.kind.title()),
-        )
-        .children(rows)
-        .into_any_element()
-}
-
 struct WriterApp {
     status_text: String,
     sidebar_visible: bool,
     preview_visible: bool,
     library: Option<library::Library>,
+    /// 접힌 최상위 섹션(UI 상태; 추후 registry에 저장).
+    collapsed_sections: std::collections::HashSet<library::SectionKind>,
     /// 온보딩 화면에 표시할 안내/오류 문구.
     notice: Option<SharedString>,
     #[cfg(not(target_os = "macos"))]
@@ -245,7 +195,7 @@ impl WriterApp {
 
     /// 라이브러리를 현재 라이브러리로 채택하고 설정에 저장한다.
     fn adopt(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        match library::scan(&root) {
+        match library::open(&root) {
             Ok(opened) => {
                 let mut config = config::Config::load();
                 config.set_library(opened.root.clone());
@@ -325,6 +275,15 @@ impl WriterApp {
         cx.notify();
     }
 
+    /// 최상위 섹션을 접거나 편다.
+    fn toggle_section(&mut self, kind: library::SectionKind, cx: &mut Context<Self>) {
+        // remove()가 true면 펼치기(이미 접힘), false면 접기.
+        if !self.collapsed_sections.remove(&kind) {
+            self.collapsed_sections.insert(kind);
+        }
+        cx.notify();
+    }
+
     fn on_toggle_preview(&mut self, _: &TogglePreview, _: &mut Window, cx: &mut Context<Self>) {
         self.preview_visible = !self.preview_visible;
         cx.notify();
@@ -364,8 +323,88 @@ impl WriterApp {
 
     // --- 렌더 헬퍼 ---------------------------------------------------------
 
+    /// 최상위 섹션 하나를 헤더+항목으로 렌더한다. 헤더 클릭으로 접기/펴기.
+    fn render_section(
+        &self,
+        section: &library::Section,
+        cx: &mut Context<Self>,
+        muted: Hsla,
+        foreground: Hsla,
+    ) -> AnyElement {
+        let kind = section.kind;
+        let collapsed = self.collapsed_sections.contains(&kind);
+
+        let mut rows: Vec<AnyElement> = Vec::new();
+        if !collapsed {
+            for entry in &section.entries {
+                match entry {
+                    library::Entry::Sheet(sheet) => {
+                        rows.push(sheet_row(&sheet.title, 16.0, foreground).into_any_element());
+                    }
+                    library::Entry::Group(group) => {
+                        rows.push(
+                            div()
+                                .pl(px(16.0))
+                                .py_1()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(
+                                    Icon::new(icons::group_icon(group.icon.as_deref()))
+                                        .small()
+                                        .text_color(muted),
+                                )
+                                .child(group.name.clone())
+                                .into_any_element(),
+                        );
+                        for sheet in &group.sheets {
+                            rows.push(
+                                sheet_row(&sheet.title, 32.0, foreground).into_any_element(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .mb_2()
+            .child(
+                div()
+                    .id(kind.dir())
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(muted.opacity(0.75))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_section(kind, cx);
+                    }))
+                    .child(kind.title())
+                    .child(
+                        Icon::new(icons::disclosure(collapsed))
+                            .small()
+                            .text_color(muted.opacity(0.75)),
+                    ),
+            )
+            .children(rows)
+            .into_any_element()
+    }
+
     fn render_sidebar(
         &self,
+        cx: &mut Context<Self>,
         muted: Hsla,
         foreground: Hsla,
         background: Hsla,
@@ -377,7 +416,7 @@ impl WriterApp {
             .map(|lib| {
                 lib.sections
                     .iter()
-                    .map(|section| render_section(section, muted, foreground))
+                    .map(|section| self.render_section(section, cx, muted, foreground))
                     .collect()
             })
             .unwrap_or_default();
@@ -389,19 +428,31 @@ impl WriterApp {
             .border_r_1()
             .border_color(border)
             .bg(background)
+            .flex()
+            .flex_col()
             .child(
                 div()
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(muted)
-                    .mb_2()
-                    .child("LIBRARY"),
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .mb_1()
+                    .child(
+                        Button::new("toggle-sidebar")
+                            .ghost()
+                            .compact()
+                            .icon(Icon::new(icons::panel()))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sidebar_visible = false;
+                                cx.notify();
+                            })),
+                    ),
             )
             .children(sections)
     }
 
     fn render_workspace(
         &self,
+        cx: &mut Context<Self>,
         muted: Hsla,
         foreground: Hsla,
         sidebar_background: Hsla,
@@ -420,6 +471,7 @@ impl WriterApp {
             .size_full()
             .when(self.sidebar_visible, |this| {
                 this.child(self.render_sidebar(
+                    cx,
                     muted,
                     foreground,
                     sidebar_background,
@@ -434,6 +486,20 @@ impl WriterApp {
                     .flex()
                     .flex_col()
                     .bg(panel_background)
+                    .when(!self.sidebar_visible, |this| {
+                        this.child(
+                            div().mb_3().child(
+                                Button::new("show-sidebar")
+                                    .ghost()
+                                    .compact()
+                                    .icon(Icon::new(icons::panel()))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.sidebar_visible = true;
+                                        cx.notify();
+                                    })),
+                            ),
+                        )
+                    })
                     .child(
                         div()
                             .text_xl()
@@ -530,6 +596,7 @@ impl Render for WriterApp {
         let body: AnyElement =
             if self.library.is_some() {
                 self.render_workspace(
+                    cx,
                     muted_foreground,
                     foreground,
                     sidebar_background,
@@ -643,7 +710,7 @@ fn main() {
             let library = config
                 .library_root
                 .as_deref()
-                .and_then(|root| library::scan(root).ok());
+                .and_then(|root| library::open(root).ok());
             let notice = if config.library_root.is_some() && library.is_none() {
                 Some(SharedString::from(
                     "저장된 라이브러리를 열 수 없습니다. 폴더를 다시 선택하세요.",
@@ -685,6 +752,7 @@ fn main() {
                     preview_visible: false,
                     library,
                     notice,
+                    collapsed_sections: std::collections::HashSet::new(),
                     #[cfg(not(target_os = "macos"))]
                     menu_bar: AppMenuBar::new(_cx),
                 })

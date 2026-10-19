@@ -6,26 +6,41 @@
 
 use gpui_kit::assets::IconName;
 
-use crate::library::SectionKind;
-
 /// 사용 중인 아이콘 팩 이름 (설정/About 표기용).
 pub const PACK: &str = "Lucide";
 
-/// 라이브러리 섹션 아이콘.
-pub fn section(kind: SectionKind) -> IconName {
-    match kind {
-        SectionKind::Inbox => IconName::Inbox,
-        SectionKind::Notes => IconName::NotebookPen,
-        SectionKind::Projects => IconName::BookOpen,
+/// 문자열 아이콘 이름을 [`IconName`] 으로 해석한다. 모르면 폴더.
+pub fn by_name(name: &str) -> IconName {
+    match name {
+        "inbox" => IconName::Inbox,
+        "notebook" => IconName::NotebookPen,
+        "book" => IconName::BookOpen,
+        "file" => IconName::FileText,
+        "folder" => IconName::Folder,
+        _ => IconName::Folder,
     }
 }
 
-/// 프로젝트 그룹(폴더) 아이콘.
-pub fn group() -> IconName {
-    IconName::Folder
+/// 그룹 아이콘: 메타 이름이 있으면 그걸, 없으면 기본 폴더.
+pub fn group_icon(name: Option<&str>) -> IconName {
+    name.map(by_name).unwrap_or(IconName::Folder)
+}
+
+/// 사이드바 토글 아이콘(패널).
+pub fn panel() -> IconName {
+    IconName::PanelLeft
 }
 
 /// 시트(문서) 아이콘.
 pub fn sheet() -> IconName {
     IconName::FileText
+}
+
+/// 섹션 접기/펴기(disclosure) 아이콘.
+pub fn disclosure(collapsed: bool) -> IconName {
+    if collapsed {
+        IconName::ChevronRight
+    } else {
+        IconName::ChevronDown
+    }
 }

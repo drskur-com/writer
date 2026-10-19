@@ -9,6 +9,7 @@
 //! └─ Projects/<Project>/<Group>/<Sheet>.md
 //! ```
 
+use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -18,20 +19,20 @@ pub const MARKER_DIR: &str = ".writer";
 pub const MARKER_FILE: &str = "library.toml";
 
 /// 고정 섹션 순서.
-pub const SECTIONS: [SectionKind; 3] = [
-    SectionKind::Inbox,
-    SectionKind::Notes,
-    SectionKind::Projects,
-];
+pub const SECTIONS: [SectionKind; 2] = [SectionKind::Notes, SectionKind::Projects];
+
+/// 메모 아래 기본 그룹 이름.
+pub const DEFAULT_INBOX: &str = "Inbox";
+
+/// 프로젝트 아래 기본(샘플) 그룹 이름.
+pub const DEFAULT_PROJECT: &str = "샘플 프로젝트";
 
 /// 라이브러리 최상위 섹션.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum SectionKind {
-    /// 빠른 캡처용 임시 시트.
-    Inbox,
-    /// 메모(평평, 최신순).
+    /// 메모(그룹 가능, 시트는 최근 수정순).
     Notes,
-    /// 프로젝트(그룹 중첩, 수동 순서).
+    /// 프로젝트(그룹, 시트는 이름순).
     Projects,
 }
 
@@ -39,7 +40,6 @@ impl SectionKind {
     /// 물리 디렉터리 이름.
     pub fn dir(self) -> &'static str {
         match self {
-            SectionKind::Inbox => "Inbox",
             SectionKind::Notes => "Notes",
             SectionKind::Projects => "Projects",
         }
@@ -48,9 +48,8 @@ impl SectionKind {
     /// 화면 표시 이름.
     pub fn title(self) -> &'static str {
         match self {
-            SectionKind::Inbox => "Inbox",
-            SectionKind::Notes => "Notes",
-            SectionKind::Projects => "Projects",
+            SectionKind::Notes => "메모",
+            SectionKind::Projects => "프로젝트",
         }
     }
 }
@@ -94,6 +93,8 @@ pub struct Group {
     /// 그룹 디렉터리 경로 (CRUD는 후속 단계에서 사용).
     #[allow(dead_code)]
     pub path: PathBuf,
+    /// `library.toml` 에 지정된 아이콘 이름(없으면 기본).
+    pub icon: Option<String>,
     pub sheets: Vec<Sheet>,
 }
 
@@ -180,21 +181,99 @@ pub fn inspect(path: &Path) -> Result<FolderKind, InspectError> {
 /// 반쪽 라이브러리를 피하려고 마커 파일을 마지막에 쓴다.
 pub fn initialize(root: &Path) -> io::Result<()> {
     std::fs::create_dir_all(root)?;
+    ensure_layout(root)?;
+    write_default_meta(root)
+}
+
+/// 라이브러리 레이아웃을 최신 상태로 보장한다(멱등).
+///
+/// - `Notes/`·`Projects/` 폴더를 보장한다.
+/// - 구버전 최상위 `Inbox/` 를 `Notes/Inbox/` 로 이관한다.
+/// - `Projects/` 가 비어 있으면 `샘플 프로젝트/` 를 만든다.
+pub fn ensure_layout(root: &Path) -> io::Result<()> {
     for kind in SECTIONS {
         std::fs::create_dir_all(root.join(kind.dir()))?;
     }
-    let meta_dir = root.join(MARKER_DIR);
-    std::fs::create_dir_all(&meta_dir)?;
-    std::fs::write(meta_dir.join(MARKER_FILE), "schema_version = 1\n")
+
+    // 구버전 최상위 Inbox -> Notes/Inbox 이관
+    let legacy_inbox = root.join("Inbox");
+    let notes_inbox = root.join(SectionKind::Notes.dir()).join(DEFAULT_INBOX);
+    if legacy_inbox.is_dir() {
+        std::fs::create_dir_all(&notes_inbox)?;
+        for entry in std::fs::read_dir(&legacy_inbox)? {
+            let entry = entry?;
+            let dest = notes_inbox.join(entry.file_name());
+            if !dest.exists() {
+                std::fs::rename(entry.path(), &dest)?;
+            }
+        }
+        let _ = std::fs::remove_dir(&legacy_inbox);
+    }
+    std::fs::create_dir_all(&notes_inbox)?;
+
+    // 프로젝트가 하나도 없으면 샘플 생성
+    let projects_dir = root.join(SectionKind::Projects.dir());
+    if is_empty_dir(&projects_dir)? {
+        std::fs::create_dir_all(projects_dir.join(DEFAULT_PROJECT))?;
+    }
+
+    Ok(())
+}
+
+fn is_empty_dir(dir: &Path) -> io::Result<bool> {
+    if !dir.is_dir() {
+        return Ok(true);
+    }
+    Ok(std::fs::read_dir(dir)?.next().is_none())
+}
+
+/// 레이아웃과 기본 메타를 보장한 뒤 라이브러리를 스캔한다.
+pub fn open(root: &Path) -> io::Result<Library> {
+    ensure_layout(root)?;
+    write_default_meta(root)?;
+    scan(root)
+}
+
+/// `.writer/library.toml` 마커를 보장하고 기본 노드 메타를 채운다(멱등).
+///
+/// 기존 파일이 있으면 보존하며 필요한 키만 추가한다.
+fn write_default_meta(root: &Path) -> io::Result<()> {
+    let dir = root.join(MARKER_DIR);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(MARKER_FILE);
+
+    let mut table: toml::Table = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| toml::from_str(&text).ok())
+        .unwrap_or_default();
+    if !table.contains_key("schema_version") {
+        table.insert("schema_version".to_string(), toml::Value::Integer(1));
+    }
+    if !table.contains_key("nodes") {
+        table.insert("nodes".to_string(), toml::Value::Table(toml::Table::new()));
+    }
+    if let Some(nodes) = table.get_mut("nodes").and_then(|value| value.as_table_mut()) {
+        let inbox_key = format!("{}/{}", SectionKind::Notes.dir(), DEFAULT_INBOX);
+        if !nodes.contains_key(&inbox_key) {
+            let mut entry = toml::Table::new();
+            entry.insert("icon".to_string(), toml::Value::String("inbox".to_string()));
+            nodes.insert(inbox_key, toml::Value::Table(entry));
+        }
+    }
+
+    let text = toml::to_string_pretty(&table)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    std::fs::write(path, text)
 }
 
 /// 라이브러리를 스캔해 모델로 읽는다.
 pub fn scan(root: &Path) -> io::Result<Library> {
+    let icons = load_node_icons(root);
     let mut sections = Vec::with_capacity(SECTIONS.len());
     for kind in SECTIONS {
         sections.push(Section {
             kind,
-            entries: scan_section(&root.join(kind.dir()), kind)?,
+            entries: scan_section(root, &root.join(kind.dir()), kind, &icons)?,
         });
     }
     Ok(Library {
@@ -203,7 +282,12 @@ pub fn scan(root: &Path) -> io::Result<Library> {
     })
 }
 
-fn scan_section(dir: &Path, kind: SectionKind) -> io::Result<Vec<Entry>> {
+fn scan_section(
+    root: &Path,
+    dir: &Path,
+    kind: SectionKind,
+    icons: &HashMap<String, String>,
+) -> io::Result<Vec<Entry>> {
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -214,32 +298,28 @@ fn scan_section(dir: &Path, kind: SectionKind) -> io::Result<Vec<Entry>> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if path.is_dir() {
-            if kind == SectionKind::Projects {
-                groups.push(scan_group(&path)?);
-            }
+            groups.push(scan_group(root, &path, icons)?);
         } else if is_markdown(&path) {
             sheets.push(sheet_from_path(&path));
         }
     }
 
+    // 그룹을 먼저(이름순), 그 뒤 시트.
+    groups.sort_by_key(|group| group.name.to_lowercase());
     match kind {
-        // 프로젝트: 그룹을 먼저, 각각 이름순. 시트도 이름순.
-        SectionKind::Projects => {
-            sheets.sort_by_key(|sheet| sheet.title.to_lowercase());
-            groups.sort_by_key(|group| group.name.to_lowercase());
-            let mut entries: Vec<Entry> = groups.into_iter().map(Entry::Group).collect();
-            entries.extend(sheets.into_iter().map(Entry::Sheet));
-            Ok(entries)
-        }
-        // 메모/인박스: 최근 수정순.
-        _ => {
-            sheets.sort_by_key(|sheet| std::cmp::Reverse(sheet.modified));
-            Ok(sheets.into_iter().map(Entry::Sheet).collect())
-        }
+        SectionKind::Projects => sheets.sort_by_key(|sheet| sheet.title.to_lowercase()),
+        SectionKind::Notes => sheets.sort_by_key(|sheet| std::cmp::Reverse(sheet.modified)),
     }
+    let mut entries: Vec<Entry> = groups.into_iter().map(Entry::Group).collect();
+    entries.extend(sheets.into_iter().map(Entry::Sheet));
+    Ok(entries)
 }
 
-fn scan_group(dir: &Path) -> io::Result<Group> {
+fn scan_group(
+    root: &Path,
+    dir: &Path,
+    icons: &HashMap<String, String>,
+) -> io::Result<Group> {
     let mut sheets = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
@@ -251,8 +331,39 @@ fn scan_group(dir: &Path) -> io::Result<Group> {
     Ok(Group {
         name: file_name(dir),
         path: dir.to_path_buf(),
+        icon: icons.get(&relative_key(root, dir)).cloned(),
         sheets,
     })
+}
+
+/// 라이브러리 루트 기준 상대 경로를 `/` 구분자 키로 만든다.
+fn relative_key(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// `.writer/library.toml` 의 `[nodes]` 아이콘 매핑(키: 상대 경로)을 읽는다.
+fn load_node_icons(root: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let text = match std::fs::read_to_string(root.join(MARKER_DIR).join(MARKER_FILE)) {
+        Ok(text) => text,
+        Err(_) => return map,
+    };
+    let table: toml::Table = match toml::from_str(&text) {
+        Ok(table) => table,
+        Err(_) => return map,
+    };
+    let Some(nodes) = table.get("nodes").and_then(|value| value.as_table()) else {
+        return map;
+    };
+    for (key, value) in nodes {
+        if let Some(icon) = value.get("icon").and_then(|value| value.as_str()) {
+            map.insert(key.clone(), icon.to_string());
+        }
+    }
+    map
 }
 
 fn sheet_from_path(path: &Path) -> Sheet {
@@ -318,7 +429,27 @@ mod tests {
         for kind in SECTIONS {
             assert!(root.join(kind.dir()).is_dir(), "{:?}", kind);
         }
+        assert!(root.join("Notes").join(DEFAULT_INBOX).is_dir());
+        assert!(root.join("Projects").join(DEFAULT_PROJECT).is_dir());
         assert_eq!(inspect(&root).unwrap(), FolderKind::Library);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn ensure_layout_migrates_legacy_inbox() {
+        let root = temp_dir("migrate");
+        initialize(&root).unwrap();
+
+        // 구버전 형태로 되돌린다: Notes/Inbox 를 없애고 최상위 Inbox 를 만든다.
+        std::fs::remove_dir_all(root.join("Notes").join(DEFAULT_INBOX)).unwrap();
+        std::fs::create_dir_all(root.join("Inbox")).unwrap();
+        std::fs::write(root.join("Inbox").join("note.md"), "n").unwrap();
+
+        ensure_layout(&root).unwrap();
+
+        assert!(root.join("Notes").join(DEFAULT_INBOX).join("note.md").is_file());
+        assert!(!root.join("Inbox").exists());
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -330,7 +461,7 @@ mod tests {
 
         // 라이브러리 내부의 폴더는 Nested
         assert_eq!(
-            inspect(&root.join("Inbox")).unwrap_err(),
+            inspect(&root.join("Notes")).unwrap_err(),
             InspectError::Nested
         );
 
@@ -340,6 +471,30 @@ mod tests {
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn scan_reads_icon_from_library_toml() {
+        let root = temp_dir("icon");
+        initialize(&root).unwrap();
+
+        let library = scan(&root).unwrap();
+        let notes = library
+            .sections
+            .iter()
+            .find(|section| section.kind == SectionKind::Notes)
+            .unwrap();
+        let inbox = notes
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                Entry::Group(group) if group.name == DEFAULT_INBOX => Some(group),
+                _ => None,
+            })
+            .expect("Inbox 그룹이 있어야 한다");
+        assert_eq!(inbox.icon.as_deref(), Some("inbox"));
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -380,13 +535,17 @@ mod tests {
             .iter()
             .find(|section| section.kind == SectionKind::Projects)
             .unwrap();
-        assert!(
-            matches!(projects.entries.first(), Some(Entry::Group(group)) if group.name == "Novel")
-        );
-        if let Some(Entry::Group(group)) = projects.entries.first() {
-            let titles: Vec<_> = group.sheets.iter().map(|s| s.title.clone()).collect();
-            assert_eq!(titles, vec!["01", "02"]);
-        }
+        // 샘플 프로젝트가 함께 있으므로 이름으로 찾는다.
+        let novel = projects
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                Entry::Group(group) if group.name == "Novel" => Some(group),
+                _ => None,
+            })
+            .expect("Novel 그룹이 있어야 한다");
+        let titles: Vec<_> = novel.sheets.iter().map(|s| s.title.clone()).collect();
+        assert_eq!(titles, vec!["01", "02"]);
 
         std::fs::remove_dir_all(&root).ok();
     }
