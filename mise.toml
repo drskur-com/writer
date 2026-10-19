@@ -13,7 +13,7 @@ run = "cargo run"
 
 [tasks.watch]
 description = "코드 변경 시 자동 실행"
-run = "cargo watch -x run -q"
+run = "cargo watch -w src -x run --poll"
 
 [tasks.build-fast]
 description = "빠른 증분 빌드"
