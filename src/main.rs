@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use gpui_kit::component::menu::AppMenuBar;
 
 mod config;
+mod icons;
 mod library;
 mod theme;
 
@@ -116,8 +117,12 @@ fn sheet_row(title: &str, indent: f32, foreground: Hsla) -> impl IntoElement {
         .pr_2()
         .py_1()
         .rounded_md()
+        .flex()
+        .items_center()
+        .gap_2()
         .text_sm()
         .text_color(foreground)
+        .child(Icon::new(icons::sheet()).small().text_color(foreground))
         .child(title.to_string())
 }
 
@@ -133,9 +138,13 @@ fn render_section(section: &library::Section, muted: Hsla, foreground: Hsla) -> 
                     div()
                         .pl(px(8.0))
                         .py_1()
+                        .flex()
+                        .items_center()
+                        .gap_2()
                         .text_sm()
                         .text_color(muted)
-                        .child(format!("📁 {}", group.name))
+                        .child(Icon::new(icons::group()).small().text_color(muted))
+                        .child(group.name.clone())
                         .into_any_element(),
                 );
                 for sheet in &group.sheets {
@@ -154,10 +163,18 @@ fn render_section(section: &library::Section, muted: Hsla, foreground: Hsla) -> 
             div()
                 .px_2()
                 .py_1()
+                .flex()
+                .items_center()
+                .gap_2()
                 .text_xs()
                 .font_semibold()
                 .text_color(muted)
-                .child(format!("{} {}", section.kind.icon(), section.kind.title())),
+                .child(
+                    Icon::new(icons::section(section.kind))
+                        .small()
+                        .text_color(muted),
+                )
+                .child(section.kind.title()),
         )
         .children(rows)
         .into_any_element()
@@ -296,7 +313,11 @@ impl WriterApp {
     }
 
     fn on_show_about(&mut self, _: &ShowAbout, window: &mut Window, cx: &mut Context<Self>) {
-        self.notify(format!("{APP_NAME} v0.1.0"), window, cx);
+        self.notify(
+            format!("{APP_NAME} v0.1.0 · 아이콘: {}", icons::PACK),
+            window,
+            cx,
+        );
     }
 
     fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -596,7 +617,7 @@ impl Render for WriterApp {
 
 fn main() {
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(gpui_kit::assets::AllAssets)
         .run(|cx| {
             gpui_kit::init(cx);
 

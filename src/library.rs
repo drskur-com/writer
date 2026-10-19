@@ -53,15 +53,6 @@ impl SectionKind {
             SectionKind::Projects => "Projects",
         }
     }
-
-    /// 화면 표시 아이콘.
-    pub fn icon(self) -> &'static str {
-        match self {
-            SectionKind::Inbox => "📥",
-            SectionKind::Notes => "📝",
-            SectionKind::Projects => "📚",
-        }
-    }
 }
 
 /// 열린 라이브러리.
