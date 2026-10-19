@@ -1,0 +1,25 @@
+[tools]
+rust = "latest"
+sccache = "latest"
+"cargo:cargo-watch" = "latest"
+
+[tasks.check]
+description = "빠른 타입 체크 (컴파일 X)"
+run = "cargo check"
+
+[tasks.dev]
+description = "개발 모드 실행"
+run = "cargo run"
+
+[tasks.watch]
+description = "코드 변경 시 자동 실행"
+run = "cargo watch -x run -q"
+
+[tasks.build-fast]
+description = "빠른 증분 빌드"
+env = { CARGO_INCREMENTAL = "1" }
+run = "cargo build"
+
+[tasks.clean-cache]
+description = "sccache 통계 확인"
+run = "sccache --show-stats"
