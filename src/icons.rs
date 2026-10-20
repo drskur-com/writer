@@ -52,6 +52,42 @@ pub fn edit() -> IconName {
     IconName::Pencil
 }
 
+/// 책 정보(프로젝트 더 보기 메뉴).
+pub fn book_info() -> IconName {
+    IconName::BookText
+}
+
+/// 이미지(표지 미리보기 자리).
+pub fn image() -> IconName {
+    IconName::Image
+}
+
+/// 파일 그룹의 파일 종류.
+pub fn file_kind(kind: crate::library::FileKind) -> IconName {
+    use crate::library::FileKind;
+    match kind {
+        FileKind::Image => IconName::FileImage,
+        FileKind::Text => IconName::FileText,
+        FileKind::Pdf => IconName::FileText,
+        FileKind::Other => IconName::File,
+    }
+}
+
+/// 기본 앱으로 열기(파일 뷰어 툴바).
+pub fn open_external() -> IconName {
+    IconName::SquareArrowOutUpRight
+}
+
+/// Finder에서 보기(파일 뷰어 툴바).
+pub fn reveal() -> IconName {
+    IconName::FolderSearch
+}
+
+/// 파일 정보(파일 뷰어 툴바).
+pub fn info() -> IconName {
+    IconName::Info
+}
+
 /// 휴지통으로 이동(프로젝트 우클릭 메뉴).
 pub fn trash() -> IconName {
     IconName::Trash
@@ -93,11 +129,6 @@ pub fn all_sheets() -> IconName {
 /// 프로젝트 화면 → 라이브러리로 돌아가기.
 pub fn back_to_library() -> IconName {
     IconName::ChevronsLeft
-}
-
-/// 프로젝트 통계.
-pub fn stats() -> IconName {
-    IconName::ChartLine
 }
 
 /// 프로젝트 빌드(PDF/ePub).

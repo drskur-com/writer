@@ -10,14 +10,19 @@
 //!    ├─ <Sheet>.md
 //!    ├─ <Group>/…                  # 원고 그룹(하위 그룹 가능, 빌드 대상)
 //!    └─ Extras/<Group>/…           # 추가자료(빌드에서 빠짐)
+//!       └─ Attachments/…         # 첨부파일: cover.<확장자>, <ULID>.<확장자>
 //! ```
 
+mod book;
 mod document;
+mod files;
 mod layout;
 mod meta;
 mod preview;
 
+pub use book::{BookMeta, COVER_EXTENSIONS, COVER_STEM, read_book, set_cover, write_book};
 pub use document::{count_words, read_sheet, write_sheet};
+pub use files::{FileItem, FileKind, GroupKind, format_size, move_file};
 pub use layout::{FolderKind, initialize, inspect};
 pub use meta::{
     create_group, create_project, create_sheet, move_sheet, move_to_trash, set_sort,
@@ -49,6 +54,9 @@ pub const EXTRAS_DIR: &str = "Extras";
 
 /// 새 프로젝트의 기본 추가자료 그룹.
 pub const TEMPLATES_GROUP: &str = "Templates";
+
+/// 첨부파일(표지 등) 추가자료 그룹. 처음 첨부할 때 만든다.
+pub const ATTACHMENTS_GROUP: &str = "Attachments";
 
 /// 라이브러리 최상위 섹션.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -185,8 +193,12 @@ pub struct Group {
     pub sort: Option<SortMode>,
     /// 그룹 메타에 지정된 정렬 방향(없으면 정렬 방법의 기본 방향).
     pub descending: Option<bool>,
+    /// 그룹이 담는 것(메타 `kind`). 파일 그룹은 시트 대신 `files`를 읽는다.
+    pub kind: GroupKind,
     /// 시트. 수동 순서(메타 `sheets` → 나머지는 최근 수정순)로 읽는다. 다른 정렬은 화면에서 한다.
     pub sheets: Vec<Sheet>,
+    /// 파일 그룹의 파일(메타 `files` 순서 → 이름순).
+    pub files: Vec<FileItem>,
     /// 하위 그룹(메타 `groups` 순서 → 이름순).
     pub groups: Vec<Group>,
     /// 추가자료 그룹(프로젝트만, `<Project>/Extras/<Group>`). 원고 빌드에서 빠진다.
@@ -331,6 +343,7 @@ fn scan_section(dir: &Path, kind: SectionKind) -> io::Result<Vec<Entry>> {
 /// 그룹 폴더를 하위 그룹까지 읽는다. 프로젝트(`project`)면 안의 `Extras/`를 추가자료로 읽는다.
 fn scan_group(dir: &Path, project: bool) -> io::Result<Group> {
     let meta = read_group_meta(dir);
+    let kind = GroupKind::from_key(meta.kind.as_deref());
 
     let mut sheets = Vec::new();
     let mut groups = Vec::new();
@@ -341,7 +354,7 @@ fn scan_group(dir: &Path, project: bool) -> io::Result<Group> {
             extras = scan_subgroups(&path, &read_group_meta(&path))?;
         } else if is_group_dir(&path) {
             groups.push(scan_group(&path, false)?);
-        } else if path.is_file() && is_markdown(&path) {
+        } else if kind == GroupKind::Sheets && path.is_file() && is_markdown(&path) {
             sheets.push(sheet_from_path(&path));
         }
     }
@@ -350,6 +363,10 @@ fn scan_group(dir: &Path, project: bool) -> io::Result<Group> {
     sort_recent_first(&mut sheets);
     order_by_names(&mut sheets, &meta.sheets, sheet_file_name);
     sort_groups(&mut groups, &meta);
+    let files = match kind {
+        GroupKind::Files => files::scan_files(dir, &meta.files)?,
+        GroupKind::Sheets => Vec::new(),
+    };
 
     Ok(Group {
         name: meta.title.unwrap_or_else(|| file_name(dir)),
@@ -358,7 +375,9 @@ fn scan_group(dir: &Path, project: bool) -> io::Result<Group> {
         color: meta.color,
         sort: meta.sort.as_deref().and_then(SortMode::from_key),
         descending: meta.descending,
+        kind,
         sheets,
+        files,
         groups,
         extras,
     })

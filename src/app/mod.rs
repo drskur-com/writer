@@ -1,6 +1,8 @@
 //! 앱 상태(`WriterApp`)와 액션 핸들러. 화면별 렌더는 하위 모듈에 나눠 둔다.
 
+mod book_info;
 mod editor;
+mod file_view;
 mod library_ops;
 mod library_panel;
 mod new_project;
@@ -64,6 +66,8 @@ pub(crate) struct WriterApp {
     preview_task: Option<Task<()>>,
     /// 에디터에 열린 시트.
     editor: Option<editor::OpenSheet>,
+    /// 에디터 자리 뷰어에 연 파일(파일 그룹). 시트와 동시에 열리지 않는다.
+    open_file: Option<file_view::OpenFile>,
     /// 앱 종료 직전에 열린 시트를 저장하는 구독.
     _quit_subscription: Subscription,
     _prefs_subscription: Subscription,
@@ -106,6 +110,7 @@ impl WriterApp {
             previews: std::collections::HashMap::new(),
             preview_task: None,
             editor: None,
+            open_file: None,
             _quit_subscription: quit_subscription,
             _prefs_subscription: prefs_subscription,
             watcher: None,
@@ -155,6 +160,7 @@ impl WriterApp {
         self.expanded_groups.clear();
         self.selected = None;
         self.selected_sheet = None;
+        self.open_file = None;
         cx.notify();
     }
 
@@ -323,6 +329,31 @@ impl WriterApp {
                 });
                 for (slot, (_, sheet)) in sheets.iter_mut().zip(keyed) {
                     *slot = sheet;
+                }
+            }
+        }
+    }
+
+    /// 파일 그룹의 파일을 정렬 방법·방향대로 늘어놓는다. 수동이면 읽은 순서(메타 `files`) 그대로,
+    /// 제목순은 파일 이름순이다.
+    fn sort_files(&self, files: &mut [library::FileItem], sort: GroupSort) {
+        let directed = |ordering: std::cmp::Ordering| {
+            if sort.descending {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        };
+        match sort.mode {
+            library::SortMode::Manual => {}
+            library::SortMode::Modified => {
+                files.sort_by(|a, b| directed(a.modified.cmp(&b.modified)))
+            }
+            library::SortMode::Created => files.sort_by(|a, b| directed(a.created.cmp(&b.created))),
+            library::SortMode::Title => {
+                files.sort_by_cached_key(|file| file.name().to_lowercase());
+                if sort.descending {
+                    files.reverse();
                 }
             }
         }

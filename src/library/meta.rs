@@ -25,6 +25,10 @@ pub(super) struct GroupMeta {
     pub(super) sort: Option<String>,
     /// 정렬 방향. 없으면 정렬 방법의 기본 방향.
     pub(super) descending: Option<bool>,
+    /// 그룹이 담는 것(`GroupKind::key`). 없으면 시트.
+    pub(super) kind: Option<String>,
+    /// 파일 그룹의 파일 이름 순서. 나열되지 않은 파일은 뒤에 이름순으로 붙는다.
+    pub(super) files: Vec<String>,
 }
 
 /// 그룹 폴더의 `.writer.toml` 을 읽는다. 없거나 깨지면 기본값.
@@ -104,7 +108,7 @@ pub fn set_sort_descending(group: &mut Group, descending: bool) -> io::Result<()
 }
 
 /// 그룹 `.writer.toml`의 `key`(`sheets`·`groups`)를 `order`(이름 목록)로 바꾼다. 다른 키는 그대로 둔다.
-fn write_meta_list(group_dir: &Path, key: &str, order: &[String]) -> io::Result<()> {
+pub(super) fn write_meta_list(group_dir: &Path, key: &str, order: &[String]) -> io::Result<()> {
     let order = order.iter().cloned().map(toml::Value::String).collect();
     write_meta_values(group_dir, [(key, Some(toml::Value::Array(order)))])
 }
@@ -112,7 +116,7 @@ fn write_meta_list(group_dir: &Path, key: &str, order: &[String]) -> io::Result<
 /// 그룹 `.writer.toml`의 키들을 한 번에 바꾼다(`None`이면 지운다). 다른 키는 그대로 둔다.
 ///
 /// 메타 파일이 깨져 있으면 덮어쓰지 않고 오류를 돌려준다. 임시 파일에 쓴 뒤 바꿔치기한다.
-fn write_meta_values<'a>(
+pub(super) fn write_meta_values<'a>(
     group_dir: &Path,
     values: impl IntoIterator<Item = (&'a str, Option<toml::Value>)>,
 ) -> io::Result<()> {
@@ -211,7 +215,7 @@ pub fn create_group(
 }
 
 /// `parent` 바로 아래 그룹 폴더 이름을 화면 순서(메타 `groups` → 이름순)로 돌려준다.
-fn group_order(parent: &Path) -> io::Result<Vec<String>> {
+pub(super) fn group_order(parent: &Path) -> io::Result<Vec<String>> {
     let meta = read_group_meta(parent);
     let mut names = Vec::new();
     for entry in std::fs::read_dir(parent)? {

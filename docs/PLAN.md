@@ -168,13 +168,14 @@ Config    { library_root, recent_libraries, … }                  # <config_dir
 | 위치 | 담는 것 | 성격 |
 | --- | --- | --- |
 | 시트 본문 YAML frontmatter (예정) | 시트 고유 메타: keywords, goal | 사용자 데이터, 시트와 함께 이동 |
-| `<Group>/.writer.toml` | 그룹 메타: icon, title, 시트 순서 | 사용자 데이터, 폴더와 함께 이동·동기화 |
+| `<Group>/.writer.toml` | 그룹 메타: icon, title, 시트 순서. 프로젝트는 `[book]`(책 정보: 제목·지은이·언어·소개·표지·식별자, 내보내기용) | 사용자 데이터, 폴더와 함께 이동·동기화 |
 | `<Library>/.writer/` | 마커, 인덱스, 캐시 | 재생성 가능, 지워도 데이터 손실 없음 |
 
 > 그룹별 `.writer.toml`(커밋 `7ddb9e6`)은 ADR-0003의 "순서 등 파생 데이터는 `.writer/`에" 결정을 바꾼 것으로, ADR-0005에 기록했다.
 
 - **본문 포맷**: 항상 **표준 마크다운**(`md`)으로 유지(다른 앱 호환 및 git 친화).
 - **첨부물**: `시트이름.assets/` 폴더에 저장하고 상대 경로(`![](./시트이름.assets/img.png)`)로 참조.
+  프로젝트 단위 첨부(표지 등)는 추가자료 그룹 `<Project>/Extras/Attachments/`(표시 이름 "첨부파일")에 두고 프로젝트 기준 상대 경로로 참조. 표지는 `cover.<확장자>`로 고정, 나머지는 `<ULID>.<확장자>`.
 - **영역별 UX 특화**:
   - **Notes(메모)**: 최근 수정순 자동 정렬, 빠른 캡처(Inbox), 태그 중심 탐색.
   - **Projects(프로젝트)**: `.writer.toml`의 `sheets` 순서(드래그 정렬이 이 목록을 갱신), 전체 목표 단어 수(Goal), 다중 시트 일괄 병합/내보내기.

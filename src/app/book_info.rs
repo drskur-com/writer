@@ -1,0 +1,365 @@
+//! 책 정보 대화상자: 제목·지은이·언어·소개·표지. 내보내기(ePub·DOCX 등)가 이 값을 쓴다.
+
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogFooter;
+use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::{ActiveTheme as _, FocusableExt as _, Icon, WindowExt as _};
+use gpui_kit::gpui::prelude::FluentBuilder as _;
+use gpui_kit::gpui::*;
+use std::cell::Cell;
+use std::path::{Path, PathBuf};
+
+use super::WriterApp;
+use super::new_project::form_row;
+use super::style::*;
+use crate::{icons, library};
+
+/// 대화상자 폭.
+const DIALOG_WIDTH: f32 = 640.0;
+
+/// 표지 미리보기 크기(책 표지 비율 2:3).
+const COVER_WIDTH: f32 = 140.0;
+const COVER_HEIGHT: f32 = 210.0;
+
+/// 언어 목록: (BCP 47 태그, 표시 이름). 첫 항목이 기본.
+const LANGUAGES: [(&str, &str); 7] = [
+    ("ko", "한국어"),
+    ("en", "English"),
+    ("ja", "日本語"),
+    ("zh", "中文"),
+    ("fr", "Français"),
+    ("de", "Deutsch"),
+    ("es", "Español"),
+];
+
+/// 언어 태그의 표시 이름. 목록에 없으면 태그 그대로.
+fn language_title(tag: &str) -> SharedString {
+    LANGUAGES
+        .iter()
+        .find(|(code, _)| *code == tag)
+        .map_or_else(|| tag.to_string().into(), |(_, title)| (*title).into())
+}
+
+/// 대화상자 안의 입력 상태.
+struct BookInfoForm {
+    project: PathBuf,
+    /// 읽어 온 책 정보. 식별자처럼 화면에 없는 값을 지키려고 들고 있는다.
+    book: library::BookMeta,
+    title: Entity<InputState>,
+    authors: Entity<InputState>,
+    description: Entity<TextareaState>,
+    language: SharedString,
+    /// 표지 이미지의 절대 경로. 저장할 때 첨부파일 그룹의 `cover.<확장자>`로 넣는다.
+    cover: Option<PathBuf>,
+    /// 표지를 고르다 생긴 문제(지원하지 않는 형식 등).
+    cover_error: Option<SharedString>,
+    app: WeakEntity<WriterApp>,
+}
+
+impl BookInfoForm {
+    fn new(
+        app: WeakEntity<WriterApp>,
+        project: &library::Group,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let book = library::read_book(&project.path);
+        let title = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(project.name.clone())
+                .default_value(book.title.clone())
+        });
+        let authors = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("여럿이면 쉼표로 구분")
+                .default_value(book.authors.join(", "))
+        });
+        let description = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(3, 8)
+                .default_value(book.description.clone())
+        });
+        let language = if book.language.is_empty() {
+            LANGUAGES[0].0.into()
+        } else {
+            book.language.clone().into()
+        };
+        Self {
+            cover: book.cover_path(&project.path),
+            project: project.path.clone(),
+            book,
+            title,
+            authors,
+            description,
+            language,
+            cover_error: None,
+            app,
+        }
+    }
+
+    /// 운영체제 파일 선택기로 표지 이미지를 고른다.
+    fn pick_cover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("표지 이미지 선택".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut paths))) = receiver.await else {
+                return;
+            };
+            let Some(path) = paths.pop() else {
+                return;
+            };
+            this.update(cx, |this, cx| this.use_cover(&[path], cx)).ok();
+        })
+        .detach();
+    }
+
+    /// 고른(끌어다 놓은) 파일 중 첫 이미지를 표지로 쓴다. 이미지가 없으면 안내를 띄운다.
+    fn use_cover(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let image = paths.iter().find(|path| {
+            path.extension()
+                .map(|ext| ext.to_string_lossy().to_lowercase())
+                .is_some_and(|ext| library::COVER_EXTENSIONS.contains(&ext.as_str()))
+        });
+        match image {
+            Some(path) => {
+                self.cover = Some(path.clone());
+                self.cover_error = None;
+            }
+            None => {
+                self.cover_error = Some("JPEG·PNG·GIF·WebP·SVG 이미지만 쓸 수 있습니다.".into());
+            }
+        }
+        cx.notify();
+    }
+
+    /// 책 정보를 저장하고 대화상자를 닫는다. 실패하면 알림을 띄우고 열어 둔다.
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut book = self.book.clone();
+        book.title = self.title.read(cx).value().trim().to_string();
+        book.authors = self
+            .authors
+            .read(cx)
+            .value()
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect();
+        book.description = self.description.read(cx).value().trim().to_string();
+        book.language = self.language.to_string();
+        let project = self.project.clone();
+        let cover = self.cover.clone();
+        let done = self.app.update(cx, |app, cx| {
+            app.save_book(&project, book, cover.as_deref(), window, cx)
+        });
+        if done.unwrap_or(false) {
+            window.close_dialog(cx);
+        }
+    }
+}
+
+impl Render for BookInfoForm {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = Palette::from_theme(cx.theme());
+        let form = cx.entity().downgrade();
+        let current = self.language.clone();
+        let language = Button::new("book-language")
+            .label(language_title(&self.language))
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                LANGUAGES
+                    .into_iter()
+                    .fold(menu.min_w(px(160.0)), |menu, (code, title)| {
+                        let form = form.clone();
+                        menu.item(
+                            PopupMenuItem::new(title)
+                                .checked(code == current.as_ref())
+                                .on_click(move |_, _, cx| {
+                                    form.update(cx, |form, cx| {
+                                        form.language = code.into();
+                                        cx.notify();
+                                    })
+                                    .ok();
+                                }),
+                        )
+                    })
+            });
+
+        // 표지 사각형: 이미지 파일을 끌어다 놓거나, 눌러서 나오는 메뉴로 고르거나 지운다.
+        let form = cx.entity().downgrade();
+        let has_cover = self.cover.is_some();
+        let preview = Button::new("book-cover")
+            .ghost()
+            .w(px(COVER_WIDTH))
+            .h(px(COVER_HEIGHT))
+            .p_0()
+            .overflow_hidden()
+            .border_1()
+            .border_color(pal.panel_border)
+            .bg(pal.panel)
+            .tooltip("이미지를 끌어다 놓거나 눌러서 선택")
+            .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                style.border_color(pal.foreground).bg(pal.hover)
+            })
+            .on_drop(
+                cx.listener(|this, paths: &ExternalPaths, _, cx| this.use_cover(paths.paths(), cx)),
+            )
+            .map(|this| match &self.cover {
+                Some(path) => this.child(
+                    img(path.clone())
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .with_fallback(move || {
+                            Icon::new(icons::image())
+                                .text_color(pal.muted)
+                                .into_any_element()
+                        }),
+                ),
+                None => this.child(Icon::new(icons::image()).text_color(pal.muted)),
+            })
+            .dropdown_menu(move |menu, _, _| {
+                let (pick_form, clear_form) = (form.clone(), form.clone());
+                menu.min_w(px(160.0))
+                    .item(
+                        PopupMenuItem::new("이미지 선택…").on_click(move |_, window, cx| {
+                            pick_form
+                                .update(cx, |form, cx| form.pick_cover(window, cx))
+                                .ok();
+                        }),
+                    )
+                    .when(has_cover, |menu| {
+                        menu.item(PopupMenuItem::new("지우기").on_click(move |_, _, cx| {
+                            clear_form
+                                .update(cx, |form, cx| {
+                                    form.cover = None;
+                                    form.cover_error = None;
+                                    cx.notify();
+                                })
+                                .ok();
+                        }))
+                    })
+            });
+        // 왼쪽 위에 표지, 오른쪽에 나머지 항목.
+        let cover = div()
+            .w(px(COVER_WIDTH))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(preview)
+            .when_some(self.cover_error.clone(), |this, error| {
+                this.child(div().text_xs().text_color(pal.danger).child(error))
+            });
+        let fields = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(form_row(
+                pal,
+                "제목",
+                Input::new(&self.title).focus_ring(false),
+            ))
+            .child(form_row(
+                pal,
+                "지은이",
+                Input::new(&self.authors).focus_ring(false),
+            ))
+            .child(form_row(pal, "언어", language))
+            .child(form_row(pal, "소개", Textarea::new(&self.description)));
+
+        div()
+            .flex()
+            .items_start()
+            .gap_5()
+            .child(cover)
+            .child(fields)
+    }
+}
+
+impl WriterApp {
+    /// 프로젝트의 책 정보 대화상자를 연다.
+    pub(super) fn open_book_info(
+        &mut self,
+        dir: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.find_group(dir) else {
+            return;
+        };
+        let app = cx.entity().downgrade();
+        let form = cx.new(|cx| BookInfoForm::new(app, &project, window, cx));
+        // 처음 그릴 때만 제목 칸에 포커스를 준다.
+        let initial_focus = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if initial_focus.replace(false) {
+                let title = form.read(cx).title.clone();
+                title.update(cx, |state, cx| state.focus(window, cx));
+            }
+            let ok_form = form.clone();
+            dialog
+                .w(px(DIALOG_WIDTH))
+                .title("책 정보")
+                .close_button(false)
+                .child(form.clone())
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("book-info-cancel")
+                                .label("취소")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("book-info-ok")
+                                .primary()
+                                .label("완료")
+                                .on_click(move |_, window, cx| {
+                                    ok_form.update(cx, |form, cx| form.submit(window, cx));
+                                }),
+                        ),
+                )
+        });
+    }
+
+    /// 책 정보를 저장한다. 고른 표지는 첨부파일 그룹에 `cover.<확장자>`로 넣는다. 저장했으면 `true`.
+    fn save_book(
+        &mut self,
+        dir: &Path,
+        mut book: library::BookMeta,
+        cover: Option<&Path>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(root) = self.library.as_ref().map(|lib| lib.root.clone()) else {
+            return false;
+        };
+        let saved = cover
+            .map(|cover| library::set_cover(dir, cover))
+            .transpose()
+            .and_then(|cover| {
+                book.cover = cover;
+                library::write_book(dir, &mut book)?;
+                library::scan(&root)
+            });
+        match saved {
+            Ok(scanned) => {
+                // 첨부파일 그룹이 새로 생겼을 수 있다.
+                self.library = Some(scanned);
+                self.load_previews(cx);
+                cx.notify();
+                true
+            }
+            Err(err) => {
+                self.notify(format!("책 정보를 저장할 수 없습니다: {err}"), window, cx);
+                false
+            }
+        }
+    }
+}

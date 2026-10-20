@@ -189,6 +189,13 @@ impl WriterApp {
         {
             self.selected_sheet = None;
         }
+        if self
+            .open_file
+            .as_ref()
+            .is_some_and(|file| !file.path.is_file())
+        {
+            self.open_file = None;
+        }
         self.sync_open_sheet(window, cx);
         self.load_previews(cx);
         cx.notify();
@@ -211,6 +218,29 @@ impl WriterApp {
             return;
         };
         if let Err(err) = library::move_sheet(group, from, to) {
+            self.notify(format!("순서를 저장할 수 없습니다: {err}"), window, cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    /// 파일 그룹에서 파일 순서를 바꾸고 그룹 메타에 저장한다.
+    pub(super) fn move_file(
+        &mut self,
+        group_path: &std::path::Path,
+        from: usize,
+        to: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = self
+            .library
+            .as_mut()
+            .and_then(|lib| lib.find_group_mut(group_path))
+        else {
+            return;
+        };
+        if let Err(err) = library::move_file(group, from, to) {
             self.notify(format!("순서를 저장할 수 없습니다: {err}"), window, cx);
             return;
         }
@@ -301,6 +331,13 @@ impl WriterApp {
                 .join(library::DEFAULT_INBOX),
             Some(Selection::Section(kind)) => root.join(kind.dir()),
         };
+        if lib
+            .find_group(&dir)
+            .is_some_and(|group| group.kind == library::GroupKind::Files)
+        {
+            self.notify("파일 그룹에는 시트를 만들 수 없습니다.", window, cx);
+            return;
+        }
 
         let created = library::create_sheet(&dir).and_then(|path| {
             let scanned = library::scan(&root)?;

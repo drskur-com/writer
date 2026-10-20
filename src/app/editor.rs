@@ -5,7 +5,7 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::input::{
     Editor, EditorState, InputEvent, TextDecoration, TextDecorationCollection,
 };
-use gpui_kit::gpui::prelude::StatefulInteractiveElement as _;
+use gpui_kit::gpui::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::gpui::*;
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -42,7 +42,7 @@ const HEADING_SCALES: [(f32, f32); 6] = [
 ];
 
 /// 본문 최대 폭(가독 폭). 창이 넓으면 가운데에 둔다.
-const EDITOR_MAX_WIDTH: f32 = 680.0;
+pub(super) const EDITOR_MAX_WIDTH: f32 = 680.0;
 
 /// 본문 글자 크기.
 const EDITOR_FONT_SIZE: f32 = 16.0;
@@ -225,30 +225,39 @@ impl WriterApp {
         )
         .child(tool_group(pal).child(icon_button("search", icons::search(), false, pal)))
         .child(div().flex_1())
-        .child(
-            tool_group(pal)
-                .child(icon_button("format-bold", icons::bold(), false, pal))
-                .child(icon_button("format-italic", icons::italic(), false, pal))
-                .child(icon_button("format-link", icons::link(), false, pal))
-                .child(icon_button(
-                    "format-paragraph",
-                    icons::paragraph(),
-                    false,
-                    pal,
+        // 파일 뷰어에서는 편집 도구 대신 파일 열기·보기·정보 버튼을 둔다.
+        .map(|this| match &self.open_file {
+            Some(file) => this.child(self.file_actions(file, pal)),
+            None => this
+                .child(
+                    tool_group(pal)
+                        .child(icon_button("format-bold", icons::bold(), false, pal))
+                        .child(icon_button("format-italic", icons::italic(), false, pal))
+                        .child(icon_button("format-link", icons::link(), false, pal))
+                        .child(icon_button(
+                            "format-paragraph",
+                            icons::paragraph(),
+                            false,
+                            pal,
+                        )),
+                )
+                .child(
+                    tool_group(pal)
+                        .child(icon_button("share", icons::share(), false, pal))
+                        .child(icon_button("export", icons::export(), false, pal)),
+                )
+                .child(tool_group(pal).child(
+                    icon_button("toggle-preview", icons::preview(), true, pal).on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.on_toggle_preview(&TogglePreview, window, cx)
+                        }),
+                    ),
                 )),
-        )
-        .child(
-            tool_group(pal)
-                .child(icon_button("share", icons::share(), false, pal))
-                .child(icon_button("export", icons::export(), false, pal)),
-        )
-        .child(tool_group(pal).child(
-            icon_button("toggle-preview", icons::preview(), true, pal).on_click(cx.listener(
-                |this, _, window, cx| this.on_toggle_preview(&TogglePreview, window, cx),
-            )),
-        ));
+        });
 
         let body: AnyElement = match &self.editor {
+            // 파일 그룹의 파일을 골랐으면 에디터 대신 뷰어를 보여 준다.
+            None if let Some(file) = &self.open_file => self.render_file_viewer(file, pal),
             Some(editor) => div()
                 .flex_1()
                 .min_h_0()
@@ -346,6 +355,7 @@ impl WriterApp {
             }
         }
         self.selected_sheet = path;
+        self.open_file = None;
         if focus && let Some(editor) = &self.editor {
             editor.state.update(cx, |state, cx| state.focus(window, cx));
         }
@@ -486,6 +496,7 @@ impl WriterApp {
         }
         self.editor = None;
         self.selected_sheet = None;
+        self.open_file = None;
     }
 
     /// 다시 스캔한 뒤 열린 시트를 맞춘다.

@@ -7917,6 +7917,7 @@ dependencies = [
  "futures",
  "gpui-base",
  "gpui-kit",
+ "imagesize 0.14.0",
  "markdown",
  "notify",
  "serde",

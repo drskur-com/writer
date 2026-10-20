@@ -3,9 +3,9 @@
 //! 원고 그룹(`<Project>/<Group>/…`)은 빌드(PDF/ePub) 대상이고, 추가자료(`<Project>/Extras/…`)는
 //! 빌드에서 빠진다.
 
-use gpui_kit::component::button::ButtonVariant;
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogButtonProps;
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::gpui::prelude::{
     FluentBuilder, InteractiveElement as _, StatefulInteractiveElement as _,
@@ -90,16 +90,15 @@ impl WriterApp {
                     .child(project.name.clone()),
             )
             .child(
-                // 통계·빌드·더 보기는 아직 기능이 없어 흐리게 둔다.
+                // 빌드는 아직 기능이 없어 흐리게 둔다.
                 div()
                     .px_1()
                     .pt_1()
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(icon_button("project-stats", icons::stats(), false, pal))
                     .child(icon_button("project-build", icons::build(), false, pal))
-                    .child(icon_button("project-more", icons::more(), false, pal)),
+                    .child(self.project_more_button(project.path.clone(), cx, pal)),
             )
             .child(
                 div()
@@ -109,6 +108,46 @@ impl WriterApp {
                     .border_b_1()
                     .border_color(pal.panel_border),
             )
+    }
+
+    /// 도구 줄의 "더 보기" 버튼. 누르면 프로젝트 편집·책 정보를 고른다.
+    fn project_more_button(
+        &self,
+        dir: PathBuf,
+        cx: &mut Context<Self>,
+        pal: Palette,
+    ) -> impl IntoElement {
+        let app = cx.entity().downgrade();
+        Button::new("project-more")
+            .icon(Icon::new(icons::more()).text_color(pal.foreground.opacity(0.8)))
+            .ghost()
+            .size(px(30.0))
+            .rounded(px(15.0))
+            .dropdown_menu(move |menu, _, _| {
+                let (edit_app, edit_dir) = (app.clone(), dir.clone());
+                let (book_app, book_dir) = (app.clone(), dir.clone());
+                menu.min_w(px(200.0))
+                    .item(
+                        PopupMenuItem::element(move |_, _| {
+                            menu_row(icons::edit(), "프로젝트 편집…", None)
+                        })
+                        .on_click(move |_, window, cx| {
+                            edit_app
+                                .update(cx, |app, cx| app.open_edit_project(&edit_dir, window, cx))
+                                .ok();
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::element(move |_, _| {
+                            menu_row(icons::book_info(), "책 정보…", None)
+                        })
+                        .on_click(move |_, window, cx| {
+                            book_app
+                                .update(cx, |app, cx| app.open_book_info(&book_dir, window, cx))
+                                .ok();
+                        }),
+                    )
+            })
     }
 
     /// 프로젝트 화면의 줄들: 원고 그룹 트리(없으면 "새로운 그룹…"), 추가자료.
