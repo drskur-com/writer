@@ -31,16 +31,67 @@ pub fn panel() -> IconName {
     IconName::PanelLeft
 }
 
-/// 시트(문서) 아이콘.
-pub fn sheet() -> IconName {
-    IconName::FileText
+/// 메모 "모두" 보기.
+pub fn all_sheets() -> IconName {
+    IconName::Layers
 }
 
-/// 섹션 접기/펴기(disclosure) 아이콘.
-pub fn disclosure(collapsed: bool) -> IconName {
-    if collapsed {
-        IconName::ChevronRight
-    } else {
-        IconName::ChevronDown
-    }
+/// 새 그룹.
+pub fn new_group() -> IconName {
+    IconName::FolderPlus
+}
+
+/// 시트 목록 필터/정렬.
+pub fn filter() -> IconName {
+    IconName::ListFilter
+}
+
+/// 새 시트 작성.
+pub fn compose() -> IconName {
+    IconName::SquarePen
+}
+
+/// 탐색: 뒤로/앞으로.
+pub fn back() -> IconName {
+    IconName::ChevronLeft
+}
+
+pub fn forward() -> IconName {
+    IconName::ChevronRight
+}
+
+/// 검색.
+pub fn search() -> IconName {
+    IconName::Search
+}
+
+/// 서식: 굵게/기울임/링크/문단.
+pub fn bold() -> IconName {
+    IconName::Bold
+}
+
+pub fn italic() -> IconName {
+    IconName::Italic
+}
+
+pub fn link() -> IconName {
+    IconName::Link
+}
+
+pub fn paragraph() -> IconName {
+    IconName::Pilcrow
+}
+
+/// 공유/내보내기.
+pub fn share() -> IconName {
+    IconName::Share
+}
+
+pub fn export() -> IconName {
+    IconName::FileUp
+}
+
+/// 프리뷰(오른쪽 패널) 토글.
+pub fn preview() -> IconName {
+    IconName::PanelRight
 }
