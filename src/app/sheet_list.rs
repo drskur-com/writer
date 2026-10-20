@@ -197,9 +197,8 @@ impl WriterApp {
                     .cursor_pointer()
                     .on_click(cx.listener({
                         let path = path.clone();
-                        move |this, _, _, cx| {
-                            this.selected_sheet = Some(path.clone());
-                            cx.notify();
+                        move |this, _, window, cx| {
+                            this.select_sheet(Some(path.clone()), false, window, cx);
                         }
                     }))
                     .child(card);

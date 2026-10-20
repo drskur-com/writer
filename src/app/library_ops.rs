@@ -66,12 +66,12 @@ impl WriterApp {
                     Notification::info(format!("라이브러리 열기: {}", opened.root.display())),
                     cx,
                 );
+                self.close_sheet(cx);
                 self.library = Some(opened);
                 self.notice = None;
                 self.selected = None;
-                self.selected_sheet = None;
                 self.previews.clear();
-                self.start_watching(cx);
+                self.start_watching(window, cx);
                 self.load_previews(cx);
                 cx.notify();
             }
@@ -105,7 +105,7 @@ impl WriterApp {
     // --- 폴더 감시 ---------------------------------------------------------
 
     /// 현재 라이브러리 루트 감시를 (다시) 시작한다. 변경이 오면 잠깐 모았다가 다시 스캔한다.
-    pub(super) fn start_watching(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn start_watching(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.watcher = None;
         let Some(root) = self.library.as_ref().map(|lib| lib.root.clone()) else {
             return;
@@ -117,7 +117,7 @@ impl WriterApp {
                 return;
             }
         };
-        let task = cx.spawn(async move |this, cx| {
+        let task = cx.spawn_in(window, async move |this, cx| {
             use futures::StreamExt as _;
             while events.next().await.is_some() {
                 // 저장·이동은 이벤트가 여러 개 연달아 온다. 잠깐 기다렸다가 한꺼번에 처리한다.
@@ -133,7 +133,9 @@ impl WriterApp {
                     .spawn(async move { library::scan(&scan_root) })
                     .await;
                 if this
-                    .update(cx, |this, cx| this.apply_scan(&root, scanned, cx))
+                    .update_in(cx, |this, window, cx| {
+                        this.apply_scan(&root, scanned, window, cx)
+                    })
                     .is_err()
                 {
                     break;
@@ -150,6 +152,7 @@ impl WriterApp {
         &mut self,
         root: &std::path::Path,
         scanned: std::io::Result<library::Library>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.library.as_ref().map(|lib| lib.root.as_path()) != Some(root) {
@@ -173,6 +176,7 @@ impl WriterApp {
         {
             self.selected_sheet = None;
         }
+        self.sync_open_sheet(window, cx);
         self.load_previews(cx);
         cx.notify();
     }
@@ -272,9 +276,9 @@ impl WriterApp {
         match created {
             Ok((path, scanned)) => {
                 self.library = Some(scanned);
-                self.selected_sheet = Some(path);
+                // 새 시트는 바로 쓸 수 있게 에디터에 열고 포커스를 준다.
+                self.select_sheet(Some(path), true, window, cx);
                 self.load_previews(cx);
-                cx.notify();
             }
             Err(err) => self.notify(format!("시트를 만들 수 없습니다: {err}"), window, cx),
         }

@@ -113,8 +113,8 @@ fn main() {
                 ..Default::default()
             };
 
-            gpui_kit::open_window(options, cx, |_, cx| {
-                cx.new(|cx| WriterApp::new(library, notice, cx))
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| WriterApp::new(library, notice, window, cx))
             })
             .expect("창 열기에 실패했습니다");
         });

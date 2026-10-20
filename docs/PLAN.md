@@ -222,9 +222,11 @@ Rope(원문)
 
 ### M1 — 문서 모델 & 저장소 (2~3일)
 - [x] 폴더 검증/초기화/스캔, 섹션·그룹·시트 모델, 그룹 메타(`.writer.toml`), 설정 저장 (ADR-0003)
-- [ ] 시트 열기/저장: 원자적 저장(temp+rename), frontmatter 파싱(keywords/goal)
-- [ ] 자동 저장(debounce + 포커스 아웃 + 종료 시 flush), dirty 상태 추적
-- [ ] 파일 시스템 감시(`notify`) → 외부 수정 시 reload/충돌 경고
+- [x] 시트 열기/저장: 원자적 저장(temp+rename) — `library/document.rs`
+- [ ] frontmatter 파싱(keywords/goal)
+- [x] 자동 저장(1초 debounce + 포커스 아웃 + 시트 전환·창 닫기·종료 시 flush), dirty 상태 추적
+- [x] 파일 시스템 감시(`notify`) → 외부 수정 시 reload(저장 안 한 변경이 없을 때)
+- [ ] 외부 수정 + 저장 안 한 변경 충돌 경고
 - [ ] `Cmd/Ctrl+S`, `O`, `N` 최소 루프 연결
 - **완료 기준**: 폴더를 열면 시트 목록이 뜨고, 편집→자동 저장→앱 재실행 후 상태(커서 제외)가 복원된다. **5,000개 시트 스캔 < 300ms**(1,000개 < 100ms).
 

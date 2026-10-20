@@ -229,11 +229,10 @@ impl WriterApp {
                 this.hover(move |style| style.bg(pal.hover))
             })
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 this.selected = Some(selection.clone());
-                this.selected_sheet = None;
+                this.select_sheet(None, false, window, cx);
                 this.load_previews(cx);
-                cx.notify();
             }))
             .child(Icon::new(icon).small().text_color(icon_color))
             .child(label)

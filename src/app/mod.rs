@@ -48,6 +48,10 @@ pub(crate) struct WriterApp {
     previews: std::collections::HashMap<PathBuf, (u128, library::Preview)>,
     /// 미리보기를 읽는 백그라운드 태스크. 새로 시작하면 이전 것은 버려진다.
     preview_task: Option<Task<()>>,
+    /// 에디터에 열린 시트.
+    editor: Option<editor::OpenSheet>,
+    /// 앱 종료 직전에 열린 시트를 저장하는 구독.
+    _quit_subscription: Subscription,
     /// 라이브러리 폴더 감시(watcher + 변경 시 다시 스캔하는 태스크). 버리면 멈춘다.
     watcher: Option<(notify::RecommendedWatcher, Task<()>)>,
     #[cfg(not(target_os = "macos"))]
@@ -59,8 +63,19 @@ impl WriterApp {
     pub(crate) fn new(
         library: Option<library::Library>,
         notice: Option<SharedString>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // 창을 닫거나 앱을 끝낼 때 저장하지 않은 본문을 내린다.
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            this.update(cx, |this, cx| this.close_sheet(cx)).ok();
+            true
+        });
+        let quit_subscription = cx.on_app_quit(|this, cx| {
+            this.close_sheet(cx);
+            async {}
+        });
         let mut app = WriterApp {
             sidebar_visible: true,
             preview_visible: false,
@@ -71,11 +86,13 @@ impl WriterApp {
             selected_sheet: None,
             previews: std::collections::HashMap::new(),
             preview_task: None,
+            editor: None,
+            _quit_subscription: quit_subscription,
             watcher: None,
             #[cfg(not(target_os = "macos"))]
             menu_bar: AppMenuBar::new(cx),
         };
-        app.start_watching(cx);
+        app.start_watching(window, cx);
         app.load_previews(cx);
         app
     }
@@ -98,7 +115,9 @@ impl WriterApp {
     // --- 액션 핸들러 --------------------------------------------------------
 
     fn on_save_sheet(&mut self, _: &SaveSheet, window: &mut Window, cx: &mut Context<Self>) {
-        self.notify("문서가 저장되었습니다.", window, cx);
+        if let Err(err) = self.save_open_sheet(cx) {
+            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+        }
     }
 
     fn on_open_library(&mut self, _: &OpenLibrary, window: &mut Window, cx: &mut Context<Self>) {
@@ -106,6 +125,7 @@ impl WriterApp {
     }
 
     fn on_close_library(&mut self, _: &CloseLibrary, _: &mut Window, cx: &mut Context<Self>) {
+        self.close_sheet(cx);
         self.watcher = None;
         self.preview_task = None;
         self.previews.clear();
@@ -184,6 +204,7 @@ impl WriterApp {
     }
 
     fn on_quit(&mut self, _: &QuitApp, _: &mut Window, cx: &mut Context<Self>) {
+        self.close_sheet(cx);
         cx.quit();
     }
 

@@ -10,10 +10,12 @@
 //!    └─ <Sheet>.md
 //! ```
 
+mod document;
 mod layout;
 mod meta;
 mod preview;
 
+pub use document::{count_words, read_sheet, write_sheet};
 pub use layout::{FolderKind, initialize, inspect};
 pub use meta::{create_sheet, move_sheet};
 pub use preview::{Preview, read_preview};
@@ -212,13 +214,18 @@ fn sheet_file_name(sheet: &Sheet) -> String {
 fn sheet_from_path(path: &Path) -> Sheet {
     Sheet {
         path: path.to_path_buf(),
-        modified: std::fs::metadata(path)
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|delta| delta.as_nanos())
-            .unwrap_or(0),
+        modified: modified_nanos(path),
     }
+}
+
+/// 파일 수정 시각(나노초). 읽지 못하면 0.
+pub fn modified_nanos(path: &Path) -> u128 {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|delta| delta.as_nanos())
+        .unwrap_or(0)
 }
 
 fn file_name(path: &Path) -> String {
