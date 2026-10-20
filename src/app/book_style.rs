@@ -4,6 +4,7 @@
 //! 스타일을 다시 읽는다.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
@@ -679,6 +680,13 @@ impl BookStyleView {
                             .child(format!("{}은 자동 번호로 바뀝니다", library::PREFIX_NUMBER)),
                     )
             });
+            let in_toc = Checkbox::new("style-in-toc")
+                .label("목차에 포함")
+                .checked(resolved.in_toc)
+                .on_click(cx.listener(move |this, checked: &bool, window, cx| {
+                    let in_toc = *checked;
+                    this.update_spec(target, window, cx, |spec| spec.in_toc = Some(in_toc));
+                }));
             fields
                 .child(field("제목 배치".into(), placement.into_any_element()))
                 .when(!page, |this| {
@@ -687,7 +695,9 @@ impl BookStyleView {
                         page_break.into_any_element(),
                     ))
                 })
-                .children(prefix)
+                .child(in_toc)
+                // 목차에 넣지 않는 제목은 번호·접두사가 없다(epubly와 같음).
+                .when(resolved.in_toc, |this| this.children(prefix))
                 .child(font)
                 .child(embed)
                 .children(number(NumberField::FontSize))

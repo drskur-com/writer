@@ -83,6 +83,7 @@ impl StyleTarget {
             placement: Placement::Inline,
             page_break: false,
             prefix: String::new(),
+            in_toc: true,
             vertical_align: VerticalAlign::Center,
         };
         let title = |font_size, align, space_before, space_after| ResolvedStyle {
@@ -234,6 +235,9 @@ pub struct StyleSpec {
     /// 별도 제목 페이지 안 세로 위치(제목만).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vertical_align: Option<VerticalAlign>,
+    /// 목차에 넣는지(제목만). 넣지 않는 제목은 번호를 매기지 않고 접두사도 붙이지 않는다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_toc: Option<bool>,
 }
 
 impl StyleSpec {
@@ -258,6 +262,7 @@ impl StyleSpec {
             placement: self.placement.unwrap_or(defaults.placement),
             page_break: self.page_break.unwrap_or(defaults.page_break),
             prefix: self.prefix.clone().unwrap_or(defaults.prefix),
+            in_toc: self.in_toc.unwrap_or(defaults.in_toc),
             vertical_align: self.vertical_align.unwrap_or(defaults.vertical_align),
         }
     }
@@ -292,11 +297,15 @@ pub struct ResolvedStyle {
     pub page_break: bool,
     pub prefix: String,
     pub vertical_align: VerticalAlign,
+    pub in_toc: bool,
 }
 
 impl ResolvedStyle {
-    /// 접두사를 붙인 제목. `{n}`을 번호로 바꾼다.
+    /// 접두사를 붙인 제목. `{n}`을 번호로 바꾼다. 목차에 넣지 않는 제목은 그대로다.
     pub fn title_text(&self, number: usize, title: &str) -> String {
+        if !self.in_toc {
+            return title.to_string();
+        }
         format!(
             "{}{title}",
             self.prefix.replace(PREFIX_NUMBER, &number.to_string())
@@ -493,6 +502,12 @@ mod tests {
         let chapter = styles.resolve(StyleTarget::Chapter);
         assert_eq!(chapter.title_text(3, "시라 강 건너"), "제3장 시라 강 건너");
         assert_eq!(part.title_text(1, "강을 건너며"), "강을 건너며");
+        assert!(chapter.in_toc);
+
+        styles.chapter.in_toc = Some(false);
+        assert!(toml::to_string(&styles).unwrap().contains("in_toc = false"));
+        let chapter = styles.resolve(StyleTarget::Chapter);
+        assert_eq!(chapter.title_text(3, "시라 강 건너"), "시라 강 건너");
     }
 
     #[test]
