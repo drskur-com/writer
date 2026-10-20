@@ -57,6 +57,25 @@ pub fn book_info() -> IconName {
     IconName::BookText
 }
 
+/// 프로젝트 미리보기(프로젝트 도구 줄).
+pub fn book_preview() -> IconName {
+    IconName::Eye
+}
+
+/// 미리보기 차례 메뉴.
+pub fn toc() -> IconName {
+    IconName::TableOfContents
+}
+
+/// 미리보기 확대·축소.
+pub fn zoom_in() -> IconName {
+    IconName::ZoomIn
+}
+
+pub fn zoom_out() -> IconName {
+    IconName::ZoomOut
+}
+
 /// 책 스타일(프로젝트 더 보기 메뉴).
 pub fn book_style() -> IconName {
     IconName::Type

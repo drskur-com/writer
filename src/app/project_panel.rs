@@ -70,6 +70,7 @@ impl WriterApp {
         pal: Palette,
     ) -> impl IntoElement {
         let dir = project.path.clone();
+        let preview_dir = project.path.clone();
         div()
             .flex_shrink_0()
             .px_2()
@@ -90,7 +91,7 @@ impl WriterApp {
                     .child(project.name.clone()),
             )
             .child(
-                // 빌드는 아직 기능이 없어 흐리게 둔다.
+                // 빌드는 아직 기능이 없어 흐리게 둔다. 미리보기는 별도 창에 연다.
                 div()
                     .px_1()
                     .pt_1()
@@ -98,6 +99,13 @@ impl WriterApp {
                     .items_center()
                     .gap_1()
                     .child(icon_button("project-build", icons::build(), false, pal))
+                    .child(
+                        icon_button("project-preview", icons::book_preview(), true, pal).on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.open_book_preview(&preview_dir, window, cx)
+                            }),
+                        ),
+                    )
                     .child(self.project_more_button(project.path.clone(), cx, pal)),
             )
             .child(
@@ -108,6 +116,14 @@ impl WriterApp {
                     .border_b_1()
                     .border_color(pal.panel_border),
             )
+    }
+
+    /// 프로젝트 미리보기 창을 연다. 열린 시트를 먼저 저장해 지금 내용이 보이게 한다.
+    fn open_book_preview(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(err) = self.save_open_sheet(cx) {
+            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+        }
+        super::book_preview::open(dir, cx);
     }
 
     /// 도구 줄의 "더 보기" 버튼. 누르면 프로젝트 편집·책 정보·책 스타일을 고른다.

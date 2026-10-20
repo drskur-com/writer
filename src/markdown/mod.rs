@@ -3,8 +3,10 @@
 //! gpui 타입을 쓰지 않는다. 스팬 → `HighlightStyle` 변환은 UI 쪽(`app/editor.rs`)에서 한다.
 //! 프리뷰(`TextView::markdown`)와 해석이 어긋나지 않도록 같은 파서(markdown-rs)·같은 옵션을 쓴다.
 
+mod book;
 mod paragraphs;
 
+pub use book::{Block, Inline, Rich, blocks, plain, rich_text};
 pub use paragraphs::{to_editor, to_markdown};
 
 use std::ops::Range;

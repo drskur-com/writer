@@ -17,6 +17,7 @@ mod book;
 mod document;
 mod files;
 mod layout;
+mod manuscript;
 mod meta;
 mod preview;
 mod style;
@@ -27,6 +28,7 @@ pub use book::{
 pub use document::{count_words, read_sheet, write_sheet};
 pub use files::{FileItem, FileKind, GroupKind, format_size, move_file};
 pub use layout::{FolderKind, initialize, inspect};
+pub use manuscript::manuscript_sheets;
 pub use meta::{
     create_group, create_project, create_sheet, glue_sheets, move_sheet, move_to_trash, set_sort,
     set_sort_descending, unglue_sheets, update_group, update_project,

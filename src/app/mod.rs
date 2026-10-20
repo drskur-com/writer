@@ -1,6 +1,7 @@
 //! 앱 상태(`WriterApp`)와 액션 핸들러. 화면별 렌더는 하위 모듈에 나눠 둔다.
 
 mod book_info;
+mod book_preview;
 mod book_style;
 mod editor;
 mod editor_image;
