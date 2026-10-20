@@ -68,6 +68,8 @@ pub(crate) struct WriterApp {
     editor: Option<editor::OpenSheet>,
     /// 에디터 자리 뷰어에 연 파일(파일 그룹). 시트와 동시에 열리지 않는다.
     open_file: Option<file_view::OpenFile>,
+    /// 파일 그룹 목록에서 보여 줄 파일 종류. None이면 모두.
+    file_filter: Option<library::FileKind>,
     /// 앱 종료 직전에 열린 시트를 저장하는 구독.
     _quit_subscription: Subscription,
     _prefs_subscription: Subscription,
@@ -111,6 +113,7 @@ impl WriterApp {
             preview_task: None,
             editor: None,
             open_file: None,
+            file_filter: None,
             _quit_subscription: quit_subscription,
             _prefs_subscription: prefs_subscription,
             watcher: None,
@@ -382,6 +385,18 @@ impl WriterApp {
         lib.sections
             .first()
             .map(|section| Selection::Section(section.kind))
+    }
+
+    /// 지금 보고 있는 목록이 파일 그룹(첨부파일 등)인지.
+    fn viewing_file_group(&self) -> bool {
+        match self.effective_selection() {
+            Some(Selection::Group(path)) => self
+                .library
+                .as_ref()
+                .and_then(|lib| lib.find_group(&path))
+                .is_some_and(|group| group.kind == library::GroupKind::Files),
+            _ => false,
+        }
     }
 
     /// 선택 항목의 표시 이름. 그룹은 메타의 표시 이름(`title`)을 쓴다.

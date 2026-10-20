@@ -317,7 +317,12 @@ impl WriterApp {
                 .justify_center()
                 .text_2xl()
                 .text_color(pal.muted.opacity(0.7))
-                .child("선택한 시트 없음")
+                // 파일 그룹을 보고 있으면 파일을 고르라고 안내한다.
+                .child(if self.viewing_file_group() {
+                    "선택한 파일 없음"
+                } else {
+                    "선택한 시트 없음"
+                })
                 .into_any_element(),
         };
 

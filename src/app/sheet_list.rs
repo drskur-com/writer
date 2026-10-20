@@ -172,23 +172,34 @@ impl WriterApp {
             ))
         })
         .child(div().flex_1())
-        .child(tool_group(pal).child(icon_button("sheet-filter", icons::filter(), false, pal)))
-        .child(tool_group(pal).child(
-            icon_button("new-sheet", icons::compose(), sheet_group, pal).when(
-                sheet_group,
-                |this| {
-                    this.on_click(
+        // 파일 그룹은 시트를 만들 수 없으니 작성 버튼 대신 파일 종류 필터를 둔다.
+        .map(|this| {
+            if sheet_group {
+                this.child(tool_group(pal).child(icon_button(
+                    "sheet-filter",
+                    icons::filter(),
+                    false,
+                    pal,
+                )))
+                .child(tool_group(pal).child(
+                    icon_button("new-sheet", icons::compose(), true, pal).on_click(
                         cx.listener(|this, _, window, cx| this.on_new_sheet(&NewSheet, window, cx)),
-                    )
-                },
-            ),
-        ));
+                    ),
+                ))
+            } else {
+                this.child(tool_group(pal).child(self.file_filter_button(cx, pal)))
+            }
+        });
 
         let list: AnyElement = if let Some(mut files) = files {
             let (path, sort) = sort.clone().expect("파일 그룹은 그룹 선택에서만 나온다");
             self.sort_files(&mut files, sort);
-            // 수동 정렬일 때만 끌어서 순서를 바꾼다.
-            let manual = (sort.mode == library::SortMode::Manual).then_some(path);
+            if let Some(kind) = self.file_filter {
+                files.retain(|file| file.kind.filter_kind() == kind);
+            }
+            // 수동 정렬이고 거르지 않았을 때만 끌어서 순서를 바꾼다(위치가 그룹 순서와 같아야 한다).
+            let manual = (sort.mode == library::SortMode::Manual && self.file_filter.is_none())
+                .then_some(path);
             self.render_file_list(files, manual, cx, pal)
         } else if sheets.is_empty() {
             div()

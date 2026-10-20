@@ -1,6 +1,7 @@
 //! 파일 그룹(첨부파일 등): 사이드바 2단의 파일 목록과, 에디터 자리의 간단한 뷰어.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tooltip::Tooltip;
@@ -52,6 +53,15 @@ fn kind_label(file: &library::FileItem) -> String {
         library::FileKind::Pdf => "PDF 문서".to_string(),
         library::FileKind::Other if extension.is_empty() => "파일".to_string(),
         library::FileKind::Other => format!("{extension} 파일"),
+    }
+}
+
+/// 필터 메뉴의 파일 종류 이름.
+fn kind_filter_title(kind: library::FileKind) -> &'static str {
+    match kind {
+        library::FileKind::Image => "이미지",
+        library::FileKind::Text => "텍스트",
+        library::FileKind::Pdf | library::FileKind::Other => "기타",
     }
 }
 
@@ -254,6 +264,53 @@ impl WriterApp {
             .pt_1()
             .children(rows)
             .into_any_element()
+    }
+
+    /// 파일 목록 툴바의 필터 버튼. 누르면 보여 줄 파일 종류를 고른다. 거르는 중이면 강조색.
+    pub(super) fn file_filter_button(
+        &self,
+        cx: &mut Context<Self>,
+        pal: Palette,
+    ) -> impl IntoElement {
+        let app = cx.entity().downgrade();
+        let current = self.file_filter;
+        let pick = move |kind: Option<library::FileKind>| {
+            let app = app.clone();
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                app.update(cx, |app, cx| {
+                    app.file_filter = kind;
+                    cx.notify();
+                })
+                .ok();
+            }
+        };
+        let color = if current.is_some() {
+            pal.tint_foreground
+        } else {
+            pal.foreground.opacity(0.8)
+        };
+        Button::new("file-filter")
+            .icon(Icon::new(icons::filter()).text_color(color))
+            .ghost()
+            .size(px(30.0))
+            .rounded(px(15.0))
+            .tooltip(current.map_or("모든 파일", kind_filter_title))
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let menu = menu.min_w(px(160.0)).item(
+                    PopupMenuItem::new("모든 파일")
+                        .checked(current.is_none())
+                        .on_click(pick(None)),
+                );
+                library::FileKind::FILTERS
+                    .into_iter()
+                    .fold(menu.separator(), |menu, kind| {
+                        menu.item(
+                            PopupMenuItem::new(kind_filter_title(kind))
+                                .checked(current == Some(kind))
+                                .on_click(pick(Some(kind))),
+                        )
+                    })
+            })
     }
 
     /// 뷰어 툴바 버튼: 기본 앱으로 열기, Finder에서 보기, 파일 정보(누르면 팝오버).

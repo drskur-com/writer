@@ -45,6 +45,17 @@ pub enum FileKind {
 }
 
 impl FileKind {
+    /// 필터 메뉴에 보이는 종류. PDF는 아직 따로 거르지 않고 기타에 넣는다.
+    pub const FILTERS: [FileKind; 3] = [FileKind::Image, FileKind::Text, FileKind::Other];
+
+    /// 필터에서 묶이는 종류(PDF → 기타).
+    pub fn filter_kind(self) -> Self {
+        match self {
+            FileKind::Pdf => FileKind::Other,
+            kind => kind,
+        }
+    }
+
     /// 확장자로 종류를 정한다(대소문자 무시).
     pub fn of(path: &Path) -> Self {
         let extension = path
