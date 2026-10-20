@@ -143,11 +143,11 @@ impl Page {
 
 /// 서체 선택지 하나. 이름을 그 서체로 그린다.
 #[derive(Clone)]
-struct FontItem {
+pub(crate) struct FontItem {
     /// 표시 이름.
     title: SharedString,
     /// 서체 이름. 시스템 서체는 `None`.
-    value: Option<SharedString>,
+    pub(crate) value: Option<SharedString>,
     /// 그릴 때 쓰는 서체(시스템 서체는 테마 서체).
     family: SharedString,
 }
@@ -180,6 +180,35 @@ impl SearchableListItem for FontItem {
     }
 }
 
+/// 서체 선택지: 맨 앞의 기본 항목(`value`가 `None`, `default_family`로 그림) + 설치된 서체.
+pub(crate) fn font_items(
+    default_title: &'static str,
+    default_family: SharedString,
+    cx: &App,
+) -> Vec<FontItem> {
+    // `.`으로 시작하는 이름은 시스템 내부 서체라 고를 수 없게 숨긴다.
+    let fonts = cx
+        .text_system()
+        .all_font_names()
+        .into_iter()
+        .filter(|name| !name.starts_with('.'))
+        .map(|name| {
+            let name = SharedString::from(name);
+            FontItem {
+                title: name.clone(),
+                value: Some(name.clone()),
+                family: name,
+            }
+        });
+    std::iter::once(FontItem {
+        title: default_title.into(),
+        value: None,
+        family: default_family,
+    })
+    .chain(fonts)
+    .collect()
+}
+
 /// 설정 창 화면.
 struct SettingsWindow {
     page: Page,
@@ -190,28 +219,7 @@ struct SettingsWindow {
 impl SettingsWindow {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let system_family = cx.theme().font_family.clone();
-        // `.`으로 시작하는 이름은 시스템 내부 서체라 고를 수 없게 숨긴다.
-        let fonts = cx
-            .text_system()
-            .all_font_names()
-            .into_iter()
-            .filter(|name| !name.starts_with('.'))
-            .map(|name| {
-                let name = SharedString::from(name);
-                FontItem {
-                    title: name.clone(),
-                    value: Some(name.clone()),
-                    family: name,
-                }
-            });
-        let items: Vec<FontItem> = std::iter::once(FontItem {
-            title: "시스템 서체".into(),
-            value: None,
-            family: system_family,
-        })
-        .chain(fonts)
-        .collect();
-
+        let items = font_items("시스템 서체", system_family, cx);
         let current = cx.global::<Prefs>().editor_font.clone();
         let selected = items
             .iter()

@@ -20,6 +20,9 @@
 | [0006](./0006-heading-line-style-gpui-base-patch.md) | 에디터 제목 줄 확대는 gpui-base를 vendor 패치해 줄 단위 LineStyle로 한다 | Proposed | 2026-10-20 |
 | [0007](./0007-image-attributes-pandoc-syntax.md) | 이미지 크기·정렬·전면 배치는 Pandoc 속성 문법으로 마크다운에 적는다 | Proposed | 2026-10-20 |
 | [0008](./0008-editor-image-line-blocks.md) | 에디터 이미지는 이미지 줄 아래 "줄 블록"으로 그리고, 이미지 줄은 커서가 있을 때만 보인다 | Proposed | 2026-10-20 |
+| [0009](./0009-project-book-styles.md) | 책 스타일은 프로젝트 `.writer.toml`의 `[styles.<대상>]`에 두고, 다른 프로젝트에서는 값을 복사해 가져온다 | Proposed | 2026-10-20 |
+| [0010](./0010-editor-book-layout.md) | 에디터는 책 스타일대로 문단을 배치하고, 블록 사이 여백은 앞 줄 아래에 둔다 | Proposed | 2026-10-20 |
+| [0011](./0011-line-per-paragraph-editing.md) | 에디터에서는 줄 하나가 문단이고, 파일에는 표준 마크다운으로 변환해 저장한다 | Proposed | 2026-10-20 |
 
 ## 작성 규칙
 

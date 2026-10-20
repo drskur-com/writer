@@ -848,7 +848,7 @@ impl<M: InputModeKind> TextElement<M> {
                 // A wrap boundary is not a newline and must not get such a cell.
                 let newline = is_last && range.start <= end && range.end > end;
                 if start_ix < end_ix || newline {
-                    let indent = if row == 0 { px(0.) } else { line.wrap_indent };
+                    let indent = line.line_indent(row);
                     let left = alignment + indent + shaped.x_for_index(start_ix.min(end) - offset);
                     let right = alignment
                         + indent
@@ -2012,13 +2012,15 @@ impl<M: InputModeKind> TextElement<M> {
         let mut y = layout.visible_top;
         for (line, &row) in layout.lines.iter().zip(layout.visible_buffer_lines.iter()) {
             let line_size = line.size(layout.line_height);
-            if line.block_height > px(0.) {
+            // The space after the block (see `LineStyle::space_after`) has nothing to draw.
+            let content_height = line.block_height - line.block_space;
+            if content_height > px(0.) {
                 let top = y + line_size.height - line.block_height;
                 placements.push((
                     super::LineBlockContext {
                         line: row,
                         text: state.text.slice_line(row).to_string().into(),
-                        size: size(width, line.block_height),
+                        size: size(width, content_height),
                     },
                     bounds.origin + point(layout.line_number_width, top),
                 ));
@@ -2189,6 +2191,7 @@ impl<M: InputModeKind> TextElement<M> {
             debug_assert_eq!(line_item.len(), line_text.len());
 
             let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
+            let mut wrapped_runs: SmallVec<[Vec<TextRun>; 1]> = SmallVec::with_capacity(1);
             let mut line_has_background = false;
             let line_style = line_item.style;
             let line_font_size = font_size * line_style.text_scale;
@@ -2214,6 +2217,7 @@ impl<M: InputModeKind> TextElement<M> {
 
                 line_has_background |= has_background(&line_runs);
                 wrapped_lines.push(shaped_line);
+                wrapped_runs.push(line_runs);
             }
 
             // Use the first visual line's indentation width for continuation lines.
@@ -2228,17 +2232,31 @@ impl<M: InputModeKind> TextElement<M> {
                 px(0.)
             };
 
-            let line_layout = LineLayout::new()
-                .lines(wrapped_lines)
-                .wrap_indent(wrap_indent)
-                .with_background(line_has_background)
-                .with_whitespaces(whitespace_indicators.clone())
-                .row_height(
-                    (line_item.height_scale() != 1.)
-                        .then(|| last_layout.line_height * line_item.height_scale()),
-                )
-                .block_height(line_style.block_height)
-                .hidden(line_item.is_collapsed());
+            let placed = place_rows(
+                wrapped_lines,
+                &wrapped_runs,
+                &line_style,
+                wrap_indent,
+                last_layout.wrap_width,
+                line_font_size,
+                window,
+            );
+            let line_layout = match placed {
+                Placed::Plain(wrapped_lines) => LineLayout::new().lines(wrapped_lines),
+                Placed::Rows(rows, offsets) => {
+                    LineLayout::new().inline_lines(rows).row_offsets(offsets)
+                }
+            }
+            .wrap_indent(wrap_indent)
+            .with_background(line_has_background)
+            .with_whitespaces(whitespace_indicators.clone())
+            .row_height(
+                (line_item.height_scale() != 1.)
+                    .then(|| last_layout.line_height * line_item.height_scale()),
+            )
+            .block_height(line_item.block_height())
+            .block_space(line_style.space_after)
+            .hidden(line_item.is_collapsed());
             lines.push(line_layout);
 
             // +1 for the `\n`
@@ -3561,6 +3579,140 @@ fn placeholder_line_runs<'a>(
 /// Get the runs for the given range.
 ///
 /// The range is the byte range of the wrapped line.
+use crate::input::display_map::{InlineFragment, InputLine};
+
+/// Visual rows of a line, placed by its [`crate::input::LineStyle`].
+enum Placed {
+    /// No first-line indent or alignment: rows as shaped.
+    Plain(SmallVec<[ShapedLine; 1]>),
+    /// Rows (justified ones split into spaced fragments) and each row's left offset.
+    Rows(SmallVec<[InputLine; 1]>, SmallVec<[Pixels; 1]>),
+}
+
+/// Place a line's shaped rows: first-line indent, alignment in the wrap width, and justification
+/// of every row but the last (see [`crate::input::LineAlign`]).
+fn place_rows(
+    rows: SmallVec<[ShapedLine; 1]>,
+    runs: &[Vec<TextRun>],
+    style: &crate::input::LineStyle,
+    wrap_indent: Pixels,
+    wrap_width: Option<Pixels>,
+    font_size: Pixels,
+    window: &mut Window,
+) -> Placed {
+    use crate::input::LineAlign;
+    if style.first_indent <= px(0.) && style.align == LineAlign::Start {
+        return Placed::Plain(rows);
+    }
+    let last = rows.len().saturating_sub(1);
+    let mut placed = SmallVec::with_capacity(rows.len());
+    let mut offsets = SmallVec::with_capacity(rows.len());
+    for (ix, (row, row_runs)) in rows.into_iter().zip(runs).enumerate() {
+        let indent = if ix == 0 { style.first_indent } else { wrap_indent };
+        // Trailing spaces at a wrap point do not count toward the row's width.
+        let width = row.x_for_index(row.text.trim_end().len());
+        let free = wrap_width.map_or(px(0.), |wrap| (wrap - indent - width).max(px(0.)));
+        let offset = match style.align {
+            LineAlign::Center => indent + free / 2.,
+            LineAlign::End => indent + free,
+            LineAlign::Start | LineAlign::Justify => indent,
+        };
+        offsets.push(offset);
+        let justified = (style.align == LineAlign::Justify && ix < last && free > px(0.))
+            .then(|| justify_row(&row, row_runs, free, font_size, window))
+            .flatten();
+        placed.push(justified.unwrap_or_else(|| InputLine::from(row)));
+    }
+    Placed::Rows(placed, offsets)
+}
+
+/// Stretch a row by `free`, spread over its runs of spaces, or between its graphemes when it has
+/// no spaces (e.g. CJK text). Words are shaped on their own and painted at their widened
+/// positions; a run of spaces becomes an unpainted gap as wide as the spaces plus its share. So
+/// caret, selection and hit testing follow the stretched row.
+fn justify_row(
+    row: &ShapedLine,
+    runs: &[TextRun],
+    free: Pixels,
+    font_size: Pixels,
+    window: &mut Window,
+) -> Option<InputLine> {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    let text = row.text.as_ref();
+    let content_len = text.trim_end().len();
+    let content = &text[..content_len];
+    // (word, spaces after it) byte ranges. Trailing spaces stay with the last word.
+    let mut pieces: Vec<(Range<usize>, Range<usize>)> = Vec::new();
+    let mut word_start = 0;
+    let mut chars = content.char_indices().peekable();
+    while let Some((ix, c)) = chars.next() {
+        if c.is_whitespace() && ix > word_start {
+            let mut end = ix + c.len_utf8();
+            while let Some(&(next, c)) = chars.peek() {
+                if !c.is_whitespace() {
+                    break;
+                }
+                end = next + c.len_utf8();
+                chars.next();
+            }
+            if end < content_len {
+                pieces.push((word_start..ix, ix..end));
+                word_start = end;
+            }
+        }
+    }
+    if pieces.is_empty() {
+        // No spaces: widen between graphemes instead.
+        let ends: Vec<usize> = content
+            .grapheme_indices(true)
+            .skip(1)
+            .map(|(ix, _)| ix)
+            .collect();
+        let mut start = 0;
+        for end in ends {
+            pieces.push((start..end, end..end));
+            start = end;
+        }
+        word_start = start;
+    }
+    if pieces.is_empty() {
+        return None;
+    }
+    let extra = free / pieces.len() as f32;
+    let shape = |range: Range<usize>, window: &mut Window| {
+        let piece: SharedString = text[range.clone()].to_string().into();
+        window
+            .text_system()
+            .shape_line(piece, font_size, &runs_for_range(runs, 0, &range), None)
+    };
+    let mut fragments = Vec::with_capacity(pieces.len() * 2 + 1);
+    for (gap, (word, spaces)) in pieces.into_iter().enumerate() {
+        let shift = extra * gap as f32;
+        fragments.push(InlineFragment {
+            x: row.x_for_index(word.start) + shift,
+            width: row.x_for_index(word.end) - row.x_for_index(word.start),
+            text: Some(shape(word.clone(), window)),
+            range: word,
+        });
+        fragments.push(InlineFragment {
+            x: row.x_for_index(spaces.start) + shift,
+            width: row.x_for_index(spaces.end) - row.x_for_index(spaces.start) + extra,
+            text: None,
+            range: spaces,
+        });
+    }
+    let last = word_start..text.len();
+    fragments.push(InlineFragment {
+        x: row.x_for_index(last.start) + free,
+        width: row.x_for_index(last.end) - row.x_for_index(last.start),
+        text: Some(shape(last.clone(), window)),
+        range: last,
+    });
+    // Grapheme gaps are empty and only shift what follows.
+    fragments.retain(|fragment| !fragment.range.is_empty());
+    Some(InputLine::inline(row.text.clone(), fragments))
+}
+
 pub(super) fn runs_for_range(
     runs: &[TextRun],
     line_offset: usize,
@@ -4307,8 +4459,8 @@ mod tests {
         cx.update(|window, cx| {
             editor.update(cx, |state, cx| {
                 state.set_line_style(
-                    Some(|line: &str| {
-                        if line.starts_with("# ") {
+                    Some(|line: crate::input::LineContext<'_>| {
+                        if line.text.starts_with("# ") {
                             crate::input::LineStyle {
                                 text_scale: 2.,
                                 height_scale: 2.5,
@@ -4417,8 +4569,8 @@ mod tests {
         cx.update(|window, cx| {
             editor.update(cx, |state, cx| {
                 state.set_line_style(
-                    Some(|line: &str| crate::input::LineStyle {
-                        collapsed: line.starts_with("!["),
+                    Some(|line: crate::input::LineContext<'_>| crate::input::LineStyle {
+                        collapsed: line.text.starts_with("!["),
                         ..Default::default()
                     }),
                     cx,
@@ -4469,8 +4621,8 @@ mod tests {
         cx.update(|window, cx| {
             editor.update(cx, |state, cx| {
                 state.set_line_style(
-                    Some(|line: &str| crate::input::LineStyle {
-                        collapsed: line.starts_with("!["),
+                    Some(|line: crate::input::LineContext<'_>| crate::input::LineStyle {
+                        collapsed: line.text.starts_with("!["),
                         ..Default::default()
                     }),
                     cx,
@@ -4507,8 +4659,8 @@ mod tests {
         cx.update(|window, cx| {
             editor.update(cx, |state, cx| {
                 state.set_line_style(
-                    Some(|line: &str| crate::input::LineStyle {
-                        text_scale: if line.starts_with("# ") { 2. } else { 1. },
+                    Some(|line: crate::input::LineContext<'_>| crate::input::LineStyle {
+                        text_scale: if line.text.starts_with("# ") { 2. } else { 1. },
                         height_scale: 1.,
                         ..Default::default()
                     }),
@@ -5369,4 +5521,174 @@ mod tests {
             offset
         );
     }
+
+    /// An editor wrapping a long paragraph whose lines get `style`.
+    fn styled_paragraph(
+        cx: &mut TestAppContext,
+        text: &str,
+        style: crate::input::LineStyle,
+    ) -> (Entity<EditorState>, VisualTestContext) {
+        let (editor, window) = decoration_editor(cx, text, true);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            editor.update(cx, |state, cx| {
+                state.set_line_style(Some(move |_: crate::input::LineContext<'_>| style), cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+        (editor, cx)
+    }
+
+    const PARAGRAPH: &str = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
+
+    #[gpui::test]
+    fn first_indent_moves_and_narrows_the_first_row(cx: &mut TestAppContext) {
+        let (editor, mut cx) = styled_paragraph(
+            cx,
+            PARAGRAPH,
+            crate::input::LineStyle {
+                first_indent: px(30.),
+                ..Default::default()
+            },
+        );
+        cx.update(|_, cx| {
+            let state = editor.read(cx);
+            let layout = state.last_layout.as_ref().unwrap();
+            let wrap = layout.wrap_width.unwrap();
+            let line = &layout.lines[0];
+            assert!(line.wrapped_lines.len() > 1);
+            assert_eq!(line.line_indent(0), px(30.));
+            assert_eq!(line.line_indent(1), px(0.));
+            let first = &line.wrapped_lines[0];
+            assert!(first.x_for_index(first.text.trim_end().len()) <= wrap - px(30.));
+            let caret = line.position_for_index(0, layout, false).unwrap();
+            assert_eq!(caret.x, px(30.));
+        });
+    }
+
+    #[gpui::test]
+    fn centered_and_end_aligned_rows_share_the_free_width(cx: &mut TestAppContext) {
+        for (align, share) in [
+            (crate::input::LineAlign::Center, 0.5),
+            (crate::input::LineAlign::End, 1.),
+        ] {
+            let (editor, mut cx) = styled_paragraph(
+                cx,
+                "short title",
+                crate::input::LineStyle {
+                    align,
+                    ..Default::default()
+                },
+            );
+            cx.update(|_, cx| {
+                let state = editor.read(cx);
+                let layout = state.last_layout.as_ref().unwrap();
+                let wrap = layout.wrap_width.unwrap();
+                let line = &layout.lines[0];
+                let width = line.wrapped_lines[0].width;
+                let expected = (wrap - width) * share;
+                assert!((line.line_indent(0) - expected).abs() < px(0.5), "{align:?}");
+                let caret = line.position_for_index(0, layout, false).unwrap();
+                assert_eq!(caret.x, line.line_indent(0));
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn justified_rows_reach_the_wrap_width_and_hit_test_back(cx: &mut TestAppContext) {
+        let (editor, mut cx) = styled_paragraph(
+            cx,
+            PARAGRAPH,
+            crate::input::LineStyle {
+                align: crate::input::LineAlign::Justify,
+                ..Default::default()
+            },
+        );
+        cx.update(|_, cx| {
+            let state = editor.read(cx);
+            let layout = state.last_layout.as_ref().unwrap();
+            let wrap = layout.wrap_width.unwrap();
+            let line = &layout.lines[0];
+            let rows = line.wrapped_lines.len();
+            assert!(rows > 1);
+            let mut start = 0;
+            for (ix, row) in line.wrapped_lines.iter().enumerate() {
+                let end = row.text.trim_end().len();
+                let right = line.line_indent(ix) + row.x_for_index(end);
+                if ix + 1 < rows {
+                    assert!((right - wrap).abs() < px(0.5), "row {ix}: {right:?} vs {wrap:?}");
+                } else {
+                    assert!(right < wrap, "the last row stays ragged");
+                }
+                // Every caret position in a stretched row maps back to its own offset.
+                let stretched = if ix + 1 < rows { row.text.len() } else { 0 };
+                for offset in row.text[..stretched].char_indices().map(|(i, _)| start + i) {
+                    let pos = line.position_for_index(offset, layout, false).unwrap();
+                    let (hit, _) = line
+                        .closest_index_for_position(pos + point(px(0.1), px(1.)), layout)
+                        .unwrap();
+                    assert_eq!(hit, offset, "row {ix}");
+                }
+                start += row.len;
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn space_after_reserves_height_without_a_block(cx: &mut TestAppContext) {
+        let (editor, mut cx) = styled_paragraph(
+            cx,
+            "one\ntwo",
+            crate::input::LineStyle {
+                space_after: px(12.),
+                ..Default::default()
+            },
+        );
+        cx.update(|_, cx| {
+            let state = editor.read(cx);
+            let lh = state.last_layout.as_ref().unwrap().line_height;
+            assert_eq!(state.display_map.display_row_top(1, lh), lh + px(12.));
+            assert_eq!(state.display_map.display_row_text_height(0, lh), lh);
+        });
+    }
+
+    #[gpui::test]
+    fn neighbors_are_restyled_when_a_line_changes(cx: &mut TestAppContext) {
+        let (editor, window) = decoration_editor(cx, "body\n\nmore", false);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            editor.update(cx, |state, cx| {
+                // A blank line before a heading gets space below it.
+                state.set_line_style(
+                    Some(|line: crate::input::LineContext<'_>| crate::input::LineStyle {
+                        space_after: if line.text.is_empty()
+                            && line.next.is_some_and(|next| next.starts_with('#'))
+                        {
+                            px(20.)
+                        } else {
+                            px(0.)
+                        },
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                state.set_selected_range(0..0, cx);
+            });
+            window.draw(cx).clear(cx);
+            let lh = editor.read(cx).last_layout.as_ref().unwrap().line_height;
+            assert_eq!(editor.read(cx).display_map.display_row_top(2, lh), lh * 2.);
+
+            // Turning the next line into a heading restyles the blank line before it.
+            editor.update(cx, |state, cx| {
+                state.set_selected_range(6..6, cx);
+                state.replace("# ", window, cx);
+            });
+            window.draw(cx).clear(cx);
+            assert_eq!(
+                editor.read(cx).display_map.display_row_top(2, lh),
+                lh * 2. + px(20.)
+            );
+        });
+    }
+
 }

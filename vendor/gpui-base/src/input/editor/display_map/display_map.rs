@@ -377,8 +377,8 @@ impl DisplayMap {
             .wrapper()
             .iter_lines()
             .enumerate()
-            .filter(|(_, item)| item.height_scale() != 1. || item.style.block_height > px(0.))
-            .map(|(line, item)| (line, item.height_scale(), item.style.block_height))
+            .filter(|(_, item)| item.height_scale() != 1. || item.block_height() > px(0.))
+            .map(|(line, item)| (line, item.height_scale(), item.block_height()))
             .collect();
         for (line, height_scale, block_height) in styled {
             if let Some(rows) = self.buffer_line_to_display_row_range(line) {

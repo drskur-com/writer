@@ -1,6 +1,6 @@
 # ADR-0006: 에디터 제목 줄 확대는 gpui-base를 vendor 패치해 줄 단위 LineStyle로 한다
 
-- 상태: Proposed
+- 상태: Proposed · 확장: ADR-0010(줄 스타일이 앞뒤 줄을 받고, 가로 배치·줄 아래 여백 추가)
 - 날짜: 2026-10-20
 - 관련: PLAN.md §1.4·§3.4·M2, `vendor/gpui-base`, `docs/patches/gpui-base-0.8.0-line-style.patch`, `src/app/editor.rs`, `src/markdown/mod.rs`
 

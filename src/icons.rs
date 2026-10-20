@@ -57,6 +57,20 @@ pub fn book_info() -> IconName {
     IconName::BookText
 }
 
+/// 책 스타일(프로젝트 더 보기 메뉴).
+pub fn book_style() -> IconName {
+    IconName::Type
+}
+
+/// 목록에서 들어가기·나오기(책 스타일 대상 카드, 스타일 목록으로 돌아가기).
+pub fn enter() -> IconName {
+    IconName::ChevronRight
+}
+
+pub fn leave() -> IconName {
+    IconName::ChevronLeft
+}
+
 /// 이미지(표지 미리보기 자리).
 pub fn image() -> IconName {
     IconName::Image

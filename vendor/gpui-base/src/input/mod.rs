@@ -91,8 +91,8 @@ pub use diagnostics::{
     DiagnosticSummary, DiagnosticTag, RelatedInformation,
 };
 pub use display_map::{
-    BufferPoint, DisplayMap, DisplayPoint, FoldRange, LineBlockMeasureFn, LineStyle, LineStyleFn,
-    WrappingIndent,
+    BufferPoint, DisplayMap, DisplayPoint, FoldRange, LineAlign, LineBlockMeasureFn, LineContext,
+    LineStyle, LineStyleFn, WrappingIndent,
 };
 pub use editor::{Editor, EditorState, LineBlockContext, LineBlockRenderer};
 pub use highlighting::{

@@ -279,15 +279,16 @@ impl crate::input::InputExtras for super::EditorExtras {
 }
 
 impl InputBaseState<EditorMode> {
-    /// Size whole lines from their text, e.g. to enlarge Markdown headings.
+    /// Size and place whole lines from their text, e.g. to enlarge Markdown headings or indent
+    /// and justify paragraphs.
     ///
-    /// `line_style` gets each buffer line without its trailing `\n` and returns its
-    /// [`super::LineStyle`]: a font size multiplier and a row height multiplier. It is called
-    /// again for every edited line, so it should be cheap and depend only on the line text.
-    /// Pass `None` to make every line uniform again.
+    /// `line_style` gets each buffer line and its neighbors without their trailing `\n`
+    /// ([`super::LineContext`]) and returns its [`super::LineStyle`]. It is called again for
+    /// every edited line and the lines next to it, so it should be cheap and depend only on
+    /// that context. Pass `None` to make every line uniform again.
     pub fn set_line_style(
         &mut self,
-        line_style: Option<impl Fn(&str) -> super::LineStyle + 'static>,
+        line_style: Option<impl Fn(super::LineContext<'_>) -> super::LineStyle + 'static>,
         cx: &mut gpui::Context<Self>,
     ) {
         let line_style =

@@ -196,6 +196,13 @@ impl WriterApp {
         {
             self.open_file = None;
         }
+        if self
+            .book_style
+            .as_ref()
+            .is_some_and(|view| !view.read(cx).project().is_dir())
+        {
+            self.book_style = None;
+        }
         self.sync_open_sheet(window, cx);
         self.load_previews(cx);
         cx.notify();

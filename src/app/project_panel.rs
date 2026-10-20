@@ -110,7 +110,7 @@ impl WriterApp {
             )
     }
 
-    /// 도구 줄의 "더 보기" 버튼. 누르면 프로젝트 편집·책 정보를 고른다.
+    /// 도구 줄의 "더 보기" 버튼. 누르면 프로젝트 편집·책 정보·책 스타일을 고른다.
     fn project_more_button(
         &self,
         dir: PathBuf,
@@ -126,6 +126,7 @@ impl WriterApp {
             .dropdown_menu(move |menu, _, _| {
                 let (edit_app, edit_dir) = (app.clone(), dir.clone());
                 let (book_app, book_dir) = (app.clone(), dir.clone());
+                let (style_app, style_dir) = (app.clone(), dir.clone());
                 menu.min_w(px(200.0))
                     .item(
                         PopupMenuItem::element(move |_, _| {
@@ -144,6 +145,16 @@ impl WriterApp {
                         .on_click(move |_, window, cx| {
                             book_app
                                 .update(cx, |app, cx| app.open_book_info(&book_dir, window, cx))
+                                .ok();
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::element(move |_, _| {
+                            menu_row(icons::book_style(), "책 스타일…", None)
+                        })
+                        .on_click(move |_, window, cx| {
+                            style_app
+                                .update(cx, |app, cx| app.open_book_style(&style_dir, window, cx))
                                 .ok();
                         }),
                     )

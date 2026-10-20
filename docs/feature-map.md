@@ -29,6 +29,7 @@
 | 인용/리스트 좌측 레일 | P1 | `RangeDecoration(Fill)` | decorations | M2 | ⬜ |
 | 코드펜스 언어 하이라이트 | P1 | tree-sitter(코드펜스 내부) | `highlighter` | M2 | ⬜ |
 | 제목 크기 확대(줄 단위, H1~H6) | P1 | ATX 레벨별 글자·행 높이 배율, gpui-base 패치(ADR-0006) | display_map / wrapper | M2 | ✅ |
+| 책 스타일대로 문단 배치(정렬·양쪽 정렬·첫 줄 들여쓰기·문단/제목 간격) | P1 | 줄 = 문단(ADR-0011), 줄별 가로 배치·줄 아래 여백, gpui-base 패치(ADR-0010) | display_map / wrapper | M2 | ✅ |
 | 포맷 액션/단축키(굵게/기울임/제목/리스트/인용/코드/링크) | P0 | `actions!` + keymap | `gpui` 액션 | M2 | ⬜ |
 | 다중 커서/선택 | P0 | 엔진 기본 | `add_selection` | M2 | ⬜ |
 | 되돌리기/다시실행 | P0 | 엔진 기본(세션 내), 세션 밖 히스토리는 P2 | `UndoManager` | M2 | ⬜ |
@@ -88,7 +89,7 @@
 | DOCX | P2 | `docx` crate 또는 OOXML 직접 | M7 | ⬜ |
 | ePub | P2 | zip + XHTML + 목차 | M7 | ⬜ |
 | 클립보드로 내보내기 | P1 | 포맷 선택 → clipboard | M7 | ⬜ |
-| 스타일 테마(폰트/여백/헤더·푸터) | P1 | 내보내기 프로필 JSON | M7 | ⬜ |
+| 스타일 테마(폰트/여백/헤더·푸터) | P1 | 프로젝트 `[styles.*]`(ADR-0009) → CSS·typst. 편집 화면·가져오기·에디터 반영 완료, 내보내기 변환 남음 | M7 | 🔨 |
 | 공유 시트(웹 게시) | — | 범위 외 | — | 🚫 |
 
 ## 7. 저장 / 동기화 / 버전

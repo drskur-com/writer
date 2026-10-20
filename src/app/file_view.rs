@@ -108,6 +108,7 @@ impl WriterApp {
             .flatten()
             .filter(|size| size.width > 0 && size.height > 0)
             .map(|size| (size.width as f32, size.height as f32));
+        self.book_style = None;
         self.open_file = Some(OpenFile {
             path,
             text,

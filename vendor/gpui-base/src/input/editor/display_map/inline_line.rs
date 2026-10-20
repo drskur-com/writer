@@ -22,6 +22,22 @@ enum Content {
     Text(ShapedLine),
     Inline(Vec<InlineFragment>),
 }
+/// The character boundary of `line` nearest to `x`.
+///
+/// [`ShapedLine::closest_index_for_x`] puts any `x` past the start of the last glyph at the line
+/// end, which is wrong for a fragment followed by more text (e.g. a word of a justified row).
+fn closest_boundary(line: &ShapedLine, x: Pixels) -> usize {
+    line.text
+        .char_indices()
+        .map(|(ix, _)| ix)
+        .chain(std::iter::once(line.len))
+        .min_by(|&a, &b| {
+            let distance = |ix| (line.x_for_index(ix) - x).abs();
+            f32::from(distance(a)).total_cmp(&f32::from(distance(b)))
+        })
+        .unwrap_or(0)
+}
+
 impl From<ShapedLine> for InputLine {
     fn from(line: ShapedLine) -> Self {
         Self {
@@ -71,7 +87,7 @@ impl InputLine {
                             } else {
                                 f.range.end
                             },
-                            |line| f.range.start + line.closest_index_for_x(x - f.x),
+                            |line| f.range.start + closest_boundary(line, x - f.x),
                         );
                     }
                 }

@@ -1,6 +1,6 @@
 //! 에디터 영역: 떠 있는 툴바 + 본문, 열린 시트의 편집·자동 저장.
 
-use gpui_base::input::LineStyle;
+use gpui_base::input::{LineContext, LineStyle};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::input::{
     Editor, EditorState, InputEvent, TextDecoration, TextDecorationCollection,
@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use super::WriterApp;
 use super::editor_image::ImageBlocks;
+use super::editor_layout::BookLayout;
 use super::style::*;
 use crate::markdown::{self, Span, SpanKind};
 use crate::{TogglePreview, icons, library};
@@ -31,25 +32,11 @@ const MARKER_FADE: f32 = 0.6;
 /// 인용 본문을 흐리게 하는 정도.
 const QUOTE_FADE: f32 = 0.3;
 
-/// 제목 레벨(H1~H6)별 (글자 크기 배율, 줄 높이 배율). 본문 대비.
-/// 줄 높이를 글자보다 더 키워 제목 위아래에 여백을 둔다.
-const HEADING_SCALES: [(f32, f32); 6] = [
-    (1.6, 2.0),
-    (1.4, 1.75),
-    (1.25, 1.5),
-    (1.15, 1.25),
-    (1.05, 1.25),
-    (1.0, 1.0),
-];
-
 /// 본문 최대 폭(가독 폭). 창이 넓으면 가운데에 둔다.
 pub(super) const EDITOR_MAX_WIDTH: f32 = 680.0;
 
 /// 본문 글자 크기.
 const EDITOR_FONT_SIZE: f32 = 16.0;
-
-/// 본문 줄 높이(글자 크기 대비).
-const EDITOR_LINE_HEIGHT: f32 = 1.6;
 
 /// 커서를 화면 위·아래 끝에서 떨어뜨려 두는 줄 수. 마지막 줄 아래에도 그만큼 빈 공간을 둬서
 /// 문서 끝에서 입력할 때도 이 여백이 유지된다.
@@ -74,29 +61,18 @@ pub(super) struct OpenSheet {
     markup_refresh: Option<Task<()>>,
     /// 지금 적용한 좌우 여백. 영역 폭이 바뀔 때만 다시 넣는다.
     side_padding: Rc<Cell<Pixels>>,
+    /// 시트가 든 프로젝트 폴더(프로젝트 밖이면 `None`).
+    project: Option<PathBuf>,
+    /// 적용한 책 스타일(프로젝트 밖이면 기본값). 서체·줄 간격·제목 크기를 에디터에 반영한다.
+    styles: library::Styles,
     _subscription: Subscription,
 }
 
-/// 제목 줄은 레벨에 따라 글자와 줄 높이를 키운다(gpui-base 패치, ADR-0006).
-/// 이미지 줄은 커서가 들어올 때만 글자를 보이고, 평소에는 아래 이미지만 보인다(ADR-0008).
-fn line_style(line: &str) -> LineStyle {
-    if markdown::image_line(line).is_some() {
-        return LineStyle {
-            collapsed: true,
-            ..Default::default()
-        };
-    }
-    match markdown::heading_level(line) {
-        Some(level) => {
-            let (text_scale, height_scale) = HEADING_SCALES[usize::from(level) - 1];
-            LineStyle {
-                text_scale,
-                height_scale,
-                ..Default::default()
-            }
-        }
-        None => LineStyle::default(),
-    }
+/// 줄 스타일: 책 스타일대로 문단·제목을 배치한다(ADR-0010). 제목 줄 확대는 gpui-base 패치(ADR-0006),
+/// 이미지 줄은 커서가 들어올 때만 글자를 보인다(ADR-0008).
+fn line_style(styles: &library::Styles) -> impl Fn(LineContext<'_>) -> LineStyle + 'static {
+    let layout = BookLayout::new(styles, EDITOR_FONT_SIZE);
+    move |line| layout.line_style(line)
 }
 
 /// 마크다운 마크업 표시. 겹치는 스팬이 같은 스타일 속성을 다투지 않도록 종류별로 나눈다.
@@ -227,6 +203,19 @@ impl WriterApp {
                 .items_center()
                 .gap_2(),
         )
+        // 시트 목록 칸이 숨은 책 스타일 화면에서는 패널 다시 열기 버튼을 여기 둔다.
+        .when(self.book_style.is_some() && !self.sidebar_visible, |this| {
+            #[cfg(target_os = "macos")]
+            let this = this.pl(px(TRAFFIC_LIGHT_SPACE));
+            this.child(tool_group(pal).child(
+                icon_button("show-sidebar", icons::panel(), true, pal).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.sidebar_visible = true;
+                        cx.notify();
+                    },
+                )),
+            ))
+        })
         .child(
             tool_group(pal)
                 .child(icon_button("nav-back", icons::back(), false, pal))
@@ -237,6 +226,8 @@ impl WriterApp {
         // 파일 뷰어에서는 편집 도구 대신 파일 열기·보기·정보 버튼을 둔다.
         .map(|this| match &self.open_file {
             Some(file) => this.child(self.file_actions(file, pal)),
+            // 책 스타일 화면에는 편집 도구가 없다.
+            None if self.book_style.is_some() => this,
             None => this
                 .child(
                     tool_group(pal)
@@ -265,60 +256,68 @@ impl WriterApp {
         });
 
         let body: AnyElement = match &self.editor {
+            None if let Some(view) = &self.book_style => view.clone().into_any_element(),
             // 파일 그룹의 파일을 골랐으면 에디터 대신 뷰어를 보여 준다.
             None if let Some(file) = &self.open_file => self.render_file_viewer(file, pal),
-            Some(editor) => div()
-                .flex_1()
-                .min_h_0()
-                .relative()
-                // 입력창은 영역을 꽉 채워 스크롤바가 오른쪽 끝에 붙게 하고,
-                // 본문은 좌우 여백으로 가독 폭(EDITOR_MAX_WIDTH) 가운데에 둔다.
-                .child(
-                    // 코드 에디터 컴포넌트지만 산문용으로 글꼴·줄 높이를 덮어쓴다.
-                    Editor::new(&editor.state)
-                        .appearance(false)
-                        .bordered(false)
-                        .size_full()
-                        .font_family(crate::settings::Prefs::editor_font_family(cx))
-                        .text_size(px(EDITOR_FONT_SIZE))
-                        .line_height(relative(EDITOR_LINE_HEIGHT)),
-                )
-                // 영역 폭을 재서 여백을 맞춘다(사이드바 애니메이션 중에도 따라감).
-                .child({
-                    let state = editor.state.clone();
-                    let applied = editor.side_padding.clone();
-                    canvas(
-                        move |bounds, _, cx| {
-                            let side = ((bounds.size.width - px(EDITOR_MAX_WIDTH)) / 2.0)
-                                .max(px(EDITOR_MIN_SIDE_PADDING));
-                            if applied.get() != side {
-                                applied.set(side);
-                                state.update(cx, |state, cx| {
-                                    state.set_editor_paddings(Edges {
-                                        left: side,
-                                        right: side,
-                                        ..Default::default()
-                                    });
-                                    cx.notify();
-                                });
-                            }
-                        },
-                        |_, _, _, _| {},
+            Some(editor) => {
+                let body = editor.styles.resolve(library::StyleTarget::Body);
+                let font = body.font.map_or_else(
+                    || crate::settings::Prefs::editor_font_family(cx),
+                    SharedString::from,
+                );
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    // 입력창은 영역을 꽉 채워 스크롤바가 오른쪽 끝에 붙게 하고,
+                    // 본문은 좌우 여백으로 가독 폭(EDITOR_MAX_WIDTH) 가운데에 둔다.
+                    .child(
+                        // 코드 에디터 컴포넌트지만 산문용으로 글꼴·줄 높이를 덮어쓴다.
+                        Editor::new(&editor.state)
+                            .appearance(false)
+                            .bordered(false)
+                            .size_full()
+                            .font_family(font)
+                            .text_size(px(EDITOR_FONT_SIZE))
+                            .line_height(relative(body.line_height as f32)),
                     )
-                    .absolute()
-                    .size_full()
-                })
-                // 단어 수는 툴바 아래 오른쪽 위에 둔다(Ulysses).
-                .child(
-                    div()
+                    // 영역 폭을 재서 여백을 맞춘다(사이드바 애니메이션 중에도 따라감).
+                    .child({
+                        let state = editor.state.clone();
+                        let applied = editor.side_padding.clone();
+                        canvas(
+                            move |bounds, _, cx| {
+                                let side = ((bounds.size.width - px(EDITOR_MAX_WIDTH)) / 2.0)
+                                    .max(px(EDITOR_MIN_SIDE_PADDING));
+                                if applied.get() != side {
+                                    applied.set(side);
+                                    state.update(cx, |state, cx| {
+                                        state.set_editor_paddings(Edges {
+                                            left: side,
+                                            right: side,
+                                            ..Default::default()
+                                        });
+                                        cx.notify();
+                                    });
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
                         .absolute()
-                        .top_0()
-                        .right_6()
-                        .text_xs()
-                        .text_color(pal.muted)
-                        .child(format!("{} 개 단어", editor.words)),
-                )
-                .into_any_element(),
+                        .size_full()
+                    })
+                    // 단어 수는 툴바 아래 오른쪽 위에 둔다(Ulysses).
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_6()
+                            .text_xs()
+                            .text_color(pal.muted)
+                            .child(format!("{} 개 단어", editor.words)),
+                    )
+                    .into_any_element()
+            }
             None => div()
                 .flex_1()
                 .flex()
@@ -382,6 +381,7 @@ impl WriterApp {
         }
         self.selected_sheet = path;
         self.open_file = None;
+        self.book_style = None;
         if focus && let Some(editor) = &self.editor {
             editor.state.update(cx, |state, cx| state.focus(window, cx));
         }
@@ -390,8 +390,9 @@ impl WriterApp {
 
     /// 시트 파일을 읽어 새 편집 상태를 만든다.
     fn open_sheet(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // 파일은 표준 마크다운, 에디터는 줄 하나가 문단이다(ADR-0011).
         let text = match library::read_sheet(&path) {
-            Ok(text) => text,
+            Ok(text) => markdown::to_editor(&text),
             Err(err) => {
                 self.notify(format!("시트를 열 수 없습니다: {err}"), window, cx);
                 return;
@@ -399,6 +400,11 @@ impl WriterApp {
         };
         let disk_modified = library::modified_nanos(&path);
         let words = library::count_words(text.chars());
+        let project = self.library.as_ref().and_then(|lib| lib.project_of(&path));
+        let styles = project
+            .as_deref()
+            .map(library::read_styles)
+            .unwrap_or_default();
         // 마지막 줄 아래 빈 공간(scroll_beyond_last_line)은 코드 에디터 모드에만 있어서
         // EditorState를 쓰고 코드용 기능(줄 번호·들여쓰기 안내선·괄호 자동 닫기·접기)은 끈다.
         // 빈 공간이 없으면 문서 끝에서 커서 여백을 맞추려 끝 너머로 스크롤했다가 되돌아오며 출렁인다.
@@ -411,7 +417,7 @@ impl WriterApp {
                 .folding(false)
                 .cursor_surrounding_lines(Some(CURSOR_MARGIN_LINES))
                 .scroll_beyond_last_line(Some(CURSOR_MARGIN_LINES));
-            state.set_line_style(Some(line_style), cx);
+            state.set_line_style(Some(line_style(&styles)), cx);
             // 이미지 줄 아래에 이미지를 그린다(ADR-0008).
             let images = Rc::new(ImageBlocks::new(&path));
             let measure = images.clone();
@@ -450,6 +456,8 @@ impl WriterApp {
             markup,
             markup_refresh: None,
             side_padding: Rc::new(Cell::new(px(-1.0))),
+            project,
+            styles,
             _subscription: subscription,
         });
     }
@@ -518,7 +526,7 @@ impl WriterApp {
         }
         editor.autosave = None;
         let text = editor.state.read(cx).value();
-        editor.disk_modified = library::write_sheet(&editor.path, &text)?;
+        editor.disk_modified = library::write_sheet(&editor.path, &markdown::to_markdown(&text))?;
         editor.dirty = false;
         Ok(())
     }
@@ -531,10 +539,12 @@ impl WriterApp {
         self.editor = None;
         self.selected_sheet = None;
         self.open_file = None;
+        self.book_style = None;
     }
 
     /// 다시 스캔한 뒤 열린 시트를 맞춘다.
     ///
+    /// - 책 스타일이 바뀌었으면 다시 입힌다.
     /// - 파일이 사라졌으면 닫는다.
     /// - 밖에서 바뀌었고 저장하지 않은 변경이 없으면 다시 읽는다.
     ///   (저장하지 않은 변경이 있으면 지금은 그대로 두고 다음 저장이 덮어쓴다.)
@@ -542,6 +552,16 @@ impl WriterApp {
         let Some(editor) = &mut self.editor else {
             return;
         };
+        if let Some(project) = &editor.project {
+            let styles = library::read_styles(project);
+            if styles != editor.styles {
+                let line_style = line_style(&styles);
+                editor.styles = styles;
+                editor
+                    .state
+                    .update(cx, |state, cx| state.set_line_style(Some(line_style), cx));
+            }
+        }
         if !editor.path.is_file() {
             self.editor = None;
             self.selected_sheet = None;
@@ -551,7 +571,8 @@ impl WriterApp {
         if editor.dirty || modified == editor.disk_modified {
             return;
         }
-        let Ok(text) = library::read_sheet(&editor.path) else {
+        let Ok(text) = library::read_sheet(&editor.path).map(|text| markdown::to_editor(&text))
+        else {
             return;
         };
         editor.words = library::count_words(text.chars());

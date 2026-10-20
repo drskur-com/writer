@@ -1,8 +1,10 @@
 //! 앱 상태(`WriterApp`)와 액션 핸들러. 화면별 렌더는 하위 모듈에 나눠 둔다.
 
 mod book_info;
+mod book_style;
 mod editor;
 mod editor_image;
+mod editor_layout;
 mod file_view;
 mod insert_image;
 mod library_ops;
@@ -70,6 +72,8 @@ pub(crate) struct WriterApp {
     editor: Option<editor::OpenSheet>,
     /// 에디터 자리 뷰어에 연 파일(파일 그룹). 시트와 동시에 열리지 않는다.
     open_file: Option<file_view::OpenFile>,
+    /// 에디터 자리에 연 책 스타일 화면. 시트·파일과 동시에 열리지 않는다.
+    book_style: Option<Entity<book_style::BookStyleView>>,
     /// 파일 그룹 목록에서 보여 줄 파일 종류. None이면 모두.
     file_filter: Option<library::FileKind>,
     /// 앱 종료 직전에 열린 시트를 저장하는 구독.
@@ -115,6 +119,7 @@ impl WriterApp {
             preview_task: None,
             editor: None,
             open_file: None,
+            book_style: None,
             file_filter: None,
             _quit_subscription: quit_subscription,
             _prefs_subscription: prefs_subscription,
@@ -166,6 +171,7 @@ impl WriterApp {
         self.selected = None;
         self.selected_sheet = None;
         self.open_file = None;
+        self.book_style = None;
         cx.notify();
     }
 
@@ -432,7 +438,10 @@ impl WriterApp {
             .flex()
             .size_full()
             .child(self.render_library_panel(cx, pal))
-            .child(self.render_sheet_column(cx, pal))
+            // 책 스타일 화면은 폼과 미리보기를 나란히 두려고 시트 목록 칸까지 쓴다.
+            .when(self.book_style.is_none(), |this| {
+                this.child(self.render_sheet_column(cx, pal))
+            })
             .child(self.render_editor_column(cx, pal))
             .when(self.preview_visible, |this| {
                 this.child(

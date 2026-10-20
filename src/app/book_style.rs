@@ -1,0 +1,800 @@
+//! 책 스타일 화면(에디터 자리): 대상 목록 → 대상별 편집(+미리보기), 다른 프로젝트에서 가져오기.
+//!
+//! 값을 바꾸면 바로 프로젝트 `.writer.toml`의 `[styles]`에 쓴다(ADR-0009). 에디터는 시트를 열 때
+//! 스타일을 다시 읽는다.
+
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::searchable_list::SearchableVec;
+use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, IndexPath, Sizable as _,
+    StyledExt as _, WindowExt as _,
+};
+use gpui_kit::gpui::prelude::{FluentBuilder as _, InteractiveElement as _};
+use gpui_kit::gpui::*;
+use std::path::{Path, PathBuf};
+
+use super::WriterApp;
+use super::style::*;
+use crate::icons;
+use crate::library::{self, Align, StyleTarget};
+use crate::settings::{FontItem, Prefs, font_items};
+
+/// 내용 최대 폭.
+const CONTENT_MAX_WIDTH: f32 = 960.0;
+
+/// 편집 폼 폭(나머지는 미리보기).
+const FORM_WIDTH: f32 = 340.0;
+
+/// 서체를 정하지 않았을 때의 선택지 이름. 설정 창의 에디터 서체를 따른다.
+const DEFAULT_FONT_TITLE: &str = "설정의 에디터 서체";
+
+/// 제목 서체를 정하지 않았을 때의 선택지 이름.
+const INHERIT_FONT_TITLE: &str = "본문 서체";
+
+/// 미리보기 최소 폭. 이보다 좁으면 폼 아래로 내린다.
+const PREVIEW_MIN_WIDTH: f32 = 280.0;
+
+/// 미리보기 기준 글자 크기(에디터 본문과 같다).
+const PREVIEW_FONT_SIZE: f32 = 16.0;
+
+/// 줄 간격 슬라이더 범위.
+const LINE_HEIGHT_RANGE: (f32, f32) = (1.0, 2.5);
+
+/// 미리보기 본문.
+const SAMPLE_BODY: [&str; 2] = [
+    "문장은 저마다 고유한 리듬을 가지고 있습니다. 글꼴과 줄 간격은 그 리듬을 읽는 경험으로 바꿉니다.",
+    "문단의 들여쓰기와 간격을 조절해 책에 어울리는 호흡을 만들어 보세요.",
+];
+
+/// 대상별 미리보기 제목.
+fn sample_title(target: StyleTarget) -> &'static str {
+    match target {
+        StyleTarget::Body => "",
+        StyleTarget::Part => "제1부 강을 건너며",
+        StyleTarget::Chapter => "제1장 시라 강 건너",
+        StyleTarget::Section => "1. 아타고 참배",
+    }
+}
+
+/// 숫자 칸 값 → 스타일 값. 비우면 기본값(`None`), 숫자가 아니면 바꾸지 않는다(`Err`).
+fn parse_number(text: &str) -> Result<Option<f64>, ()> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    text.parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(Some)
+        .ok_or(())
+}
+
+/// 숫자를 칸에 보일 문자열로(1.0 → "1", 1.25 → "1.25").
+fn format_number(value: f64) -> String {
+    let text = format!("{value:.2}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// 숫자 칸이 고치는 값.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NumberField {
+    FontSize,
+    FirstLineIndent,
+    SpaceBefore,
+    SpaceAfter,
+}
+
+impl NumberField {
+    fn label(self, target: StyleTarget) -> &'static str {
+        match self {
+            NumberField::FontSize => "글자 크기 (본문 대비)",
+            NumberField::FirstLineIndent => "첫 줄 들여쓰기 (em)",
+            NumberField::SpaceBefore => "앞 여백 (em)",
+            NumberField::SpaceAfter if target.is_title() => "뒤 여백 (em)",
+            NumberField::SpaceAfter => "문단 사이 간격 (em)",
+        }
+    }
+
+    /// 대상의 편집 폼에 나오는 숫자 칸.
+    fn for_target(target: StyleTarget) -> &'static [NumberField] {
+        if target.is_title() {
+            &[
+                NumberField::FontSize,
+                NumberField::SpaceBefore,
+                NumberField::SpaceAfter,
+            ]
+        } else {
+            &[NumberField::FirstLineIndent, NumberField::SpaceAfter]
+        }
+    }
+
+    fn get(self, spec: &library::StyleSpec) -> Option<f64> {
+        match self {
+            NumberField::FontSize => spec.font_size,
+            NumberField::FirstLineIndent => spec.first_line_indent,
+            NumberField::SpaceBefore => spec.space_before,
+            NumberField::SpaceAfter => spec.space_after,
+        }
+    }
+
+    fn set(self, spec: &mut library::StyleSpec, value: Option<f64>) {
+        match self {
+            NumberField::FontSize => spec.font_size = value,
+            NumberField::FirstLineIndent => spec.first_line_indent = value,
+            NumberField::SpaceBefore => spec.space_before = value,
+            NumberField::SpaceAfter => spec.space_after = value,
+        }
+    }
+
+    fn resolved(self, style: &library::ResolvedStyle) -> f64 {
+        match self {
+            NumberField::FontSize => style.font_size,
+            NumberField::FirstLineIndent => style.first_line_indent,
+            NumberField::SpaceBefore => style.space_before,
+            NumberField::SpaceAfter => style.space_after,
+        }
+    }
+}
+
+/// 대상 하나를 고치는 입력 상태. 대상을 열 때 만들고 목록으로 돌아가면 버린다.
+struct TargetForm {
+    target: StyleTarget,
+    font: Entity<SelectState<SearchableVec<FontItem>>>,
+    line_height: Entity<SliderState>,
+    numbers: Vec<(NumberField, Entity<InputState>)>,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// 책 스타일 화면.
+pub(super) struct BookStyleView {
+    project: PathBuf,
+    styles: library::Styles,
+    /// 열어 둔 대상. 없으면 대상 목록.
+    form: Option<TargetForm>,
+    /// 가져오기에서 고른 프로젝트.
+    import_source: Option<PathBuf>,
+    /// 가져올 프로젝트 목록을 라이브러리에서 읽는다.
+    app: WeakEntity<WriterApp>,
+}
+
+impl BookStyleView {
+    fn new(app: WeakEntity<WriterApp>, project: PathBuf) -> Self {
+        Self {
+            styles: library::read_styles(&project),
+            project,
+            form: None,
+            import_source: None,
+            app,
+        }
+    }
+
+    /// 이 화면이 보여 주는 프로젝트.
+    pub(super) fn project(&self) -> &Path {
+        &self.project
+    }
+
+    /// 스타일을 파일에 쓴다. 실패하면 알림을 띄운다.
+    fn save(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(err) = library::write_styles(&self.project, &self.styles) {
+            window.push_notification(
+                Notification::info(format!("책 스타일을 저장할 수 없습니다: {err}")),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// 대상 하나를 고치고 저장한다.
+    fn update_spec(
+        &mut self,
+        target: StyleTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut library::StyleSpec),
+    ) {
+        change(self.styles.get_mut(target));
+        self.save(window, cx);
+    }
+
+    /// 대상 편집을 연다(입력 상태를 지금 값으로 만든다).
+    fn open_target(&mut self, target: StyleTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let spec = self.styles.get(target).clone();
+        let resolved = spec.resolve(target);
+        let mut subscriptions = Vec::new();
+
+        // 제목은 서체를 정하지 않으면 본문 서체를 따른다.
+        let items = if target.is_title() {
+            font_items(
+                INHERIT_FONT_TITLE,
+                self.effective_font(StyleTarget::Body, cx),
+                cx,
+            )
+        } else {
+            font_items(DEFAULT_FONT_TITLE, Prefs::editor_font_family(cx), cx)
+        };
+        let selected = items
+            .iter()
+            .position(|item| item.value.as_deref() == spec.font.as_deref())
+            .unwrap_or(0);
+        let font = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(items),
+                Some(IndexPath::new(selected)),
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        subscriptions.push(cx.subscribe_in(
+            &font,
+            window,
+            move |this, _, event: &SelectEvent<SearchableVec<FontItem>>, window, cx| {
+                let SelectEvent::Confirm(Some(font)) = event else {
+                    return;
+                };
+                let font = font.as_ref().map(|font| font.to_string());
+                this.update_spec(target, window, cx, |spec| spec.font = font);
+            },
+        ));
+
+        let (min, max) = LINE_HEIGHT_RANGE;
+        let line_height = cx.new(|_| {
+            SliderState::new()
+                .min(min)
+                .max(max)
+                .step(0.05)
+                .default_value(resolved.line_height as f32)
+        });
+        // 끄는 동안에는 미리보기만, 놓을 때 저장한다.
+        subscriptions.push(cx.subscribe_in(
+            &line_height,
+            window,
+            move |this, _, event: &SliderEvent, window, cx| match event {
+                SliderEvent::Change(value) => {
+                    this.styles.get_mut(target).line_height = Some(f64::from(value.end()));
+                    cx.notify();
+                }
+                SliderEvent::Release(value) => {
+                    let value = f64::from(value.end());
+                    this.update_spec(target, window, cx, |spec| spec.line_height = Some(value));
+                }
+            },
+        ));
+
+        let numbers = NumberField::for_target(target)
+            .iter()
+            .map(|&field| {
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(format_number(field.resolved(&target.defaults())))
+                        .default_value(field.get(&spec).map(format_number).unwrap_or_default())
+                });
+                subscriptions.push(cx.subscribe_in(
+                    &input,
+                    window,
+                    move |this, input, event: &InputEvent, window, cx| {
+                        if !matches!(event, InputEvent::Change) {
+                            return;
+                        }
+                        if let Ok(value) = parse_number(&input.read(cx).value()) {
+                            this.update_spec(target, window, cx, |spec| field.set(spec, value));
+                        }
+                    },
+                ));
+                (field, input)
+            })
+            .collect();
+
+        self.form = Some(TargetForm {
+            target,
+            font,
+            line_height,
+            numbers,
+            _subscriptions: subscriptions,
+        });
+        cx.notify();
+    }
+
+    /// 대상이 실제로 쓰는 서체: 지정 서체 → (제목이면) 본문 서체 → 설정의 에디터 서체.
+    fn effective_font(&self, target: StyleTarget, cx: &App) -> SharedString {
+        self.styles
+            .resolve(target)
+            .font
+            .map_or_else(|| Prefs::editor_font_family(cx), SharedString::from)
+    }
+
+    /// 서체 포함을 바꾼다. 서체를 정하지 않은 채 켜면 지금 쓰는 서체를 적어 넣는다.
+    /// 설정의 에디터 서체는 컴퓨터마다 달라서, 그대로 두면 내보내는 곳마다 결과가 달라진다.
+    fn set_embed(
+        &mut self,
+        target: StyleTarget,
+        embed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pin = (embed && self.styles.resolve(target).font.is_none())
+            .then(|| self.effective_font(target, cx).to_string());
+        let pinned = pin.is_some();
+        self.update_spec(target, window, cx, |spec| {
+            spec.embed_font = Some(embed);
+            if let Some(font) = pin {
+                spec.font = Some(font);
+            }
+        });
+        if pinned {
+            // 서체 칸에 적어 넣은 서체를 보인다.
+            self.open_target(target, window, cx);
+        }
+    }
+
+    /// 대상을 기본값으로 되돌리고 입력 칸도 다시 만든다.
+    fn reset_target(&mut self, target: StyleTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.update_spec(target, window, cx, |spec| *spec = Default::default());
+        self.open_target(target, window, cx);
+    }
+
+    /// 고른 프로젝트의 스타일을 그대로 가져온다(이 프로젝트의 스타일은 덮어쓴다).
+    fn import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(source) = self.import_source.clone() else {
+            return;
+        };
+        match library::import_styles(&source, &self.project) {
+            Ok(styles) => {
+                self.styles = styles;
+                self.import_source = None;
+                window.push_notification(Notification::info("스타일을 가져왔습니다."), cx);
+            }
+            Err(err) => window.push_notification(
+                Notification::info(format!("스타일을 가져올 수 없습니다: {err}")),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// 가져올 수 있는 프로젝트(이 프로젝트 말고): (경로, 이름).
+    fn other_projects(&self, cx: &App) -> Vec<(PathBuf, String)> {
+        let Some(app) = self.app.upgrade() else {
+            return Vec::new();
+        };
+        let Some(lib) = &app.read(cx).library else {
+            return Vec::new();
+        };
+        lib.section(library::SectionKind::Projects)
+            .into_iter()
+            .flat_map(|section| &section.entries)
+            .filter_map(|entry| match entry {
+                library::Entry::Group(group) if group.path != self.project => {
+                    Some((group.path.clone(), group.name.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 머리글: 작은 제목, 큰 제목, 설명, (오른쪽) 추가 버튼.
+    fn header(
+        pal: Palette,
+        title: &'static str,
+        description: &'static str,
+        trailing: Option<AnyElement>,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .items_end()
+            .justify_between()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_xs().text_color(pal.muted).child("책 스타일"))
+                    .child(div().text_3xl().font_semibold().child(title))
+                    .child(div().text_sm().text_color(pal.muted).child(description)),
+            )
+            .children(trailing)
+    }
+
+    /// 대상 목록 + 가져오기.
+    fn render_list(&self, cx: &mut Context<Self>, pal: Palette) -> AnyElement {
+        let cards = StyleTarget::ALL.into_iter().map(|target| {
+            div()
+                .id(target.key())
+                .px_5()
+                .py_4()
+                .flex()
+                .items_center()
+                .gap_4()
+                .rounded_xl()
+                .border_1()
+                .border_color(pal.panel_border)
+                .bg(pal.panel)
+                .cursor_pointer()
+                .hover(move |style| style.bg(pal.hover))
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.open_target(target, window, cx)),
+                )
+                .child(
+                    div()
+                        .size(px(36.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_lg()
+                        .bg(pal.background)
+                        .child(Icon::new(icons::paragraph()).text_color(pal.foreground)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .child(div().font_semibold().child(target.title()))
+                        .child(div().text_xs().text_color(pal.muted).child(target.key())),
+                )
+                .child(Icon::new(icons::enter()).text_color(pal.muted))
+        });
+
+        let view = cx.entity().downgrade();
+        let projects = self.other_projects(cx);
+        let source_name = self.import_source.as_ref().and_then(|source| {
+            projects
+                .iter()
+                .find(|(path, _)| path == source)
+                .map(|(_, name)| name.clone())
+        });
+        let picker = Button::new("style-import-source")
+            .label(source_name.unwrap_or_else(|| "스타일을 가져올 프로젝트 선택…".into()))
+            .dropdown_caret(true)
+            .disabled(projects.is_empty())
+            .w_full()
+            .dropdown_menu(move |menu, _, _| {
+                projects
+                    .iter()
+                    .fold(menu.min_w(px(240.0)), |menu, (path, name)| {
+                        let (view, path) = (view.clone(), path.clone());
+                        menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
+                            view.update(cx, |view, cx| {
+                                view.import_source = Some(path.clone());
+                                cx.notify();
+                            })
+                            .ok();
+                        }))
+                    })
+            });
+        let import = div()
+            .pt_6()
+            .border_t_1()
+            .border_color(pal.panel_border)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(pal.muted)
+                    .child("다른 프로젝트의 스타일을 이 프로젝트에 그대로 가져옵니다. 지금 스타일은 덮어씁니다."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().child(picker))
+                    .child(
+                        Button::new("style-import")
+                            .label("적용")
+                            .disabled(self.import_source.is_none())
+                            .on_click(cx.listener(|this, _, window, cx| this.import(window, cx))),
+                    ),
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .child(Self::header(
+                pal,
+                "책 스타일",
+                "스타일 대상을 선택해 표시 방식을 조정하세요.",
+                None,
+            ))
+            .child(div().flex().flex_col().gap_3().children(cards))
+            .child(import)
+            .into_any_element()
+    }
+
+    /// 대상 편집: 왼쪽 폼, 오른쪽 미리보기, 아래 기본값으로 되돌리기.
+    fn render_form(&self, form: &TargetForm, cx: &mut Context<Self>, pal: Palette) -> AnyElement {
+        let target = form.target;
+        let spec = self.styles.get(target);
+        let resolved = self.styles.resolve(target);
+        let view = cx.entity().downgrade();
+
+        let field = |label: SharedString, control: AnyElement| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(div().text_sm().text_color(pal.muted).child(label))
+                .child(control)
+        };
+
+        let embed_view = view.clone();
+        let embed = Button::new("style-embed-font")
+            .label(if resolved.embed_font {
+                "서체 파일 넣기"
+            } else {
+                "리더의 시스템 서체 사용"
+            })
+            .dropdown_caret(true)
+            .w_full()
+            .dropdown_menu(move |menu, _, _| {
+                [(false, "리더의 시스템 서체 사용"), (true, "서체 파일 넣기")]
+                    .into_iter()
+                    .fold(menu.min_w(px(220.0)), |menu, (embed, title)| {
+                        let view = embed_view.clone();
+                        menu.item(
+                            PopupMenuItem::new(title)
+                                .checked(embed == resolved.embed_font)
+                                .on_click(move |_, window, cx| {
+                                    view.update(cx, |view, cx| {
+                                        view.set_embed(target, embed, window, cx)
+                                    })
+                                    .ok();
+                                }),
+                        )
+                    })
+            });
+
+        let align_view = view.clone();
+        let current_align = resolved.align;
+        let align = Button::new("style-align")
+            .label(current_align.title())
+            .dropdown_caret(true)
+            .w_full()
+            .dropdown_menu(move |menu, _, _| {
+                Align::ALL
+                    .into_iter()
+                    .fold(menu.min_w(px(160.0)), |menu, align| {
+                        let view = align_view.clone();
+                        menu.item(
+                            PopupMenuItem::new(align.title())
+                                .checked(align == current_align)
+                                .on_click(move |_, window, cx| {
+                                    view.update(cx, |view, cx| {
+                                        view.update_spec(target, window, cx, |spec| {
+                                            spec.align = Some(align)
+                                        })
+                                    })
+                                    .ok();
+                                }),
+                        )
+                    })
+            });
+
+        let numbers = form.numbers.iter().map(|(number, input)| {
+            field(
+                number.label(target).into(),
+                Input::new(input).focus_ring(false).into_any_element(),
+            )
+        });
+
+        let fields = div()
+            .w(px(FORM_WIDTH))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(field(
+                "서체".into(),
+                Select::new(&form.font)
+                    .focus_ring(false)
+                    .menu_max_h(px(320.0))
+                    .search_placeholder("서체 검색")
+                    .into_any_element(),
+            ))
+            .child(field("서체 포함".into(), embed.into_any_element()))
+            .child(field(
+                format!("줄 간격 · {}", format_number(resolved.line_height)).into(),
+                Slider::new(&form.line_height).into_any_element(),
+            ))
+            .child(field(
+                if target.is_title() {
+                    "정렬"
+                } else {
+                    "문단 정렬"
+                }
+                .into(),
+                align.into_any_element(),
+            ))
+            .children(numbers);
+
+        let preview = div()
+            .flex_1()
+            .min_w(px(PREVIEW_MIN_WIDTH))
+            .overflow_hidden()
+            .p_6()
+            .rounded_xl()
+            .border_1()
+            .border_color(pal.panel_border)
+            .bg(pal.panel)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .pb_4()
+                    .text_xs()
+                    .text_color(pal.muted)
+                    .child("미리보기"),
+            )
+            .child(self.render_preview(target, cx))
+            .when(!resolved.embed_font, |this| {
+                this.child(
+                    div()
+                        .pt_4()
+                        .text_xs()
+                        .text_color(pal.muted)
+                        .child("서체를 넣지 않아 리더 기본 서체로 보입니다. 에디터에서는 고른 서체로 보입니다."),
+                )
+            });
+
+        let back = Button::new("style-back")
+            .ghost()
+            .small()
+            .icon(Icon::new(icons::leave()))
+            .label("스타일 목록")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.form = None;
+                cx.notify();
+            }));
+        let description = "미리보기를 확인하며 스타일을 조정하세요. 바꾼 값은 바로 저장됩니다.";
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .child(Self::header(
+                pal,
+                target.title(),
+                description,
+                Some(back.into_any_element()),
+            ))
+            .child(
+                // 좁으면 미리보기를 폼 아래로 내린다.
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_start()
+                    .gap_6()
+                    .child(fields)
+                    .child(preview),
+            )
+            .child(
+                div()
+                    .pt_4()
+                    .border_t_1()
+                    .border_color(pal.panel_border)
+                    .flex()
+                    .justify_end()
+                    .child(
+                        Button::new("style-reset")
+                            .ghost()
+                            .label("기본값으로 되돌리기")
+                            .disabled(spec.is_empty())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.reset_target(target, window, cx)
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// 미리보기: 내보낸 책에서 보일 모습. 제목 대상이면 제목 뒤에 본문을 이어 그린다.
+    ///
+    /// 서체를 넣지 않으면 리더 기본 서체로 보이므로 시스템 서체로 그린다.
+    /// 화면 텍스트는 양쪽 정렬이 없어 왼쪽 정렬로, 첫 줄 들여쓰기는 앞 공백으로 흉내 낸다.
+    fn render_preview(&self, target: StyleTarget, cx: &App) -> impl IntoElement {
+        let reader_family = cx.theme().font_family.clone();
+        let body = self.styles.resolve(StyleTarget::Body);
+        let paragraph =
+            |style: &library::ResolvedStyle, family: SharedString, text: String, bold: bool| {
+                let size = PREVIEW_FONT_SIZE * style.font_size as f32;
+                let family = if style.embed_font {
+                    family
+                } else {
+                    reader_family.clone()
+                };
+                div()
+                    .w_full()
+                    .whitespace_normal()
+                    .font_family(family)
+                    .text_size(px(size))
+                    .line_height(relative(style.line_height as f32))
+                    .pt(px(PREVIEW_FONT_SIZE * style.space_before as f32))
+                    .pb(px(PREVIEW_FONT_SIZE * style.space_after as f32))
+                    .when(bold, |this| this.font_weight(FontWeight::BOLD))
+                    .map(|this| match style.align {
+                        Align::Center => this.text_center(),
+                        Align::Right => this.text_right(),
+                        Align::Left | Align::Justify => this.text_left(),
+                    })
+                    .child(format!("{}{text}", indent(style.first_line_indent)))
+            };
+        let mut blocks = Vec::new();
+        if target.is_title() {
+            let title = self.styles.resolve(target);
+            let family = self.effective_font(target, cx);
+            blocks.push(paragraph(
+                &title,
+                family,
+                sample_title(target).to_string(),
+                true,
+            ));
+        }
+        let body_family = self.effective_font(StyleTarget::Body, cx);
+        for text in SAMPLE_BODY {
+            blocks.push(paragraph(
+                &body,
+                body_family.clone(),
+                text.to_string(),
+                false,
+            ));
+        }
+        div().flex().flex_col().children(blocks)
+    }
+}
+
+/// 첫 줄 들여쓰기(em)를 공백 문자로: 전각 공백(1em) + 반각 공백(0.5em).
+fn indent(em: f64) -> String {
+    let halves = (em * 2.0).round().max(0.0) as usize;
+    let mut text = "\u{3000}".repeat(halves / 2);
+    if halves % 2 == 1 {
+        text.push('\u{2002}');
+    }
+    text
+}
+
+impl Render for BookStyleView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = Palette::from_theme(cx.theme());
+        let content = match &self.form {
+            Some(form) => self.render_form(form, cx, pal),
+            None => self.render_list(cx, pal),
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .px_10()
+            .py_8()
+            .child(div().max_w(px(CONTENT_MAX_WIDTH)).mx_auto().child(content))
+            .overflow_y_scrollbar()
+    }
+}
+
+impl WriterApp {
+    /// 에디터 자리에 프로젝트의 책 스타일 화면을 연다. 열린 시트는 저장하고 닫는다.
+    pub(super) fn open_book_style(
+        &mut self,
+        dir: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_sheet(None, false, window, cx);
+        if self.selected_sheet.is_some() {
+            // 시트를 저장하지 못해 그대로 열려 있다.
+            return;
+        }
+        let (app, project) = (cx.entity().downgrade(), dir.to_path_buf());
+        self.book_style = Some(cx.new(|_| BookStyleView::new(app, project)));
+        cx.notify();
+    }
+}

@@ -19,6 +19,7 @@ mod files;
 mod layout;
 mod meta;
 mod preview;
+mod style;
 
 pub use book::{
     BookMeta, COVER_EXTENSIONS, COVER_STEM, attach_to_sheet, read_book, set_cover, write_book,
@@ -31,6 +32,9 @@ pub use meta::{
     set_sort_descending, update_group, update_project,
 };
 pub use preview::{Preview, read_preview};
+pub use style::{
+    Align, ResolvedStyle, StyleSpec, StyleTarget, Styles, import_styles, read_styles, write_styles,
+};
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -281,6 +285,13 @@ impl Library {
                 Entry::Group(group) => group.find_mut(path),
                 Entry::Sheet(_) => None,
             })
+    }
+
+    /// 경로(시트·그룹)가 들어 있는 프로젝트 폴더(`Projects/<Project>`). 프로젝트 밖이면 `None`.
+    pub fn project_of(&self, path: &Path) -> Option<PathBuf> {
+        let projects = self.root.join(SectionKind::Projects.dir());
+        let name = path.strip_prefix(&projects).ok()?.components().next()?;
+        Some(projects.join(name))
     }
 
     /// `Projects/` 바로 아래의 프로젝트를 찾는다.
