@@ -3,7 +3,9 @@
 mod editor;
 mod library_ops;
 mod library_panel;
+mod new_project;
 mod onboarding;
+mod project_panel;
 mod sheet_list;
 pub(crate) mod style;
 
@@ -18,10 +20,18 @@ use gpui_kit::component::menu::AppMenuBar;
 
 use crate::menus::install_menus;
 use crate::{
-    APP_NAME, CloseLibrary, OpenLibrary, QuitApp, SaveSheet, SetTheme, ShowAbout,
-    TogglePreview, ToggleSidebar, ToggleTheme, config, icons, library, theme,
+    APP_NAME, CloseLibrary, OpenLibrary, QuitApp, SaveSheet, SetTheme, ShowAbout, TogglePreview,
+    ToggleSidebar, ToggleTheme, config, icons, library, theme,
 };
 use style::*;
+
+/// 그룹의 시트 정렬(방법 + 방향)과, 사용자가 고를 수 있는지.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct GroupSort {
+    mode: library::SortMode,
+    descending: bool,
+    choosable: bool,
+}
 
 /// 사이드바에서 선택된 항목(섹션 또는 그룹).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -37,6 +47,10 @@ pub(crate) struct WriterApp {
     library: Option<library::Library>,
     /// 접힌 최상위 섹션(UI 상태; 추후 registry에 저장).
     collapsed_sections: std::collections::HashSet<library::SectionKind>,
+    /// 사이드바 1단에 펼쳐 둔 프로젝트. 있으면 라이브러리 대신 프로젝트 화면을 그린다.
+    open_project: Option<PathBuf>,
+    /// 프로젝트 화면에서 하위 그룹을 펼친 그룹.
+    expanded_groups: std::collections::HashSet<PathBuf>,
     /// 사이드바에서 선택한 항목(섹션/그룹). None이면 기본 선택을 쓴다.
     selected: Option<Selection>,
     /// 선택한 시트.
@@ -85,6 +99,8 @@ impl WriterApp {
             library,
             notice,
             collapsed_sections: std::collections::HashSet::new(),
+            open_project: None,
+            expanded_groups: std::collections::HashSet::new(),
             selected: None,
             selected_sheet: None,
             previews: std::collections::HashMap::new(),
@@ -135,6 +151,8 @@ impl WriterApp {
         self.previews.clear();
         self.library = None;
         self.notice = None;
+        self.open_project = None;
+        self.expanded_groups.clear();
         self.selected = None;
         self.selected_sheet = None;
         cx.notify();
@@ -167,28 +185,22 @@ impl WriterApp {
         cx.notify();
     }
 
-    fn on_set_theme(&mut self, action: &SetTheme, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_set_theme(&mut self, action: &SetTheme, _: &mut Window, cx: &mut Context<Self>) {
         theme::set_theme(&action.name, cx);
-        let name = action.name.clone();
-        self.after_theme_change(format!("테마: {name}"), window, cx);
+        self.after_theme_change(cx);
     }
 
-    fn on_toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_theme(&mut self, _: &ToggleTheme, _: &mut Window, cx: &mut Context<Self>) {
         let next = if Theme::global(cx).is_dark() {
             theme::DEFAULT_LIGHT
         } else {
             theme::DEFAULT_DARK
         };
         theme::set_theme(next, cx);
-        self.after_theme_change(format!("테마: {next}"), window, cx);
+        self.after_theme_change(cx);
     }
 
-    fn after_theme_change(
-        &mut self,
-        message: impl Into<SharedString>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn after_theme_change(&mut self, cx: &mut Context<Self>) {
         // 선택한 테마를 기억해 다음 실행에 복원한다.
         let mut config = config::Config::load();
         config.theme = Some(theme::active_name(cx).to_string());
@@ -200,7 +212,7 @@ impl WriterApp {
         self.refresh_markup(cx);
         #[cfg(not(target_os = "macos"))]
         self.menu_bar.update(cx, |menu_bar, cx| menu_bar.reload(cx));
-        self.notify(message, window, cx);
+        cx.notify();
     }
 
     fn on_quit(&mut self, _: &QuitApp, _: &mut Window, cx: &mut Context<Self>) {
@@ -219,39 +231,116 @@ impl WriterApp {
             // 섹션 선택("모두"): 섹션 안의 모든 시트를 최근 수정순으로.
             Selection::Section(kind) => {
                 let mut sheets: Vec<library::Sheet> = lib
-                    .sections
-                    .iter()
-                    .filter(|section| section.kind == *kind)
-                    .flat_map(|section| &section.entries)
-                    .flat_map(|entry| match entry {
-                        library::Entry::Sheet(sheet) => std::slice::from_ref(sheet),
-                        library::Entry::Group(group) => group.sheets.as_slice(),
-                    })
-                    .cloned()
-                    .collect();
+                    .section(*kind)
+                    .map(|section| section.sheets().into_iter().cloned().collect())
+                    .unwrap_or_default();
                 sheets.sort_by_key(|sheet| std::cmp::Reverse(sheet.modified));
                 sheets
             }
-            Selection::Group(path) => lib
-                .sections
-                .iter()
-                .flat_map(|section| &section.entries)
-                .find_map(|entry| match entry {
-                    library::Entry::Group(group) if &group.path == path => {
-                        Some(group.sheets.clone())
-                    }
-                    _ => None,
-                })
-                .unwrap_or_default(),
+            Selection::Group(path) => {
+                let mut sheets = lib
+                    .find_group(path)
+                    .map(|group| group.sheets.clone())
+                    .unwrap_or_default();
+                self.sort_sheets(&mut sheets, self.sort_for(path));
+                sheets
+            }
         }
     }
 
-    /// 기본 선택: 첫 그룹, 없으면 첫 섹션.
+    /// 그룹의 정렬 방법·방향과, 사용자가 고를 수 있는지.
+    ///
+    /// 프로젝트 원고는 순서가 곧 원고 구조라서 늘 수동이고 고를 수 없다.
+    /// 지정이 없으면 메모는 수정일순, 프로젝트(추가자료)는 수동이다.
+    fn sort_for(&self, path: &std::path::Path) -> GroupSort {
+        let fixed = GroupSort {
+            mode: library::SortMode::Manual,
+            descending: false,
+            choosable: false,
+        };
+        let Some(lib) = &self.library else {
+            return fixed;
+        };
+        let projects = lib.root.join(library::SectionKind::Projects.dir());
+        let default = match path.strip_prefix(&projects) {
+            // <Project>/Extras/… 만 고를 수 있다.
+            Ok(relative)
+                if relative
+                    .components()
+                    .nth(1)
+                    .is_some_and(|part| part.as_os_str() == library::EXTRAS_DIR) =>
+            {
+                library::SortMode::Manual
+            }
+            Ok(_) => return fixed,
+            Err(_) => library::SortMode::Modified,
+        };
+        let group = lib.find_group(path);
+        let mode = group.and_then(|group| group.sort).unwrap_or(default);
+        GroupSort {
+            mode,
+            descending: group
+                .and_then(|group| group.descending)
+                .unwrap_or(mode.default_descending()),
+            choosable: true,
+        }
+    }
+
+    /// 시트를 정렬 방법·방향대로 늘어놓는다. 수동이면 읽은 순서(메타 `sheets`) 그대로 둔다.
+    ///
+    /// 제목순은 읽어 둔 미리보기 제목을 쓴다. 아직 못 읽은 시트와 빈 시트는 방향과 상관없이 뒤로 간다.
+    fn sort_sheets(&self, sheets: &mut [library::Sheet], sort: GroupSort) {
+        let directed = |ordering: std::cmp::Ordering| {
+            if sort.descending {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        };
+        match sort.mode {
+            library::SortMode::Manual => {}
+            library::SortMode::Modified => {
+                sheets.sort_by(|a, b| directed(a.modified.cmp(&b.modified)))
+            }
+            library::SortMode::Created => {
+                sheets.sort_by(|a, b| directed(a.created.cmp(&b.created)))
+            }
+            library::SortMode::Title => {
+                let title = |sheet: &library::Sheet| {
+                    self.previews
+                        .get(&sheet.path)
+                        .map(|(_, preview)| preview.title.to_lowercase())
+                        .unwrap_or_default()
+                };
+                let mut keyed: Vec<(String, library::Sheet)> = sheets
+                    .iter()
+                    .map(|sheet| (title(sheet), sheet.clone()))
+                    .collect();
+                keyed.sort_by(|(a, _), (b, _)| {
+                    a.is_empty()
+                        .cmp(&b.is_empty())
+                        .then_with(|| directed(a.cmp(b)))
+                });
+                for (slot, (_, sheet)) in sheets.iter_mut().zip(keyed) {
+                    *slot = sheet;
+                }
+            }
+        }
+    }
+
+    /// 기본 선택: 프로젝트 화면이면 그 프로젝트의 기본 선택, 아니면 첫 그룹, 없으면 첫 섹션.
     fn effective_selection(&self) -> Option<Selection> {
         if let Some(selection) = &self.selected {
             return Some(selection.clone());
         }
         let lib = self.library.as_ref()?;
+        if let Some(project) = self
+            .open_project
+            .as_ref()
+            .and_then(|dir| lib.find_project(dir))
+        {
+            return Some(project_panel::default_selection(project));
+        }
         for section in &lib.sections {
             for entry in &section.entries {
                 if let library::Entry::Group(group) = entry {
@@ -271,13 +360,9 @@ impl WriterApp {
             Selection::Section(kind) => kind.title().to_string(),
             Selection::Group(path) => self
                 .library
-                .iter()
-                .flat_map(|lib| &lib.sections)
-                .flat_map(|section| &section.entries)
-                .find_map(|entry| match entry {
-                    library::Entry::Group(group) if &group.path == path => Some(group.name.clone()),
-                    _ => None,
-                })
+                .as_ref()
+                .and_then(|lib| lib.find_group(path))
+                .map(|group| group.name.clone())
                 .unwrap_or_default(),
         }
     }
@@ -287,11 +372,7 @@ impl WriterApp {
         self.library
             .iter()
             .flat_map(|lib| &lib.sections)
-            .flat_map(|section| &section.entries)
-            .flat_map(|entry| match entry {
-                library::Entry::Sheet(sheet) => std::slice::from_ref(sheet),
-                library::Entry::Group(group) => group.sheets.as_slice(),
-            })
+            .flat_map(library::Section::sheets)
             .find(|sheet| &sheet.path == path)
             .cloned()
     }

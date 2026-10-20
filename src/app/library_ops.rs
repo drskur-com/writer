@@ -8,6 +8,13 @@ use std::path::PathBuf;
 use super::{Selection, WriterApp};
 use crate::{APP_NAME, NewSheet, config, library, watch};
 
+/// 정렬 메뉴에서 고른 것.
+#[derive(Clone, Copy)]
+pub(super) enum SortChange {
+    Mode(library::SortMode),
+    Descending(bool),
+}
+
 impl WriterApp {
     // --- 라이브러리 폴더 설정 ---------------------------------------------
 
@@ -69,6 +76,8 @@ impl WriterApp {
                 self.close_sheet(cx);
                 self.library = Some(opened);
                 self.notice = None;
+                self.open_project = None;
+                self.expanded_groups.clear();
                 self.selected = None;
                 self.previews.clear();
                 self.start_watching(window, cx);
@@ -171,6 +180,10 @@ impl WriterApp {
         {
             self.selected = None;
         }
+        if self.open_project.as_ref().is_some_and(|dir| !dir.is_dir()) {
+            self.open_project = None;
+        }
+        self.expanded_groups.retain(|dir| dir.is_dir());
         if let Some(path) = &self.selected_sheet
             && self.find_sheet(path).is_none()
         {
@@ -193,18 +206,38 @@ impl WriterApp {
         let Some(group) = self
             .library
             .as_mut()
-            .into_iter()
-            .flat_map(|lib| &mut lib.sections)
-            .flat_map(|section| &mut section.entries)
-            .find_map(|entry| match entry {
-                library::Entry::Group(group) if group.path == group_path => Some(group),
-                _ => None,
-            })
+            .and_then(|lib| lib.find_group_mut(group_path))
         else {
             return;
         };
         if let Err(err) = library::move_sheet(group, from, to) {
             self.notify(format!("순서를 저장할 수 없습니다: {err}"), window, cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    /// 그룹의 정렬 방법이나 방향을 바꾸고 그룹 메타에 저장한다.
+    pub(super) fn set_sort(
+        &mut self,
+        group_path: &std::path::Path,
+        change: SortChange,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = self
+            .library
+            .as_mut()
+            .and_then(|lib| lib.find_group_mut(group_path))
+        else {
+            return;
+        };
+        let saved = match change {
+            SortChange::Mode(mode) => library::set_sort(group, mode),
+            SortChange::Descending(descending) => library::set_sort_descending(group, descending),
+        };
+        if let Err(err) = saved {
+            self.notify(format!("정렬 방법을 저장할 수 없습니다: {err}"), window, cx);
             return;
         }
         cx.notify();

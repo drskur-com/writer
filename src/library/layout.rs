@@ -4,9 +4,9 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
-use super::meta::write_group_meta_if_absent;
+use super::meta::{ensure_project_layout, write_group_meta_if_absent};
 use super::{
-    DEFAULT_INBOX, DEFAULT_PROJECT, MARKER_DIR, MARKER_FILE, SECTIONS, SectionKind, is_markdown,
+    DEFAULT_INBOX, MARKER_DIR, MARKER_FILE, SECTIONS, SectionKind, is_group_dir, is_markdown,
 };
 
 /// 폴더 검증 결과.
@@ -100,7 +100,7 @@ pub fn initialize(root: &Path) -> io::Result<()> {
 ///
 /// - `Notes/`·`Projects/` 폴더를 보장한다.
 /// - 구버전 최상위 `Inbox/` 를 `Notes/Inbox/` 로 이관한다.
-/// - `Projects/` 가 비어 있으면 `샘플 프로젝트/` 를 만든다.
+/// - 추가자료 폴더가 없는 프로젝트에 기본 추가자료(템플릿)를 만든다.
 pub fn ensure_layout(root: &Path) -> io::Result<()> {
     for kind in SECTIONS {
         std::fs::create_dir_all(root.join(kind.dir()))?;
@@ -123,22 +123,14 @@ pub fn ensure_layout(root: &Path) -> io::Result<()> {
     std::fs::create_dir_all(&notes_inbox)?;
     write_group_meta_if_absent(&notes_inbox, Some("inbox"), None)?;
 
-    // 프로젝트가 하나도 없으면 샘플 생성
-    let projects_dir = root.join(SectionKind::Projects.dir());
-    if is_empty_dir(&projects_dir)? {
-        let sample = projects_dir.join(DEFAULT_PROJECT);
-        std::fs::create_dir_all(&sample)?;
-        write_group_meta_if_absent(&sample, Some("folder"), None)?;
+    for entry in std::fs::read_dir(root.join(SectionKind::Projects.dir()))? {
+        let path = entry?.path();
+        if is_group_dir(&path) {
+            ensure_project_layout(&path)?;
+        }
     }
 
     Ok(())
-}
-
-fn is_empty_dir(dir: &Path) -> io::Result<bool> {
-    if !dir.is_dir() {
-        return Ok(true);
-    }
-    Ok(std::fs::read_dir(dir)?.next().is_none())
 }
 
 /// `.writer/library.toml` 마커를 보장한다(멱등).
@@ -177,7 +169,9 @@ mod tests {
             assert!(root.join(kind.dir()).is_dir(), "{:?}", kind);
         }
         assert!(root.join("Notes").join(DEFAULT_INBOX).is_dir());
-        assert!(root.join("Projects").join(DEFAULT_PROJECT).is_dir());
+        // 프로젝트는 만들어 두지 않는다.
+        assert!(root.join("Projects").is_dir());
+        assert_eq!(std::fs::read_dir(root.join("Projects")).unwrap().count(), 0);
         assert_eq!(inspect(&root).unwrap(), FolderKind::Library);
 
         std::fs::remove_dir_all(&root).ok();

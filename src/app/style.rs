@@ -69,6 +69,27 @@ impl Palette {
     }
 }
 
+/// 프로젝트 색(메타 이름 → 테마 색). 색은 테마에서만 가져온다(ADR-0001).
+/// 첫 항목은 "색 없음"에 해당하는 본문 색이다.
+pub(crate) const PROJECT_COLORS: [&str; 8] = [
+    "black", "red", "yellow", "green", "cyan", "blue", "magenta", "gray",
+];
+
+/// 프로젝트 색 이름을 테마 색으로 바꾼다. 모르는 이름이면 `None`.
+pub(crate) fn project_color(name: &str, theme: &Theme) -> Option<Hsla> {
+    Some(match name {
+        "black" => theme.foreground,
+        "red" => theme.red,
+        "yellow" => theme.yellow,
+        "green" => theme.green,
+        "cyan" => theme.cyan,
+        "blue" => theme.blue,
+        "magenta" => theme.magenta,
+        "gray" => theme.muted_foreground,
+        _ => return None,
+    })
+}
+
 /// 아이콘만 있는 둥근 툴바 버튼. `enabled`가 false면 흐리게 그리고 hover/커서를 주지 않는다.
 pub(crate) fn icon_button(
     id: impl Into<ElementId>,

@@ -51,7 +51,10 @@ mod tests {
 
     #[test]
     fn lucide_icon_stroke_is_adjusted() {
-        let svg = Assets.load("icons/folder.svg").unwrap().expect("folder 아이콘 없음");
+        let svg = Assets
+            .load("icons/folder.svg")
+            .unwrap()
+            .expect("folder 아이콘 없음");
         let text = std::str::from_utf8(&svg).unwrap();
         assert!(text.contains(&format!(r#"stroke-width="{ICON_STROKE_WIDTH}""#)));
         assert!(!text.contains(LUCIDE_STROKE));

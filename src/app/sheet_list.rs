@@ -1,13 +1,16 @@
 //! 사이드바 2단: 시트 목록(카드, 끌어서 정렬, 순서 애니메이션).
 
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::gpui::prelude::{
     FluentBuilder, InteractiveElement as _, StatefulInteractiveElement as _,
 };
 use gpui_kit::gpui::*;
 
+use super::library_ops::SortChange;
 use super::style::*;
-use super::{Selection, WriterApp};
+use super::{GroupSort, Selection, WriterApp};
 use crate::{NewSheet, icons, library};
 
 /// 시트 카드 높이(제목 한 줄 + 발췌 두 줄 + 여백). 모든 카드가 같아서
@@ -64,6 +67,55 @@ impl Render for DraggedSheet {
 }
 
 impl WriterApp {
+    /// 시트 목록 제목 오른쪽의 정렬 버튼. 누르면 정렬 방법과(수동이 아니면) 방향을 고르고,
+    /// 고른 것은 그룹 메타에 저장한다.
+    fn sort_button(
+        &self,
+        group_path: std::path::PathBuf,
+        current: GroupSort,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let app = cx.entity().downgrade();
+        let pick = move |path: &std::path::PathBuf, change: SortChange| {
+            let (app, path) = (app.clone(), path.clone());
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                app.update(cx, |app, cx| app.set_sort(&path, change, window, cx))
+                    .ok();
+            }
+        };
+        Button::new("sheet-sort")
+            .icon(Icon::new(icons::sort()))
+            .ghost()
+            .small()
+            .tooltip(current.mode.title())
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let menu =
+                    library::SortMode::ALL
+                        .into_iter()
+                        .fold(menu.min_w(px(160.0)), |menu, mode| {
+                            menu.item(
+                                PopupMenuItem::new(mode.title())
+                                    .checked(mode == current.mode)
+                                    .on_click(pick(&group_path, SortChange::Mode(mode))),
+                            )
+                        });
+                let Some((ascending, descending)) = current.mode.direction_titles() else {
+                    return menu;
+                };
+                menu.separator()
+                    .item(
+                        PopupMenuItem::new(ascending)
+                            .checked(!current.descending)
+                            .on_click(pick(&group_path, SortChange::Descending(false))),
+                    )
+                    .item(
+                        PopupMenuItem::new(descending)
+                            .checked(current.descending)
+                            .on_click(pick(&group_path, SortChange::Descending(true))),
+                    )
+            })
+    }
+
     /// 사이드바 2단: 선택한 그룹(또는 "모두")의 시트 목록. 항상 보인다.
     pub(super) fn render_sheet_column(
         &self,
@@ -79,6 +131,11 @@ impl WriterApp {
             .as_ref()
             .map(|selection| self.sheets_for(selection))
             .unwrap_or_default();
+        // 그룹의 정렬 방법. 고를 수 없는 그룹(프로젝트 원고)은 버튼을 두지 않는다.
+        let sort = match &current {
+            Some(Selection::Group(path)) => Some((path.clone(), self.sort_for(path))),
+            _ => None,
+        };
 
         let toolbar = window_drag_area(
             div()
@@ -121,9 +178,9 @@ impl WriterApp {
                 .child("시트 없음")
                 .into_any_element()
         } else {
-            // 그룹을 볼 때만 끌어서 순서를 바꾼다("모두"는 수정순 고정).
-            let group_path = match &current {
-                Some(Selection::Group(path)) => Some(path.clone()),
+            // 수동 정렬인 그룹을 볼 때만 끌어서 순서를 바꾼다("모두"는 수정순 고정).
+            let group_path = match &sort {
+                Some((path, sort)) if sort.mode == library::SortMode::Manual => Some(path.clone()),
                 _ => None,
             };
             // 다른 목록으로 바꿨을 때 같은 시트가 옛 자리에서 날아오지 않도록 목록별로 키를 나눈다.
@@ -270,12 +327,25 @@ impl WriterApp {
                 div()
                     .px_4()
                     .pb_2()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
                     .border_b_1()
                     .border_color(pal.panel_border)
-                    .text_lg()
-                    .font_semibold()
-                    .text_color(pal.foreground)
-                    .child(title),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_lg()
+                            .font_semibold()
+                            .text_color(pal.foreground)
+                            .child(title),
+                    )
+                    .when_some(
+                        sort.filter(|(_, sort)| sort.choosable),
+                        |this, (path, sort)| this.child(self.sort_button(path, sort, cx)),
+                    ),
             )
             .child(list)
     }

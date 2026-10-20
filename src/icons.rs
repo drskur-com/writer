@@ -10,6 +10,9 @@ use gpui_kit::assets::IconName;
 pub const PACK: &str = "Lucide";
 
 /// 문자열 아이콘 이름을 [`IconName`] 으로 해석한다. 모르면 폴더.
+///
+/// 짧은 별칭(inbox, notebook, book, file, folder)을 먼저 보고, 아니면 Lucide 파일 이름
+/// (예: `book-open`)으로 카탈로그에서 찾는다.
 pub fn by_name(name: &str) -> IconName {
     match name {
         "inbox" => IconName::Inbox,
@@ -17,9 +20,55 @@ pub fn by_name(name: &str) -> IconName {
         "book" => IconName::BookOpen,
         "file" => IconName::FileText,
         "folder" => IconName::Folder,
-        _ => IconName::Folder,
+        _ => catalog()
+            .binary_search_by(|(stem, _)| stem.as_str().cmp(name))
+            .map(|ix| catalog()[ix].1)
+            .unwrap_or(IconName::Folder),
     }
 }
+
+/// 번들된 아이콘 전체: (Lucide 파일 이름, 아이콘), 이름순. 아이콘 고르기·이름 찾기에 쓴다.
+pub fn catalog() -> &'static [(String, IconName)] {
+    static CATALOG: std::sync::OnceLock<Vec<(String, IconName)>> = std::sync::OnceLock::new();
+    CATALOG.get_or_init(|| {
+        let mut icons: Vec<_> = IconName::ALL
+            .iter()
+            .map(|&icon| {
+                let path = icon.path();
+                let stem = path
+                    .trim_start_matches("icons/")
+                    .trim_end_matches(".svg")
+                    .to_string();
+                (stem, icon)
+            })
+            .collect();
+        icons.sort_by(|a, b| a.0.cmp(&b.0));
+        icons
+    })
+}
+
+/// 편집(프로젝트 우클릭 메뉴).
+pub fn edit() -> IconName {
+    IconName::Pencil
+}
+
+/// 휴지통으로 이동(프로젝트 우클릭 메뉴).
+pub fn trash() -> IconName {
+    IconName::Trash
+}
+
+/// 아이콘 더 보기(…).
+pub fn more() -> IconName {
+    IconName::Ellipsis
+}
+
+/// 검색.
+pub fn search_field() -> IconName {
+    IconName::Search
+}
+
+/// 새 프로젝트에서 고를 수 있는 아이콘(메타 이름). 첫 항목이 기본.
+pub const PROJECT_ICONS: [&str; 4] = ["book", "notebook", "file", "folder"];
 
 /// 그룹 아이콘: 메타 이름이 있으면 그걸, 없으면 기본 폴더.
 pub fn group_icon(name: Option<&str>) -> IconName {
@@ -41,6 +90,34 @@ pub fn all_sheets() -> IconName {
     IconName::Layers
 }
 
+/// 프로젝트 화면 → 라이브러리로 돌아가기.
+pub fn back_to_library() -> IconName {
+    IconName::ChevronsLeft
+}
+
+/// 프로젝트 통계.
+pub fn stats() -> IconName {
+    IconName::ChartLine
+}
+
+/// 프로젝트 빌드(PDF/ePub).
+pub fn build() -> IconName {
+    IconName::FileOutput
+}
+
+/// 하위 그룹 펼침/접힘 표시.
+pub fn disclosure(expanded: bool) -> IconName {
+    if expanded {
+        IconName::ChevronDown
+    } else {
+        IconName::ChevronRight
+    }
+}
+
+/// 프로젝트 원고 그룹·추가자료 그룹의 기본 아이콘(메타 이름).
+pub const MANUSCRIPT_GROUP_ICON: &str = "files";
+pub const EXTRAS_GROUP_ICON: &str = "folder";
+
 /// 새 그룹.
 pub fn new_group() -> IconName {
     IconName::FolderPlus
@@ -49,6 +126,11 @@ pub fn new_group() -> IconName {
 /// 시트 목록 필터/정렬.
 pub fn filter() -> IconName {
     IconName::ListFilter
+}
+
+/// 시트 정렬 방법 고르기.
+pub fn sort() -> IconName {
+    IconName::ArrowDownUp
 }
 
 /// 새 시트 작성.
@@ -99,4 +181,19 @@ pub fn export() -> IconName {
 /// 프리뷰(오른쪽 패널) 토글.
 pub fn preview() -> IconName {
     IconName::PanelRight
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn by_name_resolves_aliases_and_lucide_names() {
+        assert_eq!(by_name("book"), IconName::BookOpen);
+        assert_eq!(by_name("newspaper"), IconName::Newspaper);
+        assert_eq!(by_name("없는-아이콘"), IconName::Folder);
+        assert_eq!(by_name(MANUSCRIPT_GROUP_ICON), IconName::Files);
+        assert_eq!(by_name("layout-template"), IconName::LayoutTemplate);
+        assert!(catalog().len() > 1000);
+    }
 }
