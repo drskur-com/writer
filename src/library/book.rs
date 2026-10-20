@@ -109,10 +109,6 @@ pub fn set_cover(project_dir: &Path, source: &Path) -> io::Result<String> {
 ///
 /// 파일 이름은 시트처럼 바뀌지 않는 식별자다. 이미 프로젝트 안에 있는 파일이면 복사하지 않고
 /// 그 경로를 쓴다. 첨부파일 그룹이 없으면 만들고 추가자료 순서 맨 뒤에 붙인다.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "첨부 추가 UI(이미지 붙여넣기 등)에서 쓸 예정")
-)]
 pub fn add_attachment(project_dir: &Path, source: &Path) -> io::Result<String> {
     if let Ok(relative) = source.strip_prefix(project_dir) {
         return Ok(relative_string(relative));
@@ -129,6 +125,18 @@ pub fn add_attachment(project_dir: &Path, source: &Path) -> io::Result<String> {
     Ok(relative_string(
         target.strip_prefix(project_dir).unwrap_or(&target),
     ))
+}
+
+/// 시트에 넣을 파일을 프로젝트 첨부파일 그룹에 넣고, 시트 폴더에서 본 상대 경로를 돌려준다.
+///
+/// 마크다운 링크는 시트 파일 기준으로 풀리므로 시트가 깊이 있을수록 `../`가 붙는다.
+pub fn attach_to_sheet(project_dir: &Path, sheet: &Path, source: &Path) -> io::Result<String> {
+    let relative = add_attachment(project_dir, source)?;
+    let depth = sheet
+        .parent()
+        .and_then(|dir| dir.strip_prefix(project_dir).ok())
+        .map_or(0, |dir| dir.components().count());
+    Ok(format!("{}{relative}", "../".repeat(depth)))
 }
 
 /// 소문자 확장자(없으면 빈 문자열).
@@ -283,6 +291,13 @@ mod tests {
         assert!(id.parse::<ulid::Ulid>().is_ok(), "{id}");
         // 프로젝트 안의 파일은 복사하지 않는다.
         assert_eq!(add_attachment(&dir, &dir.join(&first)).unwrap(), first);
+
+        // 시트 폴더에서 본 경로: 프로젝트 바로 아래면 그대로, 하위 그룹이면 `../`가 붙는다.
+        let top = attach_to_sheet(&dir, &dir.join("a.md"), &dir.join(&first)).unwrap();
+        assert_eq!(top, first);
+        let nested = dir.join("제1부").join("1장").join("a.md");
+        let deep = attach_to_sheet(&dir, &nested, &dir.join(&first)).unwrap();
+        assert_eq!(deep, format!("../../{first}"));
 
         std::fs::remove_dir_all(&root).ok();
     }

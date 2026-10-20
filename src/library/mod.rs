@@ -20,13 +20,15 @@ mod layout;
 mod meta;
 mod preview;
 
-pub use book::{BookMeta, COVER_EXTENSIONS, COVER_STEM, read_book, set_cover, write_book};
+pub use book::{
+    BookMeta, COVER_EXTENSIONS, COVER_STEM, attach_to_sheet, read_book, set_cover, write_book,
+};
 pub use document::{count_words, read_sheet, write_sheet};
 pub use files::{FileItem, FileKind, GroupKind, format_size, move_file};
 pub use layout::{FolderKind, initialize, inspect};
 pub use meta::{
     create_group, create_project, create_sheet, move_sheet, move_to_trash, set_sort,
-    set_sort_descending, update_project,
+    set_sort_descending, update_group, update_project,
 };
 pub use preview::{Preview, read_preview};
 

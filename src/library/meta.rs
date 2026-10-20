@@ -4,7 +4,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{
-    EXTRAS_DIR, GROUP_META_FILE, Group, SortMode, TEMPLATES_GROUP, file_name, sheet_file_name,
+    ATTACHMENTS_GROUP, EXTRAS_DIR, GROUP_META_FILE, Group, SortMode, TEMPLATES_GROUP, file_name,
+    sheet_file_name,
 };
 
 /// 그룹 폴더의 `.writer.toml` 스키마.
@@ -326,6 +327,53 @@ pub fn update_project(
     }
 }
 
+/// 그룹의 이름·아이콘·색을 바꾸고 새 경로를 돌려준다.
+///
+/// 보통 그룹은 프로젝트처럼 폴더 이름을 바꾸고 상위 그룹 순서(`groups`)의 이름도 고친다.
+/// `Extras`는 추가자료 자리라 피한다. 앱이 폴더 이름으로 찾는 기본 그룹(템플릿·첨부 파일)은
+/// 폴더를 그대로 두고 표시 이름을 `title`에 쓴다.
+pub fn update_group(
+    dir: &Path,
+    name: &str,
+    icon: Option<&str>,
+    color: Option<&str>,
+) -> io::Result<PathBuf> {
+    let parent = dir
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "상위 폴더가 없습니다"))?;
+    let reserved = file_name(parent) == EXTRAS_DIR
+        && [TEMPLATES_GROUP, ATTACHMENTS_GROUP].contains(&file_name(dir).as_str());
+    if reserved {
+        let text = |value: &str| Some(toml::Value::String(value.to_string()));
+        write_meta_values(
+            dir,
+            [
+                ("title", text(name.trim())),
+                ("icon", icon.and_then(text)),
+                ("color", color.and_then(text)),
+            ],
+        )?;
+        return Ok(dir.to_path_buf());
+    }
+
+    let mut name = name.to_string();
+    if project_dir_name(&name) == EXTRAS_DIR {
+        name.push_str(" 2");
+    }
+    let mut order = group_order(parent)?;
+    let new_dir = update_project(dir, &name, icon, color)?;
+    if new_dir != dir {
+        let old = file_name(dir);
+        for entry in &mut order {
+            if *entry == old {
+                *entry = file_name(&new_dir);
+            }
+        }
+        write_meta_list(parent, "groups", &order)?;
+    }
+    Ok(new_dir)
+}
+
 /// 프로젝트·그룹 폴더를 운영체제 휴지통으로 옮긴다(복원 가능).
 ///
 /// macOS는 Finder 대신 `NSFileManager`로 옮긴다. Finder 방식은 자동화 권한을 묻느라
@@ -385,6 +433,36 @@ mod tests {
         assert_eq!(meta.icon.as_deref(), Some("newspaper"));
         assert_eq!(meta.color.as_deref(), Some("red"));
         assert_eq!(meta.sheets, vec![file]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn update_group_renames_in_place_and_keeps_reserved_folders() {
+        let root = temp_dir("update-group");
+        initialize(&root).unwrap();
+        let projects = root.join(SectionKind::Projects.dir());
+        let dir = create_project(&projects, "소설", None, None).unwrap();
+        let first = create_group(&dir, "가", None, None).unwrap();
+        create_group(&dir, "나", None, None).unwrap();
+
+        // 이름을 바꿔도 순서 자리는 그대로다. `Extras`는 피한다.
+        let renamed = update_group(&first, "하", Some("files"), Some("red")).unwrap();
+        assert_eq!(renamed, dir.join("하"));
+        assert_eq!(group_order(&dir).unwrap(), vec!["하", "나"]);
+        let clash = update_group(&renamed, EXTRAS_DIR, None, None).unwrap();
+        assert_eq!(clash, dir.join("Extras 2"));
+
+        // 기본 그룹은 폴더를 두고 표시 이름만 바꾼다.
+        let templates = dir.join(EXTRAS_DIR).join(TEMPLATES_GROUP);
+        assert_eq!(
+            update_group(&templates, "양식", None, Some("blue")).unwrap(),
+            templates
+        );
+        let meta = read_group_meta(&templates);
+        assert_eq!(meta.title.as_deref(), Some("양식"));
+        assert_eq!(meta.icon, None);
+        assert_eq!(meta.color.as_deref(), Some("blue"));
 
         std::fs::remove_dir_all(&root).ok();
     }

@@ -3,6 +3,7 @@
 mod book_info;
 mod editor;
 mod file_view;
+mod insert_image;
 mod library_ops;
 mod library_panel;
 mod new_project;
@@ -473,6 +474,7 @@ impl Render for WriterApp {
             .text_color(pal.foreground)
             .on_action(cx.listener(Self::on_new_sheet))
             .on_action(cx.listener(Self::on_save_sheet))
+            .on_action(cx.listener(Self::on_insert_image))
             .on_action(cx.listener(Self::on_open_library))
             .on_action(cx.listener(Self::on_close_library))
             .on_action(cx.listener(Self::on_show_about))

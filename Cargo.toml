@@ -16,6 +16,26 @@ futures = "0.3"
 markdown = "1"
 trash = "5"
 imagesize = "0.14"
+# 썸네일 프레임(`gpui::RenderImage`)과 macOS 밖의 썸네일 대체 경로. 버전은 gpui와 맞춘다.
+image = "0.25"
+
+# 번들 없이 실행할 때(`cargo run`)도 Dock에 앱 아이콘을 보인다. 버전은 gpui가 쓰는 것과 맞춘다.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSData", "NSError", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder"] }
+# 썸네일은 Finder와 같은 QuickLook으로 만든다(이미지·동영상, 시스템 캐시).
+objc2-quick-look-thumbnailing = { version = "0.3", features = ["QLThumbnailGenerator", "QLThumbnailGenerationRequest", "QLThumbnailRepresentation", "block2", "objc2-core-foundation", "objc2-core-graphics"] }
+objc2-core-graphics = { version = "0.3", features = ["CGImage", "CGContext", "CGBitmapContext", "CGColorSpace"] }
+objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
+block2 = "0.6"
+
+# `cargo bundle --release`로 .app을 만든다.
+[package.metadata.bundle]
+name = "Writer"
+identifier = "com.drskur.writer"
+icon = ["resources/icon/writer.icns", "resources/icon/writer.png"]
+category = "public.app-category.productivity"
 
 [dev-dependencies]
 serde_json = "1"

@@ -274,9 +274,14 @@ impl WriterApp {
     }
 
     /// 지금 보이는 목록에서 아직 안 읽었거나 바뀐 시트의 미리보기를 백그라운드에서 읽는다.
+    ///
+    /// 제목순 그룹은 순서가 미리보기 제목에 달려 있으므로 바로 읽는다. 백그라운드로 읽으면
+    /// 처음엔 읽은 순서로 그렸다가 제목이 들어오면서 다시 정렬되어 목록이 한 번 뒤바뀐다.
     pub(super) fn load_previews(&mut self, cx: &mut Context<Self>) {
-        let pending: Vec<(PathBuf, u128)> = self
-            .effective_selection()
+        let selection = self.effective_selection();
+        let by_title = matches!(&selection, Some(Selection::Group(path))
+            if self.sort_for(path).mode == library::SortMode::Title);
+        let pending: Vec<(PathBuf, u128)> = selection
             .map(|selection| self.sheets_for(&selection))
             .unwrap_or_default()
             .into_iter()
@@ -288,6 +293,16 @@ impl WriterApp {
             .map(|sheet| (sheet.path, sheet.modified))
             .collect();
         if pending.is_empty() {
+            return;
+        }
+        if by_title {
+            self.preview_task = None;
+            self.previews.extend(
+                pending.into_iter().map(|(path, modified)| {
+                    (path.clone(), (modified, library::read_preview(&path)))
+                }),
+            );
+            cx.notify();
             return;
         }
         self.preview_task = Some(cx.spawn(async move |this, cx| {

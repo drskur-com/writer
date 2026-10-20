@@ -264,10 +264,21 @@ impl WriterApp {
         let dir = group.path.clone();
         rows.push(
             row.context_menu(move |menu, _, cx| {
+                let (edit_app, edit_dir) = (app.clone(), dir.clone());
                 let (child_app, child_dir) = (app.clone(), dir.clone());
                 let (delete_app, delete_dir) = (app.clone(), dir.clone());
                 let danger = cx.theme().danger;
                 menu.min_w(px(200.0))
+                    .item(
+                        PopupMenuItem::element(move |_, _| menu_row(icons::edit(), "편집…", None))
+                            .on_click(move |_, window, cx| {
+                                edit_app
+                                    .update(cx, |app, cx| {
+                                        app.open_edit_group(&edit_dir, manuscript, window, cx)
+                                    })
+                                    .ok();
+                            }),
+                    )
                     .when(manuscript, |menu| {
                         menu.item(
                             PopupMenuItem::element(move |_, _| {
@@ -281,8 +292,8 @@ impl WriterApp {
                                     .ok();
                             }),
                         )
-                        .separator()
                     })
+                    .separator()
                     .item(
                         PopupMenuItem::element(move |_, _| {
                             menu_row(icons::trash(), "휴지통으로 이동", Some(danger))

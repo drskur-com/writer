@@ -54,6 +54,69 @@ pub fn spans(text: &str) -> Vec<Span> {
     out
 }
 
+/// 이미지 정렬. 기본은 가운데라 마크다운에 따로 적지 않는다.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImageAlign {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+/// 이미지 표시 옵션. 마크다운 뒤에 Pandoc 속성(`{width=320px .align-left}`)으로 붙인다(ADR-0007).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImageOptions {
+    /// 렌더링 크기(px). `None`이면 자동.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub align: ImageAlign,
+    /// 전용 페이지에 최대한 크게 놓는다. 크기·정렬보다 앞선다.
+    pub full_page: bool,
+}
+
+impl ImageOptions {
+    /// Pandoc 속성 블록. 기본값뿐이면 빈 문자열.
+    fn attributes(&self) -> String {
+        let mut parts = Vec::new();
+        if self.full_page {
+            parts.push(".full-page".to_string());
+        } else {
+            parts.extend(self.width.map(|width| format!("width={width}px")));
+            parts.extend(self.height.map(|height| format!("height={height}px")));
+            match self.align {
+                ImageAlign::Left => parts.push(".align-left".into()),
+                ImageAlign::Center => {}
+                ImageAlign::Right => parts.push(".align-right".into()),
+            }
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("{{{}}}", parts.join(" "))
+        }
+    }
+}
+
+/// 이미지 마크다운(`![캡션](경로){속성}`)을 만든다.
+///
+/// 캡션의 `[`·`]`는 이스케이프하고, 경로에 공백·괄호가 있으면 `<…>`로 감싼다.
+pub fn image(alt: &str, destination: &str, options: &ImageOptions) -> String {
+    let mut escaped = String::new();
+    for c in alt.trim().chars() {
+        if matches!(c, '[' | ']' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    let destination = destination.trim();
+    let attributes = options.attributes();
+    if destination.contains(|c: char| c.is_whitespace() || matches!(c, '(' | ')')) {
+        format!("![{escaped}](<{destination}>){attributes}")
+    } else {
+        format!("![{escaped}]({destination}){attributes}")
+    }
+}
+
 /// 한 줄이 ATX 제목(`#`~`######`)이면 레벨을 돌려준다. 줄 텍스트만 본다.
 ///
 /// 에디터가 줄마다 즉시 판정할 수 있도록 파서를 쓰지 않는다. 그래서 코드 블록 안의
@@ -269,6 +332,40 @@ fn push_quote_markers(text: &str, range: Range<usize>, out: &mut Vec<Span>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_escapes_alt_and_wraps_odd_paths() {
+        let auto = ImageOptions::default();
+        assert_eq!(image(" 지도 ", "a/b.png", &auto), "![지도](a/b.png)");
+        assert_eq!(
+            image("[1]", "https://x.io/a.png", &auto),
+            "![\\[1\\]](https://x.io/a.png)"
+        );
+        assert_eq!(
+            image("", "내 사진 (1).png", &auto),
+            "![](<내 사진 (1).png>)"
+        );
+    }
+
+    #[test]
+    fn image_options_become_pandoc_attributes() {
+        let sized = ImageOptions {
+            width: Some(320),
+            height: Some(200),
+            align: ImageAlign::Left,
+            full_page: false,
+        };
+        assert_eq!(
+            image("", "a.png", &sized),
+            "![](a.png){width=320px height=200px .align-left}"
+        );
+        // 한 페이지 가득이면 크기·정렬은 적지 않는다.
+        let full = ImageOptions {
+            full_page: true,
+            ..sized
+        };
+        assert_eq!(image("표지", "a.png", &full), "![표지](a.png){.full-page}");
+    }
 
     /// 종류별로 스팬이 덮는 원문 조각을 모은다.
     fn pieces(text: &str, kind: SpanKind) -> Vec<&str> {

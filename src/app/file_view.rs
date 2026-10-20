@@ -156,14 +156,18 @@ impl WriterApp {
                 .bg(pal.panel)
                 .map(|this| match file.kind {
                     library::FileKind::Image => this.child(
-                        img(file.path.clone())
-                            .size_full()
-                            .object_fit(ObjectFit::Cover)
-                            .with_fallback(move || {
-                                Icon::new(icons::file_kind(library::FileKind::Image))
-                                    .text_color(pal.muted)
-                                    .into_any_element()
-                            }),
+                        img(crate::thumbnail::source(
+                            file.path.clone(),
+                            file.modified,
+                            px(THUMBNAIL_SIZE),
+                        ))
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .with_fallback(move || {
+                            Icon::new(icons::file_kind(library::FileKind::Image))
+                                .text_color(pal.muted)
+                                .into_any_element()
+                        }),
                     ),
                     kind => this.child(Icon::new(icons::file_kind(kind)).text_color(pal.muted)),
                 });

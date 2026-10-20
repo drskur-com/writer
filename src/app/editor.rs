@@ -337,6 +337,18 @@ impl WriterApp {
     }
 }
 
+impl OpenSheet {
+    /// 열린 시트 파일 경로.
+    pub(super) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// 편집 상태(본문·커서).
+    pub(super) fn state(&self) -> &Entity<EditorState> {
+        &self.state
+    }
+}
+
 impl WriterApp {
     /// 시트를 선택해 에디터에 연다(`None`이면 선택 해제). 열려 있던 시트는 먼저 저장한다.
     ///
@@ -434,7 +446,7 @@ impl WriterApp {
     }
 
     /// 본문이 바뀌면 단어 수를 갱신하고 자동 저장·마크업 재계산을 (다시) 예약한다.
-    fn on_editor_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_editor_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = &mut self.editor else {
             return;
         };

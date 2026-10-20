@@ -5,12 +5,14 @@ use gpui_kit::gpui::*;
 mod app;
 mod assets;
 mod config;
+mod dock_icon;
 mod icons;
 mod library;
 mod markdown;
 mod menus;
 mod settings;
 mod theme;
+mod thumbnail;
 mod watch;
 
 use app::WriterApp;
@@ -22,6 +24,7 @@ actions!(
     [
         NewSheet,
         SaveSheet,
+        InsertImage,
         OpenLibrary,
         CloseLibrary,
         OpenSettings,
@@ -47,6 +50,7 @@ fn main() {
         .with_assets(assets::Assets)
         .run(|cx| {
             gpui_kit::init(cx);
+            dock_icon::install();
 
             // 테마 등록 후 저장된 테마(없거나 모르는 이름이면 기본 라이트) 적용
             let config = config::Config::load();

@@ -2,6 +2,7 @@
 rust = "latest"
 sccache = "latest"
 "cargo:cargo-watch" = "latest"
+"cargo:cargo-bundle" = "latest"
 
 [tasks.check]
 description = "빠른 타입 체크 (컴파일 X)"
@@ -19,6 +20,10 @@ run = "cargo watch -w src -x run --poll"
 description = "빠른 증분 빌드"
 env = { CARGO_INCREMENTAL = "1" }
 run = "cargo build"
+
+[tasks.bundle]
+description = "macOS .app 번들 만들기 (target/release/bundle/osx)"
+run = "cargo bundle --release"
 
 [tasks.clean-cache]
 description = "sccache 통계 확인"

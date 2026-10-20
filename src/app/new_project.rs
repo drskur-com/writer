@@ -48,6 +48,11 @@ pub(super) enum FormTarget {
         parent: PathBuf,
         manuscript: bool,
     },
+    /// 이 폴더의 그룹을 고친다(`manuscript`면 원고, 아니면 추가자료).
+    EditGroup {
+        dir: PathBuf,
+        manuscript: bool,
+    },
 }
 
 /// 대화상자 안의 입력 상태.
@@ -78,8 +83,14 @@ impl NewProjectForm {
         let (default_color, default_icon) = match &target {
             FormTarget::NewGroup {
                 manuscript: true, ..
+            }
+            | FormTarget::EditGroup {
+                manuscript: true, ..
             } => (0, icons::MANUSCRIPT_GROUP_ICON),
             FormTarget::NewGroup {
+                manuscript: false, ..
+            }
+            | FormTarget::EditGroup {
                 manuscript: false, ..
             } => (DEFAULT_COLOR, icons::EXTRAS_GROUP_ICON),
             _ => (DEFAULT_COLOR, icons::PROJECT_ICONS[0]),
@@ -89,7 +100,10 @@ impl NewProjectForm {
             .and_then(|color| PROJECT_COLORS.iter().position(|&name| name == color))
             .unwrap_or(default_color);
         let icon = match editing {
-            Some(group) => group.icon.clone().unwrap_or_else(|| "folder".into()),
+            Some(group) => group.icon.clone().unwrap_or_else(|| match target {
+                FormTarget::EditGroup { .. } => default_icon.to_string(),
+                _ => "folder".into(),
+            }),
             None => default_icon.to_string(),
         };
         // 이름 칸에서 Enter를 누르면 바로 만든다.
@@ -124,7 +138,12 @@ impl NewProjectForm {
         let target = self.target.clone();
         let done = self.app.update(cx, |app, cx| match &target {
             FormTarget::NewProject => app.create_project(&name, &icon, color, window, cx),
-            FormTarget::EditProject(dir) => app.edit_project(dir, &name, &icon, color, window, cx),
+            FormTarget::EditProject(dir) => {
+                app.edit_folder(dir, false, &name, &icon, color, window, cx)
+            }
+            FormTarget::EditGroup { dir, .. } => {
+                app.edit_folder(dir, true, &name, &icon, color, window, cx)
+            }
             FormTarget::NewGroup { parent, .. } => {
                 app.create_group(parent, &name, &icon, color, window, cx)
             }
@@ -420,6 +439,18 @@ impl WriterApp {
         self.open_form_dialog(FormTarget::EditProject(dir.to_path_buf()), window, cx);
     }
 
+    /// 그룹 편집 대화상자를 연다(새 그룹과 같은 모양, 값이 채워진 채로).
+    pub(super) fn open_edit_group(
+        &mut self,
+        dir: &Path,
+        manuscript: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dir = dir.to_path_buf();
+        self.open_form_dialog(FormTarget::EditGroup { dir, manuscript }, window, cx);
+    }
+
     /// 프로젝트 대화상자를 연다. 새 그룹도 같은 모양을 쓰고 제목만 다르다.
     pub(super) fn open_form_dialog(
         &mut self,
@@ -431,10 +462,12 @@ impl WriterApp {
             return;
         }
         let group = match &target {
-            FormTarget::EditProject(dir) => match self.find_group(dir) {
-                Some(group) => Some(group),
-                None => return,
-            },
+            FormTarget::EditProject(dir) | FormTarget::EditGroup { dir, .. } => {
+                match self.find_group(dir) {
+                    Some(group) => Some(group),
+                    None => return,
+                }
+            }
             _ => None,
         };
         let title = match &target {
@@ -447,6 +480,7 @@ impl WriterApp {
                 "새로운 그룹"
             }
             FormTarget::NewGroup { .. } => "새로운 하위 그룹",
+            FormTarget::EditGroup { .. } => "그룹 편집",
         };
         let app = cx.entity().downgrade();
         let form = cx.new(|cx| NewProjectForm::new(app, target, group.as_ref(), window, cx));
@@ -490,12 +524,14 @@ impl WriterApp {
         self.library.as_ref()?.find_group(dir).cloned()
     }
 
-    /// 프로젝트의 이름·색·아이콘을 고친다. 고쳤으면 `true`.
+    /// 프로젝트(`group`이면 그룹)의 이름·색·아이콘을 고친다. 고쳤으면 `true`.
     ///
-    /// 열린 시트가 이 프로젝트 안에 있으면 먼저 저장하고, 폴더 이름이 바뀌면 새 경로로 다시 연다.
-    fn edit_project(
+    /// 열린 시트가 이 폴더 안에 있으면 먼저 저장하고, 폴더 이름이 바뀌면 새 경로로 다시 연다.
+    #[allow(clippy::too_many_arguments)]
+    fn edit_folder(
         &mut self,
         dir: &Path,
+        group: bool,
         name: &str,
         icon: &str,
         color: &str,
@@ -516,8 +552,12 @@ impl WriterApp {
             self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
             return false;
         }
-        let updated = library::update_project(dir, name, Some(icon), Some(color))
-            .and_then(|new_dir| Ok((new_dir, library::scan(&root)?)));
+        let updated = if group {
+            library::update_group(dir, name, Some(icon), Some(color))
+        } else {
+            library::update_project(dir, name, Some(icon), Some(color))
+        };
+        let updated = updated.and_then(|new_dir| Ok((new_dir, library::scan(&root)?)));
         match updated {
             Ok((new_dir, scanned)) => {
                 let renamed = new_dir != dir;
@@ -544,7 +584,8 @@ impl WriterApp {
                 true
             }
             Err(err) => {
-                self.notify(format!("프로젝트를 고칠 수 없습니다: {err}"), window, cx);
+                let what = if group { "그룹" } else { "프로젝트" };
+                self.notify(format!("{what}을 고칠 수 없습니다: {err}"), window, cx);
                 false
             }
         }

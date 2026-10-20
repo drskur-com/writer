@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Writer 앱 아이콘 원본. macOS 아이콘 격자(1024 캔버스, 824 본체)를 따른다. -->
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a3e43"/>
+      <stop offset="1" stop-color="#17191b"/>
+    </linearGradient>
+    <linearGradient id="sheet" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#eceef1"/>
+    </linearGradient>
+    <linearGradient id="caret" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b97ff"/>
+      <stop offset="1" stop-color="#0070e0"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+    <filter id="body-shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- 본체 -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#body)" filter="url(#body-shadow)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="3"/>
+
+  <!-- 종이 -->
+  <g filter="url(#shadow)">
+    <rect x="262" y="214" width="500" height="596" rx="36" fill="url(#sheet)"/>
+  </g>
+
+  <!-- 제목 줄(마크다운 #)과 본문 줄 -->
+  <path d="M344 292 L332 348 M370 292 L358 348 M324 309 L378 309 M320 331 L374 331" stroke="#0a84ff" stroke-width="10" stroke-linecap="round" fill="none"/>
+  <rect x="394" y="300" width="250" height="40" rx="20" fill="#2a2d31"/>
+  <rect x="318" y="424" width="388" height="24" rx="12" fill="#b9bdc3"/>
+  <rect x="318" y="490" width="388" height="24" rx="12" fill="#b9bdc3"/>
+  <rect x="318" y="556" width="318" height="24" rx="12" fill="#b9bdc3"/>
+  <rect x="318" y="622" width="210" height="24" rx="12" fill="#b9bdc3"/>
+
+  <!-- 커서 -->
+  <rect x="552" y="600" width="18" height="72" rx="9" fill="url(#caret)"/>
+</svg>

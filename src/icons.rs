@@ -62,6 +62,11 @@ pub fn image() -> IconName {
     IconName::Image
 }
 
+/// 첨부파일 그룹(이미지 삽입 대화상자의 "첨부파일" 탭). 그룹 메타 아이콘과 같다.
+pub fn attachments() -> IconName {
+    by_name("paperclip")
+}
+
 /// 파일 그룹의 파일 종류.
 pub fn file_kind(kind: crate::library::FileKind) -> IconName {
     use crate::library::FileKind;

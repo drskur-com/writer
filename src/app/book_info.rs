@@ -52,6 +52,8 @@ struct BookInfoForm {
     language: SharedString,
     /// 표지 이미지의 절대 경로. 저장할 때 첨부파일 그룹의 `cover.<확장자>`로 넣는다.
     cover: Option<PathBuf>,
+    /// 표지 파일의 수정 시각(썸네일 캐시 키).
+    cover_modified: u128,
     /// 표지를 고르다 생긴 문제(지원하지 않는 형식 등).
     cover_error: Option<SharedString>,
     app: WeakEntity<WriterApp>,
@@ -85,8 +87,10 @@ impl BookInfoForm {
         } else {
             book.language.clone().into()
         };
+        let cover = book.cover_path(&project.path);
         Self {
-            cover: book.cover_path(&project.path),
+            cover_modified: cover.as_deref().map_or(0, library::modified_nanos),
+            cover,
             project: project.path.clone(),
             book,
             title,
@@ -128,6 +132,7 @@ impl BookInfoForm {
         match image {
             Some(path) => {
                 self.cover = Some(path.clone());
+                self.cover_modified = library::modified_nanos(path);
                 self.cover_error = None;
             }
             None => {
@@ -211,14 +216,18 @@ impl Render for BookInfoForm {
             )
             .map(|this| match &self.cover {
                 Some(path) => this.child(
-                    img(path.clone())
-                        .size_full()
-                        .object_fit(ObjectFit::Cover)
-                        .with_fallback(move || {
-                            Icon::new(icons::image())
-                                .text_color(pal.muted)
-                                .into_any_element()
-                        }),
+                    img(crate::thumbnail::source(
+                        path.clone(),
+                        self.cover_modified,
+                        px(COVER_HEIGHT),
+                    ))
+                    .size_full()
+                    .object_fit(ObjectFit::Cover)
+                    .with_fallback(move || {
+                        Icon::new(icons::image())
+                            .text_color(pal.muted)
+                            .into_any_element()
+                    }),
                 ),
                 None => this.child(Icon::new(icons::image()).text_color(pal.muted)),
             })
