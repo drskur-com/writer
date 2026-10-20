@@ -5,7 +5,7 @@
 //!   - 제목 숨김(`Placement::Hidden`): 화면에서는 숨기되 목차에만 보존.
 //!   - 본문 첫머리(`Placement::Inline`): 본문과 연결 및 새 페이지 시작(`page_break`) 처리.
 //!   - 접두사 및 번호 매기기(`prefix`, `{n}`): 부/장/절별 자동 번호 매김.
-//!   - 목차 포함(`in_toc`): 목차 제외 및 접두사 생략 제어.
+//!   - 목차 포함(`in_toc`): 목차에서 뺄지 제어. 번호와 접두사는 그대로 붙는다.
 //! - 독서 앱 호환: 별도의 불필요한 nav 페이지 없이 전자책 내장 목차(`toc.ncx`)가 단독으로 차례를 담당.
 
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ use zip::write::SimpleFileOptions;
 use zip::CompressionMethod;
 
 use super::{CompileError, CompileProject};
-use crate::library::{Align, PREFIX_NUMBER, Placement, ResolvedStyle, StyleTarget, VerticalAlign};
+use crate::library::{Align, Placement, ResolvedStyle, StyleTarget, VerticalAlign};
 use crate::markdown::{Block, Inline, Marks, Rich};
 
 /// XML 특수문자를 이스케이프한다.
@@ -139,8 +139,10 @@ impl<'a> EPubBuilder<'a> {
                 _ => 2,
             };
 
-            // 번호 매기기 및 접두사 결정
-            let display_title = if resolved.in_toc {
+            // 번호와 접두사는 목차 포함 여부와 무관하게 붙인다. 다만 아예 그리지도 않고
+            // 목차에도 넣지 않는 제목(숨김 + 목차 제외)은 번호를 쓰지 않는다.
+            let numbered = resolved.placement != Placement::Hidden || resolved.in_toc;
+            let display_title = if numbered {
                 self.numbers[depth] += 1;
                 resolved.title_text(self.numbers[depth], &raw_title)
             } else {
@@ -599,12 +601,10 @@ fn generate_cover_xhtml(cover_img_path: &str) -> String {
 /// 접두사(`prefix`)가 설정된 제목의 HTML 텍스트를 생성한다.
 fn render_rich_with_prefix(text: &Rich, style: &ResolvedStyle, number: usize) -> String {
     let mut out = String::new();
-    if style.in_toc {
-        let prefix = style.prefix.replace(PREFIX_NUMBER, &number.to_string());
-        if !prefix.is_empty() {
-            // 접두사에 넣은 줄바꿈은 XHTML에서 줄바꿈이 되도록 <br/>로 바꾼다.
-            out.push_str(&escape_xml(&prefix).replace('\n', "<br/>\n"));
-        }
+    let prefix = style.prefix_text(number);
+    if !prefix.is_empty() {
+        // 접두사에 넣은 줄바꿈은 XHTML에서 줄바꿈이 되도록 <br/>로 바꾼다.
+        out.push_str(&escape_xml(&prefix).replace('\n', "<br/>\n"));
     }
     out.push_str(&render_rich(text));
     out
@@ -1171,5 +1171,15 @@ mod tests {
         style.prefix = "제{n}장\n".to_string();
         let html = render_rich_with_prefix(&Rich::new(), &style, 2);
         assert_eq!(html, "제2장<br/>\n");
+    }
+
+    #[test]
+    fn prefix_uses_roman_numbering() {
+        let mut styles = Styles::default();
+        styles.chapter.prefix = Some("제{n}장 ".to_string());
+        styles.chapter.numbering = Some(crate::library::Numbering::Roman);
+        let style = styles.resolve(StyleTarget::Chapter);
+        let html = render_rich_with_prefix(&Rich::new(), &style, 4);
+        assert_eq!(html, "제IV장 ");
     }
 }

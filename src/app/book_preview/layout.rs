@@ -701,15 +701,19 @@ impl<'a> Flow<'a> {
             StyleTarget::Chapter => 1,
             _ => 2,
         };
-        let title = if resolved.in_toc {
+        // 번호와 접두사는 목차 포함 여부와 무관하게 붙인다(TOC에만 넣지 않는다).
+        // 다만 그리지도 않고 목차에도 넣지 않는 제목은 번호를 쓰지 않는다.
+        let numbered = resolved.placement != Placement::Hidden || resolved.in_toc;
+        if numbered {
             self.numbers[depth] += 1;
-            let prefix = resolved.title_text(self.numbers[depth], "");
-            let mut rich = markdown::plain(prefix);
-            rich.extend(text.iter().cloned());
-            rich
+        }
+        let prefix = if numbered {
+            resolved.title_text(self.numbers[depth], "")
         } else {
-            text.clone()
+            String::new()
         };
+        let mut title = markdown::plain(prefix);
+        title.extend(text.iter().cloned());
         let style = self.text_style(&resolved);
         let new_page = resolved.placement == Placement::Page || resolved.page_break;
         if new_page {

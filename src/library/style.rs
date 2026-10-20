@@ -83,6 +83,7 @@ impl StyleTarget {
             placement: Placement::Inline,
             page_break: false,
             prefix: String::new(),
+            numbering: Numbering::Arabic,
             in_toc: true,
             vertical_align: VerticalAlign::Center,
         };
@@ -193,6 +194,67 @@ pub const FONT_WEIGHTS: [u16; 7] = [300, 400, 500, 600, 700, 800, 900];
 /// 제목 접두사에서 자동 번호로 바뀌는 자리.
 pub const PREFIX_NUMBER: &str = "{n}";
 
+/// 제목 번호를 적는 방식. `{n}` 자리에 들어간다.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Numbering {
+    /// 아라비아 숫자(1, 2, 3).
+    Arabic,
+    /// 로마 숫자(I, II, III).
+    Roman,
+}
+
+impl Numbering {
+    pub const ALL: [Numbering; 2] = [Numbering::Arabic, Numbering::Roman];
+
+    /// 표시 이름.
+    pub fn title(self) -> &'static str {
+        match self {
+            Numbering::Arabic => "1, 2, 3",
+            Numbering::Roman => "I, II, III",
+        }
+    }
+
+    /// 번호를 글자로 바꾼다.
+    pub fn format(self, number: usize) -> String {
+        match self {
+            Numbering::Arabic => number.to_string(),
+            Numbering::Roman => roman(number),
+        }
+    }
+}
+
+/// 번호를 로마 숫자로 바꾼다(1~3999). 범위를 벗어나면 아라비아 숫자를 그대로 쓴다.
+fn roman(number: usize) -> String {
+    const TABLE: [(usize, &str); 13] = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    if number == 0 || number >= 4000 {
+        return number.to_string();
+    }
+    let mut rest = number;
+    let mut out = String::new();
+    for (value, glyph) in TABLE {
+        while rest >= value {
+            out.push_str(glyph);
+            rest -= value;
+        }
+    }
+    out
+}
+
 /// 한 대상의 스타일. 비어 있는 값은 기본값을 따른다. 길이 단위는 em(본문 글자 크기 대비)이다.
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -232,10 +294,13 @@ pub struct StyleSpec {
     /// 제목 앞에 붙는 글(제목만). `{n}`은 자동 번호로 바뀐다(예: `제{n}장 `).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
+    /// 제목 번호를 적는 방식(제목만). `{n}` 자리에 들어간다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numbering: Option<Numbering>,
     /// 별도 제목 페이지 안 세로 위치(제목만).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vertical_align: Option<VerticalAlign>,
-    /// 목차에 넣는지(제목만). 넣지 않는 제목은 번호를 매기지 않고 접두사도 붙이지 않는다.
+    /// 목차에 넣는지(제목만). 넣지 않는 제목도 번호와 접두사는 붙는다(목차에서만 뺀다).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub in_toc: Option<bool>,
 }
@@ -262,6 +327,7 @@ impl StyleSpec {
             placement: self.placement.unwrap_or(defaults.placement),
             page_break: self.page_break.unwrap_or(defaults.page_break),
             prefix: self.prefix.clone().unwrap_or(defaults.prefix),
+            numbering: self.numbering.unwrap_or(defaults.numbering),
             in_toc: self.in_toc.unwrap_or(defaults.in_toc),
             vertical_align: self.vertical_align.unwrap_or(defaults.vertical_align),
         }
@@ -296,20 +362,26 @@ pub struct ResolvedStyle {
     pub placement: Placement,
     pub page_break: bool,
     pub prefix: String,
+    pub numbering: Numbering,
     pub vertical_align: VerticalAlign,
     pub in_toc: bool,
 }
 
 impl ResolvedStyle {
-    /// 접두사를 붙인 제목. `{n}`을 번호로 바꾼다. 목차에 넣지 않는 제목은 그대로다.
+    /// 접두사의 `{n}` 자리에 넣을 번호 글.
+    pub fn number_text(&self, number: usize) -> String {
+        self.numbering.format(number)
+    }
+
+    /// `{n}`을 번호로 채운 접두사. 목차 포함 여부와 무관하게 붙인다.
+    pub fn prefix_text(&self, number: usize) -> String {
+        self.prefix
+            .replace(PREFIX_NUMBER, &self.number_text(number))
+    }
+
+    /// 접두사를 붙인 제목.
     pub fn title_text(&self, number: usize, title: &str) -> String {
-        if !self.in_toc {
-            return title.to_string();
-        }
-        format!(
-            "{}{title}",
-            self.prefix.replace(PREFIX_NUMBER, &number.to_string())
-        )
+        format!("{}{title}", self.prefix_text(number))
     }
 }
 
@@ -509,7 +581,8 @@ mod tests {
         styles.chapter.in_toc = Some(false);
         assert!(toml::to_string(&styles).unwrap().contains("in_toc = false"));
         let chapter = styles.resolve(StyleTarget::Chapter);
-        assert_eq!(chapter.title_text(3, "시라 강 건너"), "시라 강 건너");
+        // 목차에 넣지 않아도 접두사(번호)는 붙는다.
+        assert_eq!(chapter.title_text(3, "시라 강 건너"), "제3장 시라 강 건너");
 
         // 접두사의 줄바꿈(Enter)도 그대로 저장·복원된다.
         styles.chapter.in_toc = Some(true);
@@ -522,6 +595,52 @@ mod tests {
                 .title_text(3, "시라 강 건너"),
             "제3장\n시라 강 건너"
         );
+    }
+
+    #[test]
+    fn roman_numbering_for_titles() {
+        let mut styles = Styles::default();
+        styles.chapter.prefix = Some("제{n}장 ".into());
+        styles.chapter.numbering = Some(Numbering::Roman);
+
+        // 파일에 그대로 저장·복원된다.
+        let text = toml::to_string(&styles).unwrap();
+        assert!(text.contains("numbering = \"roman\""), "{text}");
+        let back: Styles = toml::from_str(&text).unwrap();
+        assert_eq!(back.chapter.numbering, Some(Numbering::Roman));
+
+        let chapter = back.resolve(StyleTarget::Chapter);
+        assert_eq!(chapter.title_text(4, "시라 강 건너"), "제IV장 시라 강 건너");
+        // 정하지 않으면 아라비아 숫자.
+        let mut arabic = Styles::default();
+        arabic.chapter.prefix = Some("제{n}장 ".into());
+        assert_eq!(
+            arabic
+                .resolve(StyleTarget::Chapter)
+                .title_text(4, "시라 강 건너"),
+            "제4장 시라 강 건너"
+        );
+        // 목차에 넣지 않아도 번호·접두사는 붙는다.
+        styles.chapter.in_toc = Some(false);
+        assert_eq!(
+            styles
+                .resolve(StyleTarget::Chapter)
+                .title_text(4, "시라 강 건너"),
+            "제IV장 시라 강 건너"
+        );
+    }
+
+    #[test]
+    fn roman_numeral_conversion() {
+        assert_eq!(roman(1), "I");
+        assert_eq!(roman(4), "IV");
+        assert_eq!(roman(9), "IX");
+        assert_eq!(roman(14), "XIV");
+        assert_eq!(roman(40), "XL");
+        assert_eq!(roman(1987), "MCMLXXXVII");
+        // 0이나 4000 이상은 아라비아 숫자를 그대로.
+        assert_eq!(roman(0), "0");
+        assert_eq!(roman(4000), "4000");
     }
 
     #[test]

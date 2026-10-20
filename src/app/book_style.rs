@@ -24,7 +24,7 @@ use std::rc::Rc;
 use super::WriterApp;
 use super::style::*;
 use crate::icons;
-use crate::library::{self, Align, Placement, StyleTarget, VerticalAlign};
+use crate::library::{self, Align, Numbering, Placement, StyleTarget, VerticalAlign};
 use crate::settings::{FontItem, Prefs, font_items};
 
 /// 내용 최대 폭.
@@ -679,6 +679,16 @@ impl BookStyleView {
                         library::PREFIX_NUMBER
                     )))
             });
+            let numbering = choice(
+                "style-numbering",
+                &view,
+                resolved.numbering,
+                Numbering::ALL.map(|numbering| (numbering, numbering.title().into())),
+                160.0,
+                move |view, numbering, window, cx| {
+                    view.update_spec(target, window, cx, |spec| spec.numbering = Some(numbering))
+                },
+            );
             let in_toc = Checkbox::new("style-in-toc")
                 .label("목차에 포함")
                 .checked(resolved.in_toc)
@@ -695,8 +705,9 @@ impl BookStyleView {
                     ))
                 })
                 .child(in_toc)
-                // 목차에 넣지 않는 제목은 번호·접두사가 없다(epubly와 같음).
-                .when(resolved.in_toc, |this| this.children(prefix))
+                // 목차에 넣지 않아도 번호·접두사는 넣을 수 있다.
+                .child(field("번호 방식".into(), numbering.into_any_element()))
+                .children(prefix)
                 .child(font)
                 .child(embed)
                 .children(number(NumberField::FontSize))
