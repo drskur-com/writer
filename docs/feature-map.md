@@ -58,9 +58,9 @@
 
 | 기능 | 우선 | 구현 방안 | 재사용 | M | 상태 |
 | --- | --- | --- | --- | --- | --- |
-| 리치 프리뷰 팬 | P1 | `PreviewIr` → gpui 요소 트리 | 자체 | M4 | ⬜ |
+| 리치 프리뷰 팬 | P1 | `TextView::markdown` + Ulysses 구문 커스텀 블록(키워드·각주·시트 참조·첨부). 스파이크 C 실패 시 자체 렌더러 | `text::TextView`(markdown-rs) | M4 | ⬜ |
 | 분할(마크업/프리뷰) | P1 | `dock` + `resizable` | dock | M4 | ⬜ |
-| 스크롤 동기화 | P1 | 블록 anchor 매핑 | — | M4 | ⬜ |
+| 스크롤 동기화 | P1 | 블록 anchor 매핑 (TextView 스크롤 API는 스파이크 C에서 확인, 부족하면 블록 래퍼) | — | M4 | ⬜ |
 | 탭(다중 시트) | P0 | `dock::TabPanel` | dock/tab | M3 | ⬜ |
 | 사이드바 토글/폭 기억 | P0 | 설정 저장 | resizable | M3 | ⬜ |
 | 다크/라이트/커스텀 테마 | P0 | theme registry + JSON | `theme` | M0/M8 | ⬜ |

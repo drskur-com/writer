@@ -1,6 +1,6 @@
 # ADR-0003: 라이브러리는 단일 루트 + 섹션(Inbox/Notes/Projects) 하위 폴더로 둔다
 
-- 상태: Accepted
+- 상태: Accepted · 부분 대체: "파생 데이터 위치" 중 그룹 메타(순서·아이콘)는 Superseded by ADR-0005
 - 날짜: 2026-10-20
 - 관련: PLAN.md §3.2, §3.3, M1/M3/M8 · ADR-0001 · `src/library.rs`, `src/config.rs`
 
