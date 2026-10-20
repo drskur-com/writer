@@ -4,6 +4,7 @@ use gpui_kit::gpui::*;
 
 mod app;
 mod assets;
+pub mod compile;
 mod config;
 mod dock_icon;
 mod icons;
@@ -16,6 +17,7 @@ mod thumbnail;
 mod watch;
 
 use app::WriterApp;
+#[cfg(target_os = "macos")]
 use app::style::{PANEL_INSET, TOOLBAR_HEIGHT};
 use menus::install_menus;
 
@@ -25,6 +27,7 @@ actions!(
         NewSheet,
         SaveSheet,
         InsertImage,
+        CompileProject,
         OpenLibrary,
         CloseLibrary,
         OpenSettings,
@@ -79,6 +82,8 @@ fn main() {
                 KeyBinding::new("cmd-,", OpenSettings, None),
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),
                 KeyBinding::new("ctrl-shift-l", ToggleTheme, None),
+                KeyBinding::new("cmd-shift-e", CompileProject, None),
+                KeyBinding::new("ctrl-shift-e", CompileProject, None),
             ]);
 
             // 저장된 라이브러리를 열어본다(없거나 실패하면 온보딩).

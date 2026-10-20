@@ -281,7 +281,7 @@ Rope(원문)
 - [ ] 공통: mdast(+ Ulysses 구문 확장 노드) → 렌더러별 writer (Markdown 정규화, HTML+CSS, RTF)
 - [ ] PDF: **typst** crate(폰트 임베딩·CJK 강점) 1순위, 대안 `printpdf`/HTML→시스템 인쇄
 - [ ] DOCX: `docx-rs` 또는 OOXML 직접 생성(`zip`+`quick-xml`)
-- [ ] ePub: `epub-builder` 또는 직접 zip+XHTML(목차/표지/메타)
+- [x] ePub: 직접 zip+XHTML(EPUB 3 nav + EPUB 2 ncx 목차 / 표지 / 메타 / 책 스타일 CSS)
 - [ ] 스타일 테마(폰트·여백·헤더/푸터·각주 처리) + 내보내기 프리뷰 다이얼로그
 - **완료 기준**: 동일 시트에서 5개 포맷 산출물 검증(Ulysses 산출물과 목차/각주/이미지 배치 비교), 한글 PDF 임베딩 정상.
 

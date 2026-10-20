@@ -284,7 +284,15 @@ impl WriterApp {
                 .child(
                     tool_group(pal)
                         .child(icon_button("share", icons::share(), false, pal))
-                        .child(icon_button("export", icons::export(), false, pal)),
+                        .child(
+                            icon_button("export", icons::export(), self.active_project().is_some(), pal).on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    if let Some(ref project_dir) = this.active_project() {
+                                        this.open_compile_dialog(project_dir, window, cx);
+                                    }
+                                }),
+                            ),
+                        ),
                 )
                 .child(tool_group(pal).child(
                     icon_button("toggle-preview", icons::preview(), true, pal).on_click(

@@ -71,6 +71,7 @@ impl WriterApp {
     ) -> impl IntoElement {
         let dir = project.path.clone();
         let preview_dir = project.path.clone();
+        let compile_dir = project.path.clone();
         div()
             .flex_shrink_0()
             .px_2()
@@ -91,14 +92,19 @@ impl WriterApp {
                     .child(project.name.clone()),
             )
             .child(
-                // 빌드는 아직 기능이 없어 흐리게 둔다. 미리보기는 별도 창에 연다.
                 div()
                     .px_1()
                     .pt_1()
                     .flex()
                     .items_center()
                     .gap_1()
-                    .child(icon_button("project-build", icons::build(), false, pal))
+                    .child(
+                        icon_button("project-build", icons::build(), true, pal).on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.open_compile_dialog(&compile_dir, window, cx);
+                            }),
+                        ),
+                    )
                     .child(
                         icon_button("project-preview", icons::book_preview(), true, pal).on_click(
                             cx.listener(move |this, _, window, cx| {
@@ -140,10 +146,21 @@ impl WriterApp {
             .size(px(30.0))
             .rounded(px(15.0))
             .dropdown_menu(move |menu, _, _| {
+                let (compile_app, compile_dir) = (app.clone(), dir.clone());
                 let (edit_app, edit_dir) = (app.clone(), dir.clone());
                 let (book_app, book_dir) = (app.clone(), dir.clone());
                 let (style_app, style_dir) = (app.clone(), dir.clone());
                 menu.min_w(px(200.0))
+                    .item(
+                        PopupMenuItem::element(move |_, _| {
+                            menu_row(icons::build(), "프로젝트 컴파일 (ePub)…", None)
+                        })
+                        .on_click(move |_, window, cx| {
+                            compile_app
+                                .update(cx, |app, cx| app.open_compile_dialog(&compile_dir, window, cx))
+                                .ok();
+                        }),
+                    )
                     .item(
                         PopupMenuItem::element(move |_, _| {
                             menu_row(icons::edit(), "프로젝트 편집…", None)

@@ -3,8 +3,10 @@
 use gpui_kit::component::*;
 use gpui_kit::gpui::*;
 
+#[cfg(target_os = "macos")]
+use crate::APP_NAME;
 use crate::{
-    APP_NAME, CloseLibrary, InsertImage, NewSheet, OpenLibrary, OpenSettings, QuitApp, SaveSheet,
+    CloseLibrary, CompileProject, InsertImage, NewSheet, OpenLibrary, OpenSettings, QuitApp, SaveSheet,
     SetTheme, ShowAbout, TogglePreview, ToggleSidebar, ToggleTheme, theme,
 };
 
@@ -38,6 +40,8 @@ pub(crate) fn build_menus(theme_names: &[SharedString], active_theme: &str) -> V
     let mut file_items = vec![
         MenuItem::action("New Sheet", NewSheet),
         MenuItem::action("Save", SaveSheet),
+        MenuItem::separator(),
+        MenuItem::action("Compile Project…", CompileProject),
         MenuItem::separator(),
         MenuItem::action("Open Library…", OpenLibrary),
         MenuItem::action("Close Library", CloseLibrary),

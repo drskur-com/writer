@@ -6,7 +6,7 @@
 mod book;
 mod paragraphs;
 
-pub use book::{Block, Inline, Rich, blocks, plain, rich_text};
+pub use book::{Block, Inline, Marks, Rich, blocks, plain, rich_text};
 pub use paragraphs::{to_editor, to_markdown};
 
 use std::ops::Range;

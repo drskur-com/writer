@@ -3,6 +3,7 @@
 mod book_info;
 mod book_preview;
 mod book_style;
+mod compile_dialog;
 mod editor;
 mod editor_image;
 mod editor_layout;
@@ -27,7 +28,7 @@ use gpui_kit::component::menu::AppMenuBar;
 
 use crate::menus::install_menus;
 use crate::{
-    APP_NAME, CloseLibrary, OpenLibrary, QuitApp, SaveSheet, SetTheme, ShowAbout, TogglePreview,
+    APP_NAME, CloseLibrary, CompileProject, OpenLibrary, QuitApp, SaveSheet, SetTheme, ShowAbout, TogglePreview,
     ToggleSidebar, ToggleTheme, config, icons, library, theme,
 };
 use style::*;
@@ -161,6 +162,33 @@ impl WriterApp {
         if let Err(err) = self.save_open_sheet(cx) {
             self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
         }
+    }
+
+    fn on_compile_project(&mut self, _: &CompileProject, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(project_dir) = self.active_project() {
+            self.open_compile_dialog(&project_dir, window, cx);
+        } else {
+            self.notify("컴파일할 프로젝트를 먼저 선택하세요.", window, cx);
+        }
+    }
+
+    /// 현재 작업 중이거나 선택된 프로젝트 경로.
+    pub(crate) fn active_project(&self) -> Option<PathBuf> {
+        if let Some(ref dir) = self.open_project {
+            return Some(dir.clone());
+        }
+        let library = self.library.as_ref()?;
+        if let Some(ref sheet) = self.selected_sheet {
+            if let Some(p) = library.project_of(sheet) {
+                return Some(p);
+            }
+        }
+        if let Some(Selection::Group(ref group)) = self.selected {
+            if let Some(p) = library.project_of(group) {
+                return Some(p);
+            }
+        }
+        None
     }
 
     fn on_open_library(&mut self, _: &OpenLibrary, window: &mut Window, cx: &mut Context<Self>) {
@@ -492,6 +520,7 @@ impl Render for WriterApp {
             .text_color(pal.foreground)
             .on_action(cx.listener(Self::on_new_sheet))
             .on_action(cx.listener(Self::on_save_sheet))
+            .on_action(cx.listener(Self::on_compile_project))
             .on_action(cx.listener(Self::on_insert_image))
             .on_action(cx.listener(Self::on_open_library))
             .on_action(cx.listener(Self::on_close_library))

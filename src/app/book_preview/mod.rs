@@ -12,7 +12,7 @@ mod page;
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, WindowExt as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::collections::HashMap;
@@ -464,6 +464,63 @@ impl BookPreview {
         }
     }
 
+    /// 현재 프로젝트를 ePub 파일로 내보낸다.
+    fn export_epub(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let title = self
+            .source
+            .as_ref()
+            .map(|s| s.title.clone())
+            .unwrap_or_else(|| "책".to_string());
+        let default_name = format!("{title}.epub");
+        let project_dir = self.project.clone();
+        let default_dir = project_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| project_dir.clone());
+
+        let receiver = cx.prompt_for_new_path(&default_dir, Some(&default_name));
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(output_path))) = receiver.await else {
+                return;
+            };
+
+            let project = project_dir.clone();
+            let target = output_path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::compile::compile_epub_to_file(&project, &target) })
+                .await;
+
+            this.update_in(cx, |_this, window, cx| {
+                let file_name = output_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "책".to_string());
+                match result {
+                    Ok(()) => {
+                        window.push_notification(
+                            gpui_kit::component::notification::Notification::info(
+                                SharedString::from(format!("ePub 내보내기 완료: {file_name}")),
+                            ),
+                            cx,
+                        );
+                    }
+                    Err(err) => {
+                        window.push_notification(
+                            gpui_kit::component::notification::Notification::info(
+                                SharedString::from(format!("ePub 내보내기 실패: {err}")),
+                            ),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     // --- 렌더 ---------------------------------------------------------------
 
     fn render_toolbar(
@@ -704,7 +761,14 @@ impl BookPreview {
                         .child(size_menu)
                         .when_some(toc_menu, |this, menu| this.child(menu)),
                 )
-                .child(navigation),
+                .child(navigation)
+                .child(
+                    tool_group(pal).child(
+                        icon_button("export-epub", icons::export(), true, pal).on_click(
+                            cx.listener(|this, _, window, cx| this.export_epub(window, cx)),
+                        ),
+                    ),
+                ),
         )
         .into_any_element()
     }
