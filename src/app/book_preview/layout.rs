@@ -708,7 +708,7 @@ impl<'a> Flow<'a> {
             self.numbers[depth] += 1;
         }
         let prefix = if numbered {
-            resolved.title_text(self.numbers[depth], "")
+            resolved.prefix_text(self.numbers[depth])
         } else {
             String::new()
         };
@@ -721,8 +721,19 @@ impl<'a> Flow<'a> {
         }
         let page = self.page_index();
         if resolved.in_toc {
+            // 차례에서는 접두사(번호)와 제목의 개행(`<br>`)을 스페이스로 바꾼다.
+            let toc_prefix = if numbered {
+                resolved.toc_prefix_text(self.numbers[depth])
+            } else {
+                String::new()
+            };
+            let mut toc_title = markdown::plain(toc_prefix);
+            toc_title.extend(text.iter().cloned());
             self.toc.push(TocEntry {
-                title: markdown::rich_text(&title).trim().to_string(),
+                title: markdown::rich_text(&toc_title)
+                    .replace(['\n', '\r'], " ")
+                    .trim()
+                    .to_string(),
                 depth,
                 page,
             });

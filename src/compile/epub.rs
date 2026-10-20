@@ -35,6 +35,11 @@ pub fn escape_xml(s: &str) -> String {
     out
 }
 
+/// 목차 항목에 쓸 글자. 개행은 스페이스로 바꾼다.
+fn toc_label(s: &str) -> String {
+    s.replace(['\n', '\r'], " ")
+}
+
 /// 이미지 확장자에 맞는 MIME 타입을 돌려준다.
 fn mime_type_for_extension(ext: &str) -> &'static str {
     match ext.to_ascii_lowercase().as_str() {
@@ -142,11 +147,15 @@ impl<'a> EPubBuilder<'a> {
             // 번호와 접두사는 목차 포함 여부와 무관하게 붙인다. 다만 아예 그리지도 않고
             // 목차에도 넣지 않는 제목(숨김 + 목차 제외)은 번호를 쓰지 않는다.
             let numbered = resolved.placement != Placement::Hidden || resolved.in_toc;
-            let display_title = if numbered {
+            // 본문 제목과 목차 제목을 따로 만든다. 목차에서는 접두사의 개행을 스페이스로 바꾼다.
+            let (display_title, toc_title) = if numbered {
                 self.numbers[depth] += 1;
-                resolved.title_text(self.numbers[depth], &raw_title)
+                (
+                    resolved.title_text(self.numbers[depth], &raw_title),
+                    resolved.toc_title_text(self.numbers[depth], &raw_title),
+                )
             } else {
-                raw_title.clone()
+                (raw_title.clone(), raw_title.clone())
             };
 
             let target_class = match target {
@@ -166,7 +175,7 @@ impl<'a> EPubBuilder<'a> {
                         let href = format!("{}#{}", filename, anchor_id);
                         self.toc_items.push(TocItem {
                             id: anchor_id.clone(),
-                            title: display_title,
+                            title: toc_title,
                             href,
                         });
                         self.ensure_section("").html_body.push_str(&format!("<span id=\"{anchor_id}\"></span>\n"));
@@ -200,7 +209,7 @@ impl<'a> EPubBuilder<'a> {
                         let href = format!("{}#{}", filename, anchor_id);
                         self.toc_items.push(TocItem {
                             id: anchor_id,
-                            title: display_title,
+                            title: toc_title,
                             href,
                         });
                     }
@@ -220,7 +229,7 @@ impl<'a> EPubBuilder<'a> {
                         let href = format!("{}#{}", filename, anchor_id);
                         self.toc_items.push(TocItem {
                             id: anchor_id.clone(),
-                            title: display_title,
+                            title: toc_title,
                             href,
                         });
                     }
@@ -925,7 +934,7 @@ fn generate_toc_ncx(project: &CompileProject, sections: &[Section], toc_items: &
       <content src="{}"/>
     </navPoint>
 "#,
-                escape_xml(&sec.title),
+                escape_xml(&toc_label(&sec.title)),
                 escape_xml(&sec.filename)
             ));
             play_order += 1;
@@ -939,7 +948,7 @@ fn generate_toc_ncx(project: &CompileProject, sections: &[Section], toc_items: &
     </navPoint>
 "#,
                 escape_xml(&item.id),
-                escape_xml(&item.title),
+                escape_xml(&toc_label(&item.title)),
                 escape_xml(&item.href)
             ));
             play_order += 1;
@@ -1171,6 +1180,58 @@ mod tests {
         style.prefix = "제{n}장\n".to_string();
         let html = render_rich_with_prefix(&Rich::new(), &style, 2);
         assert_eq!(html, "제2장<br/>\n");
+    }
+
+    #[test]
+    fn toc_flattens_prefix_newline() {
+        let mut styles = Styles::default();
+        styles.chapter.prefix = Some("제{n}장\n".to_string());
+
+        let project = CompileProject {
+            name: "테스트".to_string(),
+            dir: PathBuf::from("fake/project"),
+            book: BookMeta::default(),
+            styles,
+            sheets: vec![CompileSheet {
+                path: PathBuf::from("fake/project/01.md"),
+                glued: false,
+                content: "## 첫 이야기\n\n본문.\n".to_string(),
+            }],
+        };
+
+        let mut buffer = Cursor::new(Vec::new());
+        build_epub(&project, &mut buffer).unwrap();
+
+        let mut reader = zip::ZipArchive::new(Cursor::new(buffer.into_inner())).unwrap();
+        let mut ncx = reader.by_name("OEBPS/toc.ncx").unwrap();
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut ncx, &mut content).unwrap();
+        assert!(content.contains("<text>제1장 첫 이야기</text>"), "{content}");
+    }
+
+    #[test]
+    fn toc_flattens_title_break() {
+        let project = CompileProject {
+            name: "테스트".to_string(),
+            dir: PathBuf::from("fake/project"),
+            book: BookMeta::default(),
+            styles: Styles::default(),
+            sheets: vec![CompileSheet {
+                path: PathBuf::from("fake/project/01.md"),
+                glued: false,
+                content: "## 제목<br>부제\n\n본문.\n".to_string(),
+            }],
+        };
+
+        let mut buffer = Cursor::new(Vec::new());
+        build_epub(&project, &mut buffer).unwrap();
+
+        let mut reader = zip::ZipArchive::new(Cursor::new(buffer.into_inner())).unwrap();
+        let mut ncx = reader.by_name("OEBPS/toc.ncx").unwrap();
+        let mut content = String::new();
+        std::io::Read::read_to_string(&mut ncx, &mut content).unwrap();
+        assert!(content.contains("<text>제목 부제</text>"), "{content}");
+        assert!(!content.contains("제목\n부제"), "{content}");
     }
 
     #[test]

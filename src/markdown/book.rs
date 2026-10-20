@@ -239,7 +239,12 @@ impl Walk<'_> {
                 };
                 push(&superscript(number), marks);
             }
-            Node::Html(_) => {}
+            // `<br>`은 강제 줄바꿈이다(제목에 두 줄을 넣을 때 쓴다). 다른 HTML은 버린다.
+            Node::Html(html) => {
+                if is_break(&html.value) {
+                    push("\n", marks);
+                }
+            }
             other => {
                 let marks = match other {
                     Node::Strong(_) => Marks {
@@ -266,6 +271,14 @@ impl Walk<'_> {
             }
         }
     }
+}
+
+/// 인라인 HTML이 줄바꿈 태그인지(`<br>`, `<br/>`, `<br />`).
+fn is_break(html: &str) -> bool {
+    matches!(
+        html.trim().to_ascii_lowercase().as_str(),
+        "<br>" | "<br/>" | "<br />"
+    )
 }
 
 /// 각주 번호를 위 첨자 숫자로.
@@ -313,6 +326,34 @@ mod tests {
                 ]),
                 Block::Paragraph(plain("둘째\n줄")),
             ]
+        );
+    }
+
+    #[test]
+    fn br_in_heading_is_a_line_break() {
+        assert_eq!(
+            blocks("# 제목<br>부제\n")[0],
+            Block::Heading {
+                level: 1,
+                text: plain("제목\n부제"),
+            }
+        );
+        // `<br/>`, `<br />`도 같고 다른 HTML은 버린다.
+        for tag in ["<br/>", "<br />"] {
+            assert_eq!(
+                blocks(&format!("## 제목{tag}부제\n"))[0],
+                Block::Heading {
+                    level: 2,
+                    text: plain("제목\n부제"),
+                }
+            );
+        }
+        assert_eq!(
+            blocks("# 제목<em>부제\n")[0],
+            Block::Heading {
+                level: 1,
+                text: plain("제목부제"),
+            }
         );
     }
 

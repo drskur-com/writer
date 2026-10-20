@@ -383,6 +383,16 @@ impl ResolvedStyle {
     pub fn title_text(&self, number: usize, title: &str) -> String {
         format!("{}{title}", self.prefix_text(number))
     }
+
+    /// 목차용 접두사. 본문과 달리 접두사의 개행은 스페이스로 바꾼다.
+    pub fn toc_prefix_text(&self, number: usize) -> String {
+        self.prefix_text(number).replace(['\n', '\r'], " ")
+    }
+
+    /// 목차용 제목. 접두사의 개행은 스페이스로 바꾼다.
+    pub fn toc_title_text(&self, number: usize, title: &str) -> String {
+        format!("{}{title}", self.toc_prefix_text(number))
+    }
 }
 
 /// 프로젝트의 책 스타일(`[styles]` 표). 바꾸지 않은 대상은 파일에 쓰지 않는다.
@@ -594,6 +604,12 @@ mod tests {
             back.resolve(StyleTarget::Chapter)
                 .title_text(3, "시라 강 건너"),
             "제3장\n시라 강 건너"
+        );
+        // 목차에서는 접두사의 개행을 스페이스로 바꾼다.
+        assert_eq!(
+            back.resolve(StyleTarget::Chapter)
+                .toc_title_text(3, "시라 강 건너"),
+            "제3장 시라 강 건너"
         );
     }
 

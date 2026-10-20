@@ -66,7 +66,7 @@ fn title_and_excerpt(text: &str) -> (String, String) {
     }
 
     let mut content = lines.map(strip_heading).filter(|line| !line.is_empty());
-    let title = content.next().unwrap_or_default().to_string();
+    let title = strip_breaks(content.next().unwrap_or_default());
 
     let mut excerpt = String::new();
     for line in content {
@@ -78,8 +78,39 @@ fn title_and_excerpt(text: &str) -> (String, String) {
             break;
         }
     }
-    let excerpt = excerpt.chars().take(EXCERPT_CHARS).collect();
-    (title, excerpt)
+    let excerpt: String = excerpt.chars().take(EXCERPT_CHARS).collect();
+    (title, strip_breaks(&excerpt))
+}
+
+/// 인라인 줄바꿈 태그(`<br>`)는 목록 한 줄에 맞게 스페이스로 바꾼다.
+fn strip_breaks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(ix) = rest.find('<') {
+        let (head, tail) = rest.split_at(ix);
+        out.push_str(head);
+        let Some(end) = tail.find('>').map(|end| end + 1) else {
+            out.push_str(tail);
+            return out;
+        };
+        let tag = &tail[..end];
+        if is_break_tag(tag) {
+            out.push(' ');
+        } else {
+            out.push_str(tag);
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 줄바꿈 태그인지(`<br>`, `<br/>`, `<br />`, 대소문자 무시).
+fn is_break_tag(tag: &str) -> bool {
+    matches!(
+        tag.trim().to_ascii_lowercase().as_str(),
+        "<br>" | "<br/>" | "<br />"
+    )
 }
 
 /// 앞뒤 공백과 ATX 헤딩 표시를 지운다. `#태그`처럼 뒤에 공백이 없으면 헤딩이 아니다.
@@ -124,6 +155,15 @@ mod tests {
         assert_eq!(
             title_and_excerpt("---\ngoal: 1\n---\n"),
             (String::new(), String::new())
+        );
+        // 제목의 줄바꿈 태그(`<br>`)는 스페이스로 바꾼다
+        assert_eq!(
+            title_and_excerpt("# 제목<br>부제\n\n본문\n"),
+            ("제목 부제".to_string(), "본문".to_string())
+        );
+        assert_eq!(
+            title_and_excerpt("# 제목<BR />부제"),
+            ("제목 부제".to_string(), String::new())
         );
         // 발췌는 EXCERPT_CHARS에서 자른다
         let long = format!("t\n{}", "가".repeat(500));
