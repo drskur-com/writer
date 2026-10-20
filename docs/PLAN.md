@@ -121,7 +121,8 @@ Section   { kind: Notes|Projects, entries: Vec<Entry> }          # 고정 2섹�
 Entry     = Sheet | Group
 Group     { name, path, icon, sheets }                           # 메타는 <Group>/.writer.toml
             (예정) title, 하위 그룹, kind: Normal|Smart(query), collapsed
-Sheet     { title, path(.md), modified }
+Sheet     { path(.md), modified }                         # 스캔은 메타데이터만
+Preview   { title, excerpt }                              # 보이는 목록의 시트만 본문 앞 4KB에서 읽음
             (예정) keywords[], goals, created/opened_at, word_count, favorite, attachment_dir
 Attachment (예정) { sheet, kind: Image|File|Note, path, caption, alt }
 Config    { library_root, recent_libraries, … }                  # <config_dir>/Writer/config.toml
@@ -129,7 +130,8 @@ Config    { library_root, recent_libraries, … }                  # <config_dir
 ```
 
 - **Inbox는 섹션이 아니라 Notes 아래 기본 그룹**(`DEFAULT_INBOX`)이다.
-- 정렬: Notes 시트는 최근 수정순, Projects 시트는 이름순. 그룹의 `.writer.toml`에 `sheets` 순서가 있으면 그것이 우선하고, 나열되지 않은 파일은 뒤에 이름순으로 붙는다.
+- 정렬: 기본은 최근 수정순(시간 역순). 그룹의 `.writer.toml`에 `sheets` 순서가 있으면 그것이 우선하고, 나열되지 않은 파일은 뒤에 최근 수정순으로 붙는다.
+- 시트 파일명: 새 시트는 `<ULID>.md`. 파일명은 바뀌지 않는 식별자이고 표시 제목은 본문에서 얻는다(빈 시트는 "빈 시트").
 
 ### 3.3 저장 포맷 및 디렉터리 레이아웃 (ADR-0003, ADR-0005)
 
@@ -228,7 +230,7 @@ Rope(원문)
 
 ### M3 — 라이브러리 UI (4~6일)
 - [ ] 사이드바 확장: 고정 섹션(Notes, Projects) + 하위 그룹 중첩, 드래그 이동/정렬(→ `.writer.toml` `sheets` 갱신), 펼침 상태 저장
-- [x] 영역별 정렬(Notes: 최근 수정순, Projects: `.writer.toml` 순서 → 이름순)
+- [x] 시트 정렬: `.writer.toml` 순서 → 최근 수정순
 - [ ] 컨텍스트 메뉴(새 시트/그룹, 이름 바꾸기, 이동, 복제, 즐겨찾기, 휴지통), 인라인 rename
 - [ ] `dock` 탭: 다중 시트, 닫기/순서/더티 표시, 최근 문서
 - [ ] 상태바: 시트 경로·저장 상태·단어 수

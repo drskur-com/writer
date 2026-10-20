@@ -16,6 +16,7 @@ mod config;
 mod icons;
 mod library;
 mod theme;
+mod watch;
 
 actions!(
     writer,
@@ -41,6 +42,15 @@ struct SetTheme {
 }
 
 const APP_NAME: &str = "Writer";
+
+/// 목록/에디터에 표시할 시트 이름. 빈 시트는 "빈 시트", 아직 읽지 않았으면 빈 문자열.
+fn sheet_label(preview: Option<&library::Preview>) -> String {
+    match preview {
+        Some(preview) if preview.is_empty() => "빈 시트".to_string(),
+        Some(preview) => preview.title.clone(),
+        None => String::new(),
+    }
+}
 
 /// 메뉴 트리.
 ///
@@ -136,6 +146,41 @@ const TRAFFIC_LIGHT_SPACE: f32 = 96.0;
 
 /// 사이드바 1단 접기/펴기 스프링. 임계 감쇠(ζ = 1)라 튀지 않고 약 0.3초에 멈춘다.
 const SIDEBAR_SPRING: SpringConfig = SpringConfig::new(400.0, 40.0, 1.0);
+
+/// 시트 카드 높이(제목 한 줄 + 발췌 두 줄 + 여백). 모든 카드가 같아서
+/// 위치를 `index * 높이`로 계산하고, 순서가 바뀌면 스프링으로 옮겨 간다.
+const SHEET_ROW_HEIGHT: f32 = 81.0;
+
+/// 순서가 바뀐 시트 카드가 새 자리로 옮겨 가는 스프링.
+const SHEET_ROW_SPRING: SpringConfig = SpringConfig::new(500.0, 45.0, 1.0);
+
+/// 시트 목록에서 끌고 있는 시트. 끄는 동안 커서를 따라다니는 미리보기로도 그린다.
+#[derive(Clone)]
+struct DraggedSheet {
+    /// 그룹 안에서의 원래 위치.
+    index: usize,
+    label: SharedString,
+    pal: Palette,
+}
+
+impl Render for DraggedSheet {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_2()
+            .max_w(px(SHEET_COLUMN_WIDTH - 32.0))
+            .truncate()
+            .rounded_md()
+            .border_1()
+            .border_color(self.pal.border)
+            .bg(self.pal.background)
+            .shadow_md()
+            .text_sm()
+            .font_semibold()
+            .text_color(self.pal.foreground)
+            .child(self.label.clone())
+    }
+}
 
 /// 렌더에 쓰는 테마 토큰 묶음. 렌더 초입에서 값으로 복사해 `cx` 대여와 분리한다.
 /// 색은 모두 테마 JSON에서 온다(ADR-0001).
@@ -257,6 +302,13 @@ struct WriterApp {
     selected_sheet: Option<PathBuf>,
     /// 온보딩 화면에 표시할 안내/오류 문구.
     notice: Option<SharedString>,
+    /// 읽어 둔 시트 미리보기(경로 → 읽은 시점의 수정 시각, 미리보기).
+    /// 보이는 목록의 시트만 읽는다.
+    previews: std::collections::HashMap<PathBuf, (u128, library::Preview)>,
+    /// 미리보기를 읽는 백그라운드 태스크. 새로 시작하면 이전 것은 버려진다.
+    preview_task: Option<Task<()>>,
+    /// 라이브러리 폴더 감시(watcher + 변경 시 다시 스캔하는 태스크). 버리면 멈춘다.
+    watcher: Option<(notify::RecommendedWatcher, Task<()>)>,
     #[cfg(not(target_os = "macos"))]
     menu_bar: Entity<AppMenuBar>,
 }
@@ -328,6 +380,9 @@ impl WriterApp {
                 self.notice = None;
                 self.selected = None;
                 self.selected_sheet = None;
+                self.previews.clear();
+                self.start_watching(cx);
+                self.load_previews(cx);
                 cx.notify();
             }
             Err(err) => self.set_notice(format!("라이브러리를 읽을 수 없습니다: {err}"), cx),
@@ -357,10 +412,179 @@ impl WriterApp {
         .detach();
     }
 
+    // --- 폴더 감시 ---------------------------------------------------------
+
+    /// 현재 라이브러리 루트 감시를 (다시) 시작한다. 변경이 오면 잠깐 모았다가 다시 스캔한다.
+    fn start_watching(&mut self, cx: &mut Context<Self>) {
+        self.watcher = None;
+        let Some(root) = self.library.as_ref().map(|lib| lib.root.clone()) else {
+            return;
+        };
+        let (watcher, mut events) = match watch::watch(&root) {
+            Ok(pair) => pair,
+            Err(err) => {
+                eprintln!("폴더 감시 실패: {err}");
+                return;
+            }
+        };
+        let task = cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while events.next().await.is_some() {
+                // 저장·이동은 이벤트가 여러 개 연달아 온다. 잠깐 기다렸다가 한꺼번에 처리한다.
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(150))
+                    .await;
+                while events.try_recv().is_ok() {}
+
+                // 디스크 I/O는 백그라운드에서 하고, 결과 반영만 UI 스레드에서 한다.
+                let scan_root = root.clone();
+                let scanned = cx
+                    .background_executor()
+                    .spawn(async move { library::scan(&scan_root) })
+                    .await;
+                if this
+                    .update(cx, |this, cx| this.apply_scan(&root, scanned, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        self.watcher = Some((watcher, task));
+    }
+
+    /// 다시 읽은 라이브러리를 반영한다. 사라진 시트/그룹의 선택은 푼다.
+    ///
+    /// 스캔하는 사이에 다른 라이브러리로 바뀌었으면 결과를 버린다.
+    fn apply_scan(
+        &mut self,
+        root: &std::path::Path,
+        scanned: std::io::Result<library::Library>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.library.as_ref().map(|lib| lib.root.as_path()) != Some(root) {
+            return;
+        }
+        let scanned = match scanned {
+            Ok(scanned) => scanned,
+            Err(err) => {
+                eprintln!("라이브러리 다시 읽기 실패: {err}");
+                return;
+            }
+        };
+        self.library = Some(scanned);
+        if let Some(Selection::Group(path)) = &self.selected
+            && !path.is_dir()
+        {
+            self.selected = None;
+        }
+        if let Some(path) = &self.selected_sheet
+            && self.find_sheet(path).is_none()
+        {
+            self.selected_sheet = None;
+        }
+        self.load_previews(cx);
+        cx.notify();
+    }
+
+    /// 그룹 안에서 시트를 옮기고 순서를 저장한다.
+    fn move_sheet(
+        &mut self,
+        group_path: &std::path::Path,
+        from: usize,
+        to: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = self
+            .library
+            .as_mut()
+            .into_iter()
+            .flat_map(|lib| &mut lib.sections)
+            .flat_map(|section| &mut section.entries)
+            .find_map(|entry| match entry {
+                library::Entry::Group(group) if group.path == group_path => Some(group),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        if let Err(err) = library::move_sheet(group, from, to) {
+            self.notify(format!("순서를 저장할 수 없습니다: {err}"), window, cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    /// 지금 보이는 목록에서 아직 안 읽었거나 바뀐 시트의 미리보기를 백그라운드에서 읽는다.
+    fn load_previews(&mut self, cx: &mut Context<Self>) {
+        let pending: Vec<(PathBuf, u128)> = self
+            .effective_selection()
+            .map(|selection| self.sheets_for(&selection))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|sheet| {
+                self.previews
+                    .get(&sheet.path)
+                    .is_none_or(|(modified, _)| *modified != sheet.modified)
+            })
+            .map(|sheet| (sheet.path, sheet.modified))
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        self.preview_task = Some(cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_executor()
+                .spawn(async move {
+                    pending
+                        .into_iter()
+                        .map(|(path, modified)| {
+                            let preview = library::read_preview(&path);
+                            (path, (modified, preview))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.previews.extend(loaded);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     // --- 액션 핸들러 --------------------------------------------------------
 
+    /// 현재 선택한 그룹에 빈 시트를 만들고 선택한다.
     fn on_new_sheet(&mut self, _: &NewSheet, window: &mut Window, cx: &mut Context<Self>) {
-        self.notify("새 문서를 준비했습니다.", window, cx);
+        let Some(lib) = &self.library else {
+            self.notify("먼저 라이브러리를 여세요.", window, cx);
+            return;
+        };
+        let root = lib.root.clone();
+        let dir = match self.effective_selection() {
+            Some(Selection::Group(path)) => path,
+            // "모두"(메모)에서는 Inbox에 만든다.
+            Some(Selection::Section(library::SectionKind::Notes)) | None => root
+                .join(library::SectionKind::Notes.dir())
+                .join(library::DEFAULT_INBOX),
+            Some(Selection::Section(kind)) => root.join(kind.dir()),
+        };
+
+        let created = library::create_sheet(&dir).and_then(|path| {
+            let scanned = library::scan(&root)?;
+            Ok((path, scanned))
+        });
+        match created {
+            Ok((path, scanned)) => {
+                self.library = Some(scanned);
+                self.selected_sheet = Some(path);
+                self.load_previews(cx);
+                cx.notify();
+            }
+            Err(err) => self.notify(format!("시트를 만들 수 없습니다: {err}"), window, cx),
+        }
     }
 
     fn on_save_sheet(&mut self, _: &SaveSheet, window: &mut Window, cx: &mut Context<Self>) {
@@ -372,6 +596,9 @@ impl WriterApp {
     }
 
     fn on_close_library(&mut self, _: &CloseLibrary, _: &mut Window, cx: &mut Context<Self>) {
+        self.watcher = None;
+        self.preview_task = None;
+        self.previews.clear();
         self.library = None;
         self.notice = None;
         self.selected = None;
@@ -754,6 +981,7 @@ impl WriterApp {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected = Some(selection.clone());
                 this.selected_sheet = None;
+                this.load_previews(cx);
                 cx.notify();
             }))
             .child(Icon::new(icon).small().text_color(icon_color))
@@ -813,37 +1041,136 @@ impl WriterApp {
                 .child("시트 없음")
                 .into_any_element()
         } else {
+            // 그룹을 볼 때만 끌어서 순서를 바꾼다("모두"는 수정순 고정).
+            let group_path = match &current {
+                Some(Selection::Group(path)) => Some(path.clone()),
+                _ => None,
+            };
+            // 다른 목록으로 바꿨을 때 같은 시트가 옛 자리에서 날아오지 않도록 목록별로 키를 나눈다.
+            let list_key = match &current {
+                Some(Selection::Group(path)) => path.display().to_string(),
+                Some(Selection::Section(kind)) => kind.dir().to_string(),
+                None => String::new(),
+            };
             let mut items: Vec<AnyElement> = Vec::with_capacity(sheets.len());
-            for sheet in sheets {
+            for (index, sheet) in sheets.into_iter().enumerate() {
                 let path = sheet.path.clone();
                 let selected = self.selected_sheet.as_ref() == Some(&path);
-                items.push(
+                let preview = self.previews.get(&path).map(|(_, preview)| preview);
+                let is_empty = preview.is_some_and(|preview| preview.is_empty());
+                let excerpt = preview
+                    .map(|preview| preview.excerpt.clone())
+                    .unwrap_or_default();
+                let label = sheet_label(preview);
+                // 구분선은 카드 양옆을 비워 두고(본문 글자와 같은 들여쓰기) 긋는다.
+                // 선택한 카드는 둥근 배경으로 감싸고 그 카드의 구분선은 숨긴다.
+                let content = div()
+                    .h_full()
+                    .overflow_hidden()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(if selected {
+                        gpui_kit::gpui::transparent_black()
+                    } else {
+                        pal.panel_border
+                    })
+                    .text_sm()
+                    .text_color(pal.foreground)
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    // 빈 시트는 흐린 기본 굵기로 가볍게 보인다.
+                    // 아직 안 읽은 시트도 한 줄 높이를 차지하게 한다.
+                    .child(
+                        div()
+                            .min_h(rems(1.25))
+                            .truncate()
+                            .when(is_empty, |this| this.text_color(pal.muted))
+                            .when(!is_empty, |this| this.font_semibold())
+                            .child(label.clone()),
+                    )
+                    .when(!excerpt.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(pal.muted)
+                                .line_clamp(2)
+                                .text_ellipsis()
+                                .child(excerpt),
+                        )
+                    });
+                let card = div().h_full().px_2().child(
                     div()
-                        .id(SharedString::from(format!("sheet-{}", path.display())))
-                        .px_4()
-                        .py_3()
-                        .border_b_1()
-                        .border_color(pal.panel_border)
-                        .text_sm()
-                        .text_color(pal.foreground)
+                        .h_full()
+                        .px_2()
+                        .rounded_md()
                         .when(selected, |this| this.bg(pal.active))
-                        .when(!selected, |this| {
-                            this.hover(move |style| style.bg(pal.hover))
-                        })
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .child(content),
+                );
+
+                // 끌어다 놓을 자리는 카드를 감싼 줄의 위/아래 선으로 보여준다.
+                let row = div()
+                    .id(SharedString::from(format!("sheet-{}", path.display())))
+                    .cursor_pointer()
+                    .on_click(cx.listener({
+                        let path = path.clone();
+                        move |this, _, _, cx| {
                             this.selected_sheet = Some(path.clone());
                             cx.notify();
-                        }))
-                        .child(div().font_semibold().child(sheet.title.clone()))
-                        .into_any_element(),
+                        }
+                    }))
+                    .child(card);
+                let row = match &group_path {
+                    Some(group_path) => {
+                        let group_path = group_path.clone();
+                        let dragged = DraggedSheet {
+                            index,
+                            label: label.into(),
+                            pal,
+                        };
+                        row.on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+                            .drag_over::<DraggedSheet>(move |style, dragged, _, _| {
+                                if dragged.index < index {
+                                    style.border_b_2().border_color(pal.accent)
+                                } else if dragged.index > index {
+                                    style.border_t_2().border_color(pal.accent)
+                                } else {
+                                    style
+                                }
+                            })
+                            .on_drop(cx.listener(
+                                move |this, dragged: &DraggedSheet, window, cx| {
+                                    this.move_sheet(&group_path, dragged.index, index, window, cx);
+                                },
+                            ))
+                    }
+                    None => row,
+                };
+                // 카드는 절대 위치로 둔다. 스프링 상태는 시트 경로로 이어지므로
+                // 순서가 바뀌면 이전 자리에서 새 자리로 미끄러져 간다.
+                let top = index as f32 * SHEET_ROW_HEIGHT;
+                let row = row.absolute().left_0().right_0().h(px(SHEET_ROW_HEIGHT));
+                items.push(
+                    row.with_spring(
+                        SharedString::from(format!("sheet-pos-{list_key}-{}", path.display())),
+                        SpringAnimation::new(SHEET_ROW_SPRING).to(top),
+                        |this, y| this.top(px(y)),
+                    )
+                    .into_any_element(),
                 );
             }
+            let content_height = items.len() as f32 * SHEET_ROW_HEIGHT;
             div()
                 .id("sheet-list")
                 .flex_1()
                 .overflow_y_scroll()
-                .children(items)
+                .child(
+                    div()
+                        .relative()
+                        .w_full()
+                        .h(px(content_height))
+                        .children(items),
+                )
                 .into_any_element()
         };
 
@@ -917,27 +1244,33 @@ impl WriterApp {
             .as_ref()
             .and_then(|path| self.find_sheet(path))
         {
-            Some(sheet) => div()
-                .flex_1()
-                .px(px(48.0))
-                .py_6()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .child(
-                    div()
-                        .text_2xl()
-                        .font_bold()
-                        .text_color(pal.foreground)
-                        .child(sheet.title),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(pal.muted)
-                        .child("에디터 연결은 M2에서 진행합니다."),
-                )
-                .into_any_element(),
+            Some(sheet) => {
+                let preview = self.previews.get(&sheet.path).map(|(_, preview)| preview);
+                let is_empty = preview.is_some_and(|preview| preview.is_empty());
+                div()
+                    .flex_1()
+                    .px(px(48.0))
+                    .py_6()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_2xl()
+                            .when(is_empty, |this| this.text_color(pal.muted))
+                            .when(!is_empty, |this| {
+                                this.font_bold().text_color(pal.foreground)
+                            })
+                            .child(sheet_label(preview)),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(pal.muted)
+                            .child("에디터 연결은 M2에서 진행합니다."),
+                    )
+                    .into_any_element()
+            }
             None => div()
                 .flex_1()
                 .flex()
@@ -1186,16 +1519,24 @@ fn main() {
             };
 
             gpui_kit::open_window(options, cx, |_, cx| {
-                cx.new(|_cx| WriterApp {
-                    sidebar_visible: true,
-                    preview_visible: false,
-                    library,
-                    notice,
-                    collapsed_sections: std::collections::HashSet::new(),
-                    selected: None,
-                    selected_sheet: None,
-                    #[cfg(not(target_os = "macos"))]
-                    menu_bar: AppMenuBar::new(_cx),
+                cx.new(|cx| {
+                    let mut app = WriterApp {
+                        sidebar_visible: true,
+                        preview_visible: false,
+                        library,
+                        notice,
+                        collapsed_sections: std::collections::HashSet::new(),
+                        selected: None,
+                        selected_sheet: None,
+                        previews: std::collections::HashMap::new(),
+                        preview_task: None,
+                        watcher: None,
+                        #[cfg(not(target_os = "macos"))]
+                        menu_bar: AppMenuBar::new(cx),
+                    };
+                    app.start_watching(cx);
+                    app.load_previews(cx);
+                    app
                 })
             })
             .expect("창 열기에 실패했습니다");

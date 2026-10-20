@@ -35,7 +35,7 @@ pub const DEFAULT_PROJECT: &str = "샘플 프로젝트";
 pub enum SectionKind {
     /// 메모(그룹 가능, 시트는 최근 수정순).
     Notes,
-    /// 프로젝트(그룹, 시트는 이름순).
+    /// 프로젝트(그룹, 시트는 `.writer.toml` 순서 → 최근 수정순).
     Projects,
 }
 
@@ -78,15 +78,29 @@ pub enum Entry {
     Group(Group),
 }
 
-/// 문서(시트).
+/// 문서(시트). 스캔은 파일 메타데이터만 읽는다. 본문 미리보기는 [`read_preview`]로 따로 읽는다.
 #[derive(Clone, Debug)]
 pub struct Sheet {
-    pub title: String,
-    /// 시트 파일 경로 (열기/저장은 후속 단계에서 사용).
-    #[allow(dead_code)]
+    /// 시트 파일 경로.
     pub path: PathBuf,
     /// 정렬용 수정 시각(나노초). 최근일수록 큼.
     pub modified: u128,
+}
+
+/// 시트 본문에서 얻은 목록용 미리보기.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Preview {
+    /// 표시 제목: 본문 첫 줄(헤딩 표시 제거). 빈 시트는 빈 문자열.
+    pub title: String,
+    /// 목록 카드에 보일 발췌: 제목 다음 줄들을 한 줄로 이은 것.
+    pub excerpt: String,
+}
+
+impl Preview {
+    /// 본문이 비어 있는지(공백·frontmatter뿐이어도 빈 것). 목록에서 "빈 시트"로 표시한다.
+    pub fn is_empty(&self) -> bool {
+        self.title.is_empty()
+    }
 }
 
 /// 프로젝트 안의 그룹(폴더).
@@ -293,13 +307,54 @@ fn write_group_meta_if_absent(
     std::fs::write(path, text)
 }
 
+/// 그룹 안에서 시트를 `from` 위치에서 `to` 위치로 옮기고, 새 순서를 `.writer.toml`에 쓴다.
+///
+/// 범위를 벗어나면 아무것도 하지 않는다. 쓰기에 실패하면 메모리의 순서도 되돌린다.
+pub fn move_sheet(group: &mut Group, from: usize, to: usize) -> io::Result<()> {
+    if from >= group.sheets.len() || to >= group.sheets.len() || from == to {
+        return Ok(());
+    }
+    let sheet = group.sheets.remove(from);
+    group.sheets.insert(to, sheet);
+    let order: Vec<String> = group.sheets.iter().map(sheet_file_name).collect();
+    if let Err(err) = write_sheet_order(&group.path, &order) {
+        let sheet = group.sheets.remove(to);
+        group.sheets.insert(from, sheet);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// 그룹 `.writer.toml`의 `sheets`를 `order`(파일명 목록)로 바꾼다. 다른 키는 그대로 둔다.
+///
+/// 메타 파일이 깨져 있으면 덮어쓰지 않고 오류를 돌려준다. 임시 파일에 쓴 뒤 바꿔치기한다.
+fn write_sheet_order(group_dir: &Path, order: &[String]) -> io::Result<()> {
+    let path = group_dir.join(GROUP_META_FILE);
+    let mut table: toml::Table = match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            toml::from_str(&text).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => toml::Table::new(),
+        Err(err) => return Err(err),
+    };
+    table.insert(
+        "sheets".to_string(),
+        toml::Value::Array(order.iter().cloned().map(toml::Value::String).collect()),
+    );
+    let text = toml::to_string_pretty(&table)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let temp = group_dir.join(format!("{GROUP_META_FILE}.tmp"));
+    std::fs::write(&temp, text)?;
+    std::fs::rename(&temp, &path)
+}
+
 /// 라이브러리를 스캔해 모델로 읽는다.
 pub fn scan(root: &Path) -> io::Result<Library> {
     let mut sections = Vec::with_capacity(SECTIONS.len());
     for kind in SECTIONS {
         sections.push(Section {
             kind,
-            entries: scan_section(&root.join(kind.dir()), kind)?,
+            entries: scan_section(&root.join(kind.dir()))?,
         });
     }
     Ok(Library {
@@ -308,7 +363,7 @@ pub fn scan(root: &Path) -> io::Result<Library> {
     })
 }
 
-fn scan_section(dir: &Path, kind: SectionKind) -> io::Result<Vec<Entry>> {
+fn scan_section(dir: &Path) -> io::Result<Vec<Entry>> {
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -325,12 +380,9 @@ fn scan_section(dir: &Path, kind: SectionKind) -> io::Result<Vec<Entry>> {
         }
     }
 
-    // 그룹을 먼저(이름순), 그 뒤 시트.
+    // 그룹을 먼저(이름순), 그 뒤 시트(최근 수정순).
     groups.sort_by_key(|group| group.name.to_lowercase());
-    match kind {
-        SectionKind::Projects => sheets.sort_by_key(|sheet| sheet.title.to_lowercase()),
-        SectionKind::Notes => sheets.sort_by_key(|sheet| std::cmp::Reverse(sheet.modified)),
-    }
+    sort_recent_first(&mut sheets);
     let mut entries: Vec<Entry> = groups.into_iter().map(Entry::Group).collect();
     entries.extend(sheets.into_iter().map(Entry::Sheet));
     Ok(entries)
@@ -347,8 +399,8 @@ fn scan_group(dir: &Path) -> io::Result<Group> {
         }
     }
 
-    // 메타에 나열된 파일을 그 순서대로 앞에 두고, 나머지는 이름순으로 뒤에 붙인다.
-    sheets.sort_by_key(|sheet| sheet.title.to_lowercase());
+    // 메타에 나열된 파일을 그 순서대로 앞에 두고, 나머지는 최근 수정순으로 뒤에 붙인다.
+    sort_recent_first(&mut sheets);
     if !meta.sheets.is_empty() {
         let mut ordered = Vec::with_capacity(sheets.len());
         for name in &meta.sheets {
@@ -371,6 +423,15 @@ fn scan_group(dir: &Path) -> io::Result<Group> {
     })
 }
 
+/// 기본 정렬: 최근 수정순. 같으면 파일명 역순(ULID 파일명은 최근 생성이 앞).
+fn sort_recent_first(sheets: &mut [Sheet]) {
+    sheets.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| sheet_file_name(b).cmp(&sheet_file_name(a)))
+    });
+}
+
 /// 시트의 파일명(확장자 포함).
 fn sheet_file_name(sheet: &Sheet) -> String {
     sheet
@@ -380,12 +441,28 @@ fn sheet_file_name(sheet: &Sheet) -> String {
         .unwrap_or_default()
 }
 
+/// `dir` 안에 빈 시트 파일(`<ULID>.md`)을 만들고 경로를 돌려준다.
+///
+/// 파일명은 바뀌지 않는 식별자다. 표시 제목은 본문에서 얻는다.
+/// `create_new`로 만들어 기존 파일을 덮어쓰지 않는다.
+pub fn create_sheet(dir: &Path) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!("{}.md", ulid::Ulid::generate()));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    Ok(path)
+}
+
+/// 제목·발췌를 얻으려고 읽는 파일 앞부분 크기.
+const PREVIEW_BYTES: u64 = 4096;
+
+/// 발췌 최대 글자 수.
+const EXCERPT_CHARS: usize = 200;
+
 fn sheet_from_path(path: &Path) -> Sheet {
     Sheet {
-        title: path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_default(),
         path: path.to_path_buf(),
         modified: std::fs::metadata(path)
             .and_then(|meta| meta.modified())
@@ -394,6 +471,80 @@ fn sheet_from_path(path: &Path) -> Sheet {
             .map(|delta| delta.as_nanos())
             .unwrap_or(0),
     }
+}
+
+/// 시트 파일 앞부분을 읽어 미리보기를 만든다. 읽지 못하면 빈 미리보기.
+pub fn read_preview(path: &Path) -> Preview {
+    let (title, excerpt) = title_and_excerpt(&read_head(path));
+    Preview { title, excerpt }
+}
+
+/// 파일 앞부분(`PREVIEW_BYTES`)을 UTF-8로 읽는다. 끝에서 잘린 글자는 버린다.
+fn read_head(path: &Path) -> String {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    if let Ok(file) = std::fs::File::open(path) {
+        let _ = file.take(PREVIEW_BYTES).read_to_end(&mut bytes);
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(err) => {
+            let valid = err.utf8_error().valid_up_to();
+            let mut bytes = err.into_bytes();
+            bytes.truncate(valid);
+            String::from_utf8(bytes).unwrap_or_default()
+        }
+    }
+}
+
+/// 본문에서 제목(첫 줄)과 발췌(그다음 줄들)를 뽑는다.
+///
+/// BOM과 앞쪽 YAML frontmatter(`---` … `---`/`...`)는 건너뛰고,
+/// 각 줄의 ATX 헤딩 표시(`# `, 끝의 `#`)는 지운다. 빈 줄은 무시한다.
+fn title_and_excerpt(text: &str) -> (String, String) {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut lines = text.lines().peekable();
+
+    if lines.peek().is_some_and(|line| line.trim_end() == "---") {
+        lines.next();
+        for line in lines.by_ref() {
+            if matches!(line.trim_end(), "---" | "...") {
+                break;
+            }
+        }
+    }
+
+    let mut content = lines.map(strip_heading).filter(|line| !line.is_empty());
+    let title = content.next().unwrap_or_default().to_string();
+
+    let mut excerpt = String::new();
+    for line in content {
+        if !excerpt.is_empty() {
+            excerpt.push(' ');
+        }
+        excerpt.push_str(line);
+        if excerpt.chars().count() >= EXCERPT_CHARS {
+            break;
+        }
+    }
+    let excerpt = excerpt.chars().take(EXCERPT_CHARS).collect();
+    (title, excerpt)
+}
+
+/// 앞뒤 공백과 ATX 헤딩 표시를 지운다. `#태그`처럼 뒤에 공백이 없으면 헤딩이 아니다.
+fn strip_heading(line: &str) -> &str {
+    let line = line.trim();
+    let hashes = line.chars().take_while(|&c| c == '#').count();
+    if (1..=6).contains(&hashes) {
+        let rest = &line[hashes..];
+        if rest.is_empty() {
+            return "";
+        }
+        if rest.starts_with([' ', '\t']) {
+            return rest.trim().trim_end_matches('#').trim_end();
+        }
+    }
+    line
 }
 
 fn file_name(path: &Path) -> String {
@@ -420,6 +571,15 @@ fn is_writable(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stem(sheet: &Sheet) -> String {
+        sheet
+            .path
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let base = std::env::temp_dir().join(format!(
@@ -462,7 +622,12 @@ mod tests {
 
         ensure_layout(&root).unwrap();
 
-        assert!(root.join("Notes").join(DEFAULT_INBOX).join("note.md").is_file());
+        assert!(
+            root.join("Notes")
+                .join(DEFAULT_INBOX)
+                .join("note.md")
+                .is_file()
+        );
         assert!(!root.join("Inbox").exists());
 
         std::fs::remove_dir_all(&root).ok();
@@ -517,10 +682,11 @@ mod tests {
         initialize(&root).unwrap();
 
         let inbox = root.join("Notes").join(DEFAULT_INBOX);
-        std::fs::write(inbox.join("a.md"), "a").unwrap();
-        std::fs::write(inbox.join("b.md"), "b").unwrap();
-        std::fs::write(inbox.join("c.md"), "c").unwrap();
-        // 메타 순서: c, a (b는 미나열 -> 뒤에 이름순)
+        for stem in ["a", "b", "c", "d"] {
+            std::fs::write(inbox.join(format!("{stem}.md")), stem).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // 메타 순서: c, a (b·d는 미나열 -> 뒤에 최근 수정순: d, b)
         std::fs::write(
             inbox.join(GROUP_META_FILE),
             "icon = \"inbox\"\nsheets = [\"c.md\", \"a.md\"]\n",
@@ -541,14 +707,90 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let titles: Vec<_> = group.sheets.iter().map(|sheet| sheet.title.clone()).collect();
-        assert_eq!(titles, vec!["c", "a", "b"]);
+        let titles: Vec<_> = group.sheets.iter().map(stem).collect();
+        assert_eq!(titles, vec!["c", "a", "d", "b"]);
 
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn scan_sorts_notes_by_modified_and_projects_by_name() {
+    fn title_and_excerpt_from_content() {
+        // 헤딩 표시 제거, 빈 줄 무시, 다음 줄들은 발췌로
+        assert_eq!(
+            title_and_excerpt("# 제목 #\n\n첫 문단\n둘째 줄\n"),
+            ("제목".to_string(), "첫 문단 둘째 줄".to_string())
+        );
+        // 헤딩이 아니어도 첫 줄이 제목, `#태그`는 헤딩이 아니다
+        assert_eq!(
+            title_and_excerpt("  그냥 메모\n#태그"),
+            ("그냥 메모".to_string(), "#태그".to_string())
+        );
+        // frontmatter와 BOM은 건너뛴다
+        assert_eq!(
+            title_and_excerpt("\u{feff}---\nkeywords: [a]\n---\n## 본문\n"),
+            ("본문".to_string(), String::new())
+        );
+        // 공백·frontmatter뿐이면 빈 시트
+        assert_eq!(title_and_excerpt(" \n\n"), (String::new(), String::new()));
+        assert_eq!(
+            title_and_excerpt("---\ngoal: 1\n---\n"),
+            (String::new(), String::new())
+        );
+        // 발췌는 EXCERPT_CHARS에서 자른다
+        let long = format!("t\n{}", "가".repeat(500));
+        assert_eq!(title_and_excerpt(&long).1.chars().count(), EXCERPT_CHARS);
+    }
+
+    #[test]
+    fn move_sheet_writes_order_and_keeps_meta() {
+        let root = temp_dir("move");
+        initialize(&root).unwrap();
+        let inbox = root.join("Notes").join(DEFAULT_INBOX);
+        for stem in ["a", "b", "c"] {
+            std::fs::write(inbox.join(format!("{stem}.md")), stem).unwrap();
+        }
+        std::fs::write(
+            inbox.join(GROUP_META_FILE),
+            "icon = \"inbox\"\nsheets = [\"a.md\", \"b.md\", \"c.md\"]\n",
+        )
+        .unwrap();
+
+        let mut group = scan_group(&inbox).unwrap();
+        move_sheet(&mut group, 0, 2).unwrap();
+        let moved: Vec<_> = group.sheets.iter().map(stem).collect();
+        assert_eq!(moved, vec!["b", "c", "a"]);
+
+        // 다시 읽어도 같은 순서, 아이콘은 그대로
+        let rescanned = scan_group(&inbox).unwrap();
+        let titles: Vec<_> = rescanned.sheets.iter().map(stem).collect();
+        assert_eq!(titles, vec!["b", "c", "a"]);
+        assert_eq!(rescanned.icon.as_deref(), Some("inbox"));
+        assert!(!inbox.join(format!("{GROUP_META_FILE}.tmp")).exists());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn create_sheet_picks_unique_empty_file() {
+        let root = temp_dir("create");
+        initialize(&root).unwrap();
+        let inbox = root.join("Notes").join(DEFAULT_INBOX);
+
+        let first = create_sheet(&inbox).unwrap();
+        let second = create_sheet(&inbox).unwrap();
+        assert_ne!(first, second);
+        for path in [&first, &second] {
+            let stem = path.file_stem().unwrap().to_str().unwrap();
+            assert!(stem.parse::<ulid::Ulid>().is_ok(), "{stem}");
+        }
+
+        assert!(read_preview(&first).is_empty());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scan_sorts_sheets_recent_first() {
         let root = temp_dir("scan");
         initialize(&root).unwrap();
 
@@ -557,11 +799,12 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         std::fs::write(root.join("Notes").join("b.md"), "b").unwrap();
 
-        // 프로젝트: 그룹 + 시트
+        // 프로젝트 그룹(메타 순서 없음): 나중에 쓴 01이 앞
         let project = root.join("Projects").join("Novel");
         std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(project.join("02.md"), "2").unwrap();
-        std::fs::write(project.join("01.md"), "1").unwrap();
+        std::fs::write(project.join("02.md"), "02").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(project.join("01.md"), "01").unwrap();
 
         let library = scan(&root).unwrap();
 
@@ -574,7 +817,7 @@ mod tests {
             .entries
             .iter()
             .filter_map(|entry| match entry {
-                Entry::Sheet(sheet) => Some(sheet.title.clone()),
+                Entry::Sheet(sheet) => Some(stem(sheet)),
                 _ => None,
             })
             .collect();
@@ -594,7 +837,7 @@ mod tests {
                 _ => None,
             })
             .expect("Novel 그룹이 있어야 한다");
-        let titles: Vec<_> = novel.sheets.iter().map(|s| s.title.clone()).collect();
+        let titles: Vec<_> = novel.sheets.iter().map(stem).collect();
         assert_eq!(titles, vec!["01", "02"]);
 
         std::fs::remove_dir_all(&root).ok();

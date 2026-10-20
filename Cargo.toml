@@ -8,6 +8,9 @@ gpui-kit = "0.7"
 dirs = "5"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+ulid = "3"
+notify = "8"
+futures = "0.3"
 
 [dev-dependencies]
 serde_json = "1"
