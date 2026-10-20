@@ -420,6 +420,7 @@ mod tests {
         styles.body.font = Some("Noto Serif KR".into());
         styles.body.line_height = Some(1.6500001);
         styles.chapter.align = Some(Align::Left);
+        styles.chapter.prefix = Some("제{n}장\n".into());
         write_styles(&dir, &styles).unwrap();
 
         let text = std::fs::read_to_string(dir.join(GROUP_META_FILE)).unwrap();
@@ -432,6 +433,7 @@ mod tests {
         assert_eq!(read.body.font.as_deref(), Some("Noto Serif KR"));
         assert_eq!(read.body.line_height, Some(1.65));
         assert_eq!(read.resolve(StyleTarget::Chapter).align, Align::Left);
+        assert_eq!(read.chapter.prefix.as_deref(), Some("제{n}장\n"));
         // 쓰지 않은 값은 기본값.
         assert_eq!(read.resolve(StyleTarget::Chapter).font_size, 1.4);
         let project = scan(&root).unwrap().find_project(&dir).cloned().unwrap();
@@ -508,6 +510,18 @@ mod tests {
         assert!(toml::to_string(&styles).unwrap().contains("in_toc = false"));
         let chapter = styles.resolve(StyleTarget::Chapter);
         assert_eq!(chapter.title_text(3, "시라 강 건너"), "시라 강 건너");
+
+        // 접두사의 줄바꿈(Enter)도 그대로 저장·복원된다.
+        styles.chapter.in_toc = Some(true);
+        styles.chapter.prefix = Some("제{n}장\n".into());
+        let text = toml::to_string(&styles).unwrap();
+        let back: Styles = toml::from_str(&text).unwrap();
+        assert_eq!(back.chapter.prefix.as_deref(), Some("제{n}장\n"));
+        assert_eq!(
+            back.resolve(StyleTarget::Chapter)
+                .title_text(3, "시라 강 건너"),
+            "제3장\n시라 강 건너"
+        );
     }
 
     #[test]

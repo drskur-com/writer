@@ -602,7 +602,8 @@ fn render_rich_with_prefix(text: &Rich, style: &ResolvedStyle, number: usize) ->
     if style.in_toc {
         let prefix = style.prefix.replace(PREFIX_NUMBER, &number.to_string());
         if !prefix.is_empty() {
-            out.push_str(&escape_xml(&prefix));
+            // 접두사에 넣은 줄바꿈은 XHTML에서 줄바꿈이 되도록 <br/>로 바꾼다.
+            out.push_str(&escape_xml(&prefix).replace('\n', "<br/>\n"));
         }
     }
     out.push_str(&render_rich(text));
@@ -1162,5 +1163,13 @@ mod tests {
         let mut ncx_content = String::new();
         std::io::Read::read_to_string(&mut ncx_file, &mut ncx_content).unwrap();
         assert!(ncx_content.contains("제1장 첫 이야기"));
+    }
+
+    #[test]
+    fn prefix_newline_becomes_line_break() {
+        let mut style = Styles::default().resolve(StyleTarget::Chapter);
+        style.prefix = "제{n}장\n".to_string();
+        let html = render_rich_with_prefix(&Rich::new(), &style, 2);
+        assert_eq!(html, "제2장<br/>\n");
     }
 }

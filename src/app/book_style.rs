@@ -5,7 +5,7 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -162,8 +162,8 @@ struct TargetForm {
     font: Entity<SelectState<SearchableVec<FontItem>>>,
     line_height: Entity<SliderState>,
     numbers: Vec<(NumberField, Entity<InputState>)>,
-    /// 제목 접두사(제목 대상만).
-    prefix: Option<Entity<InputState>>,
+    /// 제목 접두사(제목 대상만). Enter로 줄을 바꿀 수 있다.
+    prefix: Option<Entity<TextareaState>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -309,8 +309,9 @@ impl BookStyleView {
 
         let prefix = target.is_title().then(|| {
             let input = cx.new(|cx| {
-                InputState::new(window, cx)
+                TextareaState::new(window, cx)
                     .placeholder("예: 제{n}장 ")
+                    .auto_grow(1, 4)
                     .default_value(spec.prefix.clone().unwrap_or_default())
             });
             subscriptions.push(cx.subscribe_in(
@@ -672,13 +673,11 @@ impl BookStyleView {
                     .flex_col()
                     .gap_2()
                     .child(div().text_sm().text_color(pal.muted).child("제목 접두사"))
-                    .child(Input::new(input).focus_ring(false))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(pal.muted)
-                            .child(format!("{}은 자동 번호로 바뀝니다", library::PREFIX_NUMBER)),
-                    )
+                    .child(Textarea::new(input))
+                    .child(div().text_xs().text_color(pal.muted).child(format!(
+                        "{}은 자동 번호로 바뀝니다. Enter로 줄을 바꿀 수 있습니다",
+                        library::PREFIX_NUMBER
+                    )))
             });
             let in_toc = Checkbox::new("style-in-toc")
                 .label("목차에 포함")
@@ -820,6 +819,7 @@ impl BookStyleView {
             } else {
                 reader_family.clone()
             };
+            let first_indent = indent(style.first_line_indent);
             div()
                 .w_full()
                 .whitespace_normal()
@@ -834,7 +834,15 @@ impl BookStyleView {
                     Align::Right => this.text_right(),
                     Align::Left | Align::Justify => this.text_left(),
                 })
-                .child(format!("{}{text}", indent(style.first_line_indent)))
+                // 접두사에 넣은 줄바꿈(Enter)을 줄마다 따로 그린다.
+                .children(text.split('\n').enumerate().map(move |(ix, line)| {
+                    let lead = if ix == 0 {
+                        first_indent.clone()
+                    } else {
+                        String::new()
+                    };
+                    div().child(format!("{lead}{line}"))
+                }))
         };
         let body = self.styles.resolve(StyleTarget::Body);
         let body_family = self.effective_font(StyleTarget::Body, cx);
