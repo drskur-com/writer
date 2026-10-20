@@ -22,7 +22,7 @@
 | 항목 | 내용 |
 | --- | --- |
 | 크레이트 | 단일 bin crate `writer` (edition 2024), 의존성 `gpui-kit = "0.7"`, `dirs`, `serde`, `toml` |
-| 코드 | `main.rs`(UI: 커스텀 타이틀바·앱 메뉴·2열 사이드바·상태바·온보딩), `library.rs`(폴더 검증/초기화/스캔, 그룹 메타), `config.rs`(OS 설정 디렉터리 `config.toml`), `theme.rs`(JSON 테마), `icons.rs`(Lucide 매핑). **에디터·시트 열기/저장은 아직 없음** |
+| 코드 | `app/`(UI: 커스텀 타이틀바·2열 사이드바·시트 목록·온보딩), `menus.rs`(앱 메뉴), `library/`(폴더 검증/초기화/스캔, 그룹 메타, 미리보기), `watch.rs`(폴더 감시), `config.rs`(OS 설정 디렉터리 `config.toml`), `theme.rs`(JSON 테마), `icons.rs`(Lucide 매핑). **에디터·시트 열기/저장은 아직 없음** |
 | 결정 기록 | ADR-0001 테마 JSON 단일 출처 · 0002 커스텀 창 크롬 · 0003 라이브러리 레이아웃/폴더 UX · 0004 Lucide 아이콘 팩 |
 | 빌드 | `cargo check` 통과 (콜드 약 1m35s) |
 | 도구 | `mise.toml`에 check/dev/watch/build-fast/clean-cache 태스크, `cargo-watch` |
@@ -94,10 +94,21 @@ gpui 없는 테스트/벤치가 필요해지는 시점(M2 후반)에 한다.
 writer/
 ├─ Cargo.toml
 ├─ src/
-│  ├─ main.rs                 # 앱 진입, 창/레이아웃 (점진적으로 ui/로 분리)
-│  ├─ library.rs              # 도메인: 라이브러리/섹션/그룹/시트 (gpui 의존 금지)
+│  ├─ main.rs                 # 앱 진입: 액션 정의, 테마/메뉴/단축키 등록, 창 열기
+│  ├─ menus.rs                # 앱 메뉴 트리
+│  ├─ app/                    # 앱 상태(WriterApp) + 화면별 렌더
+│  │  ├─ mod.rs               #   상태, 액션 핸들러, 선택 조회, 루트 렌더
+│  │  ├─ library_ops.rs       #   라이브러리 열기·감시·스캔 반영·미리보기·시트 생성/이동
+│  │  ├─ style.rs             #   레이아웃 치수, Palette, 툴바 버튼 헬퍼
+│  │  └─ library_panel.rs, sheet_list.rs, editor.rs, onboarding.rs
+│  ├─ library/                # 도메인 (gpui 의존 금지)
+│  │  ├─ mod.rs               #   모델, 스캔, 정렬
+│  │  ├─ layout.rs            #   폴더 검증/초기화/레이아웃 보장
+│  │  ├─ meta.rs              #   그룹 .writer.toml 읽기/쓰기, 시트 생성/순서
+│  │  └─ preview.rs           #   본문 앞부분 → 제목/발췌
+│  ├─ watch.rs                # 라이브러리 폴더 감시(notify)
 │  ├─ config.rs               # 머신 로컬 설정 (gpui 의존 금지)
-│  ├─ theme.rs, icons.rs      # UI 자산 매핑
+│  ├─ theme.rs, icons.rs, assets.rs  # UI 자산 매핑
 │  └─ (예정) markdown/{spans, decorations, export/…}, ui/{library, editor, preview, outline, palette}
 ├─ themes/                    # 테마 JSON (ADR-0001)
 ├─ docs/                      # PLAN, feature-map, adr/, spikes/, benchmark/

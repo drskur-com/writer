@@ -1,0 +1,282 @@
+//! 라이브러리 열기·감시·다시 스캔·미리보기·시트 만들기/옮기기 (상태 변경 로직).
+
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::*;
+use gpui_kit::gpui::*;
+use std::path::PathBuf;
+
+use super::{Selection, WriterApp};
+use crate::{APP_NAME, NewSheet, config, library, watch};
+
+impl WriterApp {
+    // --- 라이브러리 폴더 설정 ---------------------------------------------
+
+    /// 기본 제안 경로에 새 라이브러리를 만든다.
+    pub(super) fn create_default_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = config::default_library_root() else {
+            self.set_notice("기본 라이브러리 위치를 찾을 수 없습니다.", cx);
+            return;
+        };
+        self.initialize_at(root, window, cx);
+    }
+
+    /// 라이브러리 골격을 만든 뒤 연다.
+    pub(super) fn initialize_at(
+        &mut self,
+        root: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match library::initialize(&root) {
+            Ok(()) => self.adopt(root, window, cx),
+            Err(err) => self.set_notice(format!("라이브러리를 만들 수 없습니다: {err}"), cx),
+        }
+    }
+
+    /// 기존 폴더를 검사해 알맞게 연다.
+    pub(super) fn open_folder(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match library::inspect(&path) {
+            Ok(library::FolderKind::Library) => self.adopt(path, window, cx),
+            Ok(library::FolderKind::Empty) | Ok(library::FolderKind::MarkdownOnly) => {
+                self.initialize_at(path, window, cx);
+            }
+            // 비어 있지 않은 폴더: 하위에 Writer/ 를 만든다 (ADR-0003 D3).
+            Ok(library::FolderKind::NonEmpty) => {
+                self.initialize_at(path.join(APP_NAME), window, cx);
+            }
+            Err(err) => self.set_notice(format!("폴더를 사용할 수 없습니다: {err}"), cx),
+        }
+    }
+
+    /// 라이브러리를 현재 라이브러리로 채택하고 설정에 저장한다.
+    pub(super) fn adopt(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        match library::open(&root) {
+            Ok(opened) => {
+                let mut config = config::Config::load();
+                config.set_library(opened.root.clone());
+                if let Err(err) = config.save() {
+                    eprintln!("설정 저장 실패: {err}");
+                }
+                window.push_notification(
+                    Notification::info(format!("라이브러리 열기: {}", opened.root.display())),
+                    cx,
+                );
+                self.library = Some(opened);
+                self.notice = None;
+                self.selected = None;
+                self.selected_sheet = None;
+                self.previews.clear();
+                self.start_watching(cx);
+                self.load_previews(cx);
+                cx.notify();
+            }
+            Err(err) => self.set_notice(format!("라이브러리를 읽을 수 없습니다: {err}"), cx),
+        }
+    }
+
+    /// OS 네이티브 폴더 선택기로 라이브러리 폴더를 고른다.
+    pub(super) fn pick_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("라이브러리 폴더 선택".into()),
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let picked = match receiver.await {
+                Ok(Ok(Some(mut paths))) => paths.pop(),
+                _ => None,
+            };
+            let Some(path) = picked else {
+                return;
+            };
+            this.update_in(cx, |this, window, cx| this.open_folder(path, window, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    // --- 폴더 감시 ---------------------------------------------------------
+
+    /// 현재 라이브러리 루트 감시를 (다시) 시작한다. 변경이 오면 잠깐 모았다가 다시 스캔한다.
+    pub(super) fn start_watching(&mut self, cx: &mut Context<Self>) {
+        self.watcher = None;
+        let Some(root) = self.library.as_ref().map(|lib| lib.root.clone()) else {
+            return;
+        };
+        let (watcher, mut events) = match watch::watch(&root) {
+            Ok(pair) => pair,
+            Err(err) => {
+                eprintln!("폴더 감시 실패: {err}");
+                return;
+            }
+        };
+        let task = cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while events.next().await.is_some() {
+                // 저장·이동은 이벤트가 여러 개 연달아 온다. 잠깐 기다렸다가 한꺼번에 처리한다.
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(150))
+                    .await;
+                while events.try_recv().is_ok() {}
+
+                // 디스크 I/O는 백그라운드에서 하고, 결과 반영만 UI 스레드에서 한다.
+                let scan_root = root.clone();
+                let scanned = cx
+                    .background_executor()
+                    .spawn(async move { library::scan(&scan_root) })
+                    .await;
+                if this
+                    .update(cx, |this, cx| this.apply_scan(&root, scanned, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        self.watcher = Some((watcher, task));
+    }
+
+    /// 다시 읽은 라이브러리를 반영한다. 사라진 시트/그룹의 선택은 푼다.
+    ///
+    /// 스캔하는 사이에 다른 라이브러리로 바뀌었으면 결과를 버린다.
+    pub(super) fn apply_scan(
+        &mut self,
+        root: &std::path::Path,
+        scanned: std::io::Result<library::Library>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.library.as_ref().map(|lib| lib.root.as_path()) != Some(root) {
+            return;
+        }
+        let scanned = match scanned {
+            Ok(scanned) => scanned,
+            Err(err) => {
+                eprintln!("라이브러리 다시 읽기 실패: {err}");
+                return;
+            }
+        };
+        self.library = Some(scanned);
+        if let Some(Selection::Group(path)) = &self.selected
+            && !path.is_dir()
+        {
+            self.selected = None;
+        }
+        if let Some(path) = &self.selected_sheet
+            && self.find_sheet(path).is_none()
+        {
+            self.selected_sheet = None;
+        }
+        self.load_previews(cx);
+        cx.notify();
+    }
+
+    /// 그룹 안에서 시트를 옮기고 순서를 저장한다.
+    pub(super) fn move_sheet(
+        &mut self,
+        group_path: &std::path::Path,
+        from: usize,
+        to: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = self
+            .library
+            .as_mut()
+            .into_iter()
+            .flat_map(|lib| &mut lib.sections)
+            .flat_map(|section| &mut section.entries)
+            .find_map(|entry| match entry {
+                library::Entry::Group(group) if group.path == group_path => Some(group),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        if let Err(err) = library::move_sheet(group, from, to) {
+            self.notify(format!("순서를 저장할 수 없습니다: {err}"), window, cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    /// 지금 보이는 목록에서 아직 안 읽었거나 바뀐 시트의 미리보기를 백그라운드에서 읽는다.
+    pub(super) fn load_previews(&mut self, cx: &mut Context<Self>) {
+        let pending: Vec<(PathBuf, u128)> = self
+            .effective_selection()
+            .map(|selection| self.sheets_for(&selection))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|sheet| {
+                self.previews
+                    .get(&sheet.path)
+                    .is_none_or(|(modified, _)| *modified != sheet.modified)
+            })
+            .map(|sheet| (sheet.path, sheet.modified))
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        self.preview_task = Some(cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_executor()
+                .spawn(async move {
+                    pending
+                        .into_iter()
+                        .map(|(path, modified)| {
+                            let preview = library::read_preview(&path);
+                            (path, (modified, preview))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.previews.extend(loaded);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// 현재 선택한 그룹에 빈 시트를 만들고 선택한다.
+    pub(super) fn on_new_sheet(
+        &mut self,
+        _: &NewSheet,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(lib) = &self.library else {
+            self.notify("먼저 라이브러리를 여세요.", window, cx);
+            return;
+        };
+        let root = lib.root.clone();
+        let dir = match self.effective_selection() {
+            Some(Selection::Group(path)) => path,
+            // "모두"(메모)에서는 Inbox에 만든다.
+            Some(Selection::Section(library::SectionKind::Notes)) | None => root
+                .join(library::SectionKind::Notes.dir())
+                .join(library::DEFAULT_INBOX),
+            Some(Selection::Section(kind)) => root.join(kind.dir()),
+        };
+
+        let created = library::create_sheet(&dir).and_then(|path| {
+            let scanned = library::scan(&root)?;
+            Ok((path, scanned))
+        });
+        match created {
+            Ok((path, scanned)) => {
+                self.library = Some(scanned);
+                self.selected_sheet = Some(path);
+                self.load_previews(cx);
+                cx.notify();
+            }
+            Err(err) => self.notify(format!("시트를 만들 수 없습니다: {err}"), window, cx),
+        }
+    }
+}
