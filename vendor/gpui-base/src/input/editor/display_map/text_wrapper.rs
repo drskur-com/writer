@@ -112,6 +112,11 @@ pub struct LineStyle {
     pub text_scale: f32,
     /// Multiplier for the editor line height (each wrapped row of the line).
     pub height_scale: f32,
+    /// Height of a block painted below the line's last row (see [`LineBlockMeasureFn`]).
+    pub block_height: Pixels,
+    /// Hide the line's text (its rows take no height) unless a selection touches the line,
+    /// e.g. to show only the block of a Markdown image line until the caret enters it.
+    pub collapsed: bool,
 }
 
 impl Default for LineStyle {
@@ -119,6 +124,8 @@ impl Default for LineStyle {
         Self {
             text_scale: 1.,
             height_scale: 1.,
+            block_height: px(0.),
+            collapsed: false,
         }
     }
 }
@@ -132,6 +139,13 @@ impl LineStyle {
 
 /// Decides the [`LineStyle`] of a buffer line from its text (without the trailing `\n`).
 pub type LineStyleFn = Rc<dyn Fn(&str) -> LineStyle>;
+
+/// Decides the height of the block below a buffer line from its text (without the trailing
+/// `\n`) and the wrap width (`None` when not wrapping). Zero means no block.
+///
+/// Lets a host show content under a line, e.g. the image of a Markdown image line, while the
+/// line itself stays editable text.
+pub type LineBlockMeasureFn = Rc<dyn Fn(&str, Option<Pixels>) -> Pixels>;
 
 /// A line with soft wrapped lines info.
 #[derive(Debug, Clone)]
@@ -149,6 +163,8 @@ pub(crate) struct LineItem {
     pub(crate) wrapped_lines: SmallVec<[Range<usize>; 1]>,
     /// Text size and row height of this line.
     pub(crate) style: LineStyle,
+    /// Whether a selection touches this [`LineStyle::collapsed`] line, so its text shows.
+    pub(crate) revealed: bool,
 }
 
 impl LineItem {
@@ -156,6 +172,22 @@ impl LineItem {
     #[inline]
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+
+    /// Whether the line's text is hidden (see [`LineStyle::collapsed`]).
+    #[inline]
+    pub(crate) fn is_collapsed(&self) -> bool {
+        self.style.collapsed && !self.revealed
+    }
+
+    /// Row height multiplier, zero while the line is collapsed.
+    #[inline]
+    pub(crate) fn height_scale(&self) -> f32 {
+        if self.is_collapsed() {
+            0.
+        } else {
+            self.style.height_scale
+        }
     }
 
     /// Get number of soft wrapped lines of this line (include the first line).
@@ -267,6 +299,9 @@ pub(crate) struct TextWrapper {
 
     inline_metrics: Rc<[(Range<usize>, Pixels)]>,
     line_style: Option<LineStyleFn>,
+    line_block: Option<LineBlockMeasureFn>,
+    /// Buffer rows touched by a selection, where collapsed lines show their text.
+    reveal: Vec<Range<usize>>,
     _initialized: bool,
 }
 
@@ -282,6 +317,8 @@ impl TextWrapper {
             lines: SumTree::new(&()),
             inline_metrics: Rc::from([]),
             line_style: None,
+            line_block: None,
+            reveal: Vec::new(),
             _initialized: false,
         }
     }
@@ -390,6 +427,48 @@ impl TextWrapper {
         if self._initialized {
             self.update_all(&self.text.clone(), cx);
         }
+    }
+
+    /// Set how tall the block below each line is, and re-wrap every line.
+    pub(crate) fn set_line_block(&mut self, line_block: Option<LineBlockMeasureFn>, cx: &mut App) {
+        self.line_block = line_block;
+        if self._initialized {
+            self.update_all(&self.text.clone(), cx);
+        }
+    }
+
+    /// Show the text of collapsed lines within `rows` (buffer rows touched by a selection) and
+    /// hide the others. Returns whether any line changed.
+    pub(crate) fn set_reveal(&mut self, rows: Vec<Range<usize>>, cx: &mut App) -> bool {
+        self.reveal = rows;
+        let reveal = &self.reveal;
+        let changed: Vec<usize> = self
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(row, item)| {
+                let revealed = item.style.collapsed && reveal.iter().any(|r| r.contains(row));
+                item.revealed != revealed
+            })
+            .map(|(row, _)| row)
+            .collect();
+        let text = self.text.clone();
+        for &row in &changed {
+            let start = text.line_start_offset(row);
+            let end = text.line_end_offset(row);
+            self.update(
+                &text,
+                &(start..end),
+                &Rope::from(text.slice(start..end).to_string()),
+                cx,
+            );
+        }
+        !changed.is_empty()
+    }
+
+    /// How tall the block below each line is.
+    pub(crate) fn line_block(&self) -> Option<LineBlockMeasureFn> {
+        self.line_block.clone()
     }
 
     /// Whether any line has a non-default [`LineStyle`].
@@ -603,10 +682,14 @@ impl TextWrapper {
             let mut indent_chars = 0;
             // Borrowed for lines within a single rope chunk.
             let line_str: Cow<str> = line.into();
-            let style = self
+            let mut style = self
                 .line_style
                 .as_ref()
                 .map_or_else(LineStyle::default, |line_style| line_style(&line_str));
+            if let Some(line_block) = &self.line_block {
+                style.block_height = line_block(&line_str, wrap_width).max(px(0.));
+            }
+            let revealed = style.collapsed && self.reveal.iter().any(|r| r.contains(&row));
 
             // If wrap_width is Pixels::MAX, skip wrapping to disable word wrap
             if let Some(wrap_width) = wrap_width {
@@ -663,6 +746,7 @@ impl TextWrapper {
                 indent: indent_chars,
                 wrapped_lines,
                 style,
+                revealed,
             });
         }
 
@@ -820,6 +904,10 @@ pub(crate) struct LineLayout {
     /// Height of each visual row of this line, when it differs from the editor line height
     /// (see [`LineStyle`]).
     row_height: Option<Pixels>,
+    /// Height of the block below the last visual row (see [`LineStyle::block_height`]).
+    pub(crate) block_height: Pixels,
+    /// The text is collapsed and not painted (see [`LineStyle::collapsed`]).
+    hidden: bool,
 }
 
 impl LineLayout {
@@ -833,12 +921,26 @@ impl LineLayout {
             whitespace_indicators: None,
             has_background: false,
             row_height: None,
+            block_height: px(0.),
+            hidden: false,
         }
     }
 
     /// Set the height of each visual row, overriding the editor line height.
     pub(crate) fn row_height(mut self, row_height: Option<Pixels>) -> Self {
         self.row_height = row_height;
+        self
+    }
+
+    /// Do not paint the text (a collapsed line).
+    pub(crate) fn hidden(mut self, hidden: bool) -> Self {
+        self.hidden = hidden;
+        self
+    }
+
+    /// Reserve a block of `block_height` below the last visual row.
+    pub(crate) fn block_height(mut self, block_height: Pixels) -> Self {
+        self.block_height = block_height;
         self
     }
 
@@ -1012,8 +1114,13 @@ impl LineLayout {
         let mut line_top = px(0.);
         let x_offset = last_layout.alignment_offset(self.longest_width);
 
+        let last = self.wrapped_lines.len().saturating_sub(1);
         for (i, line) in self.wrapped_lines.iter().enumerate() {
-            let line_bottom = line_top + self.row_height_or(last_layout.line_height);
+            let mut line_bottom = line_top + self.row_height_or(last_layout.line_height);
+            // The block below the line hits its last row.
+            if i == last {
+                line_bottom += self.block_height;
+            }
             if pos.y >= line_top && pos.y < line_bottom {
                 return Some((i, offset, pos.x - x_offset - self.line_indent(i)));
             }
@@ -1097,7 +1204,10 @@ impl LineLayout {
             .map(|(ix, line)| line.width + self.line_indent(ix))
             .max()
             .unwrap_or(self.longest_width);
-        size(width, self.wrapped_lines.len() * self.row_height_or(line_height))
+        size(
+            width,
+            self.wrapped_lines.len() * self.row_height_or(line_height) + self.block_height,
+        )
     }
 
     /// Paint only the glyph background quads of this line.
@@ -1115,7 +1225,7 @@ impl LineLayout {
     ) {
         // Painting a background walks every glyph and pushes a scene layer, so skip the
         // whole pass for lines that have no background color to paint.
-        if !self.has_background {
+        if !self.has_background || self.hidden {
             return;
         }
 
@@ -1141,6 +1251,9 @@ impl LineLayout {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if self.hidden {
+            return;
+        }
         let line_height = self.row_height_or(line_height);
         for (ix, line) in self.wrapped_lines.iter().enumerate() {
             _ = line.paint(
@@ -1598,18 +1711,21 @@ mod tests {
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..2],
                     style: LineStyle::default(),
+                    revealed: false,
                 },
                 LineItem {
                     len: 4,
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..2, 2..4],
                     style: LineStyle::default(),
+                    revealed: false,
                 },
                 LineItem {
                     len: 1,
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..1],
                     style: LineStyle::default(),
+                    revealed: false,
                 },
             ],
             &(),
@@ -1772,12 +1888,14 @@ mod tests {
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..10],
                     style: LineStyle::default(),
+                    revealed: false,
                 },
                 LineItem {
                     len: Rope::from("this one wraps").len(),
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..9, 9..14],
                     style: LineStyle::default(),
+                    revealed: false,
                 },
             ],
             &(),
@@ -1830,6 +1948,7 @@ mod tests {
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..15],
                     style: LineStyle::default(),
+                    revealed: false,
                 },
                 // range: 16..36
                 LineItem {
@@ -1837,6 +1956,7 @@ mod tests {
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..10, 10..20],
                     style: LineStyle::default(),
+                    revealed: false,
                 },
                 // range: 37..56
                 LineItem {
@@ -1844,6 +1964,7 @@ mod tests {
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..9, 9..15, 15..20],
                     style: LineStyle::default(),
+                    revealed: false,
                 },
                 // range: 57..79
                 LineItem {
@@ -1851,6 +1972,7 @@ mod tests {
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..22],
                     style: LineStyle::default(),
+                    revealed: false,
                 },
             ],
             &(),

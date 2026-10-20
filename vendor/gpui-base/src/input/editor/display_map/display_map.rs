@@ -6,13 +6,13 @@
 /// - Automatic projection updates on text/layout changes
 use std::ops::Range;
 
-use gpui::{App, Font, Pixels};
+use gpui::{App, Font, Pixels, px};
 use ropey::Rope;
 
 use super::fold_map::FoldMap;
 use super::folding::FoldRange;
 pub use super::text_wrapper::WrappingIndent;
-use super::text_wrapper::{LineItem, LineStyle, LineStyleFn, WrapDisplayPoint};
+use super::text_wrapper::{LineBlockMeasureFn, LineItem, LineStyle, LineStyleFn, WrapDisplayPoint};
 use super::wrap_map::WrapMap;
 use super::{BufferPoint, DisplayPoint};
 use crate::input::Point as TreeSitterPoint;
@@ -29,12 +29,26 @@ use crate::input::rope_ext::RopeExt as _;
 pub struct DisplayMap {
     wrap_map: WrapMap,
     fold_map: FoldMap,
-    /// Display rows taller than the line height (from [`LineStyle::height_scale`]), sorted by
-    /// row: `(display_row, extra_rows)`, where `extra_rows` is the height beyond one line
-    /// height, in line heights. Empty when every line has the default style.
-    tall_rows: Vec<(usize, f32)>,
-    /// `tall_rows_prefix[i]` = sum of `extra_rows` of `tall_rows[..i]`.
-    tall_rows_prefix: Vec<f32>,
+    /// Display rows taller than the line height, sorted by row. Empty when every line has the
+    /// default style.
+    tall_rows: Vec<(usize, TallRow)>,
+    /// `tall_rows_prefix[i]` = sum of `tall_rows[..i]`.
+    tall_rows_prefix: Vec<TallRow>,
+}
+
+/// Height of a display row beyond one line height.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct TallRow {
+    /// In line heights, from [`LineStyle::height_scale`].
+    rows: f32,
+    /// The block below a line's last row ([`LineStyle::block_height`]).
+    block: Pixels,
+}
+
+impl TallRow {
+    fn height(&self, line_height: Pixels) -> Pixels {
+        line_height * self.rows + self.block
+    }
 }
 
 impl DisplayMap {
@@ -260,6 +274,31 @@ impl DisplayMap {
         self.rebuild_fold_projection();
     }
 
+    /// Set how tall the block below each line is (see [`LineBlockMeasureFn`]); `None` removes
+    /// every block.
+    pub fn set_line_block(&mut self, line_block: Option<LineBlockMeasureFn>, cx: &mut App) {
+        self.wrap_map.set_line_block(line_block, cx);
+        self.rebuild_fold_projection();
+    }
+
+    /// Show the text of collapsed lines (see [`LineStyle::collapsed`]) within `rows`, the buffer
+    /// rows touched by a selection, and hide the others.
+    pub fn set_revealed_rows(&mut self, rows: Vec<Range<usize>>, cx: &mut App) {
+        if self.wrap_map.set_reveal(rows, cx) {
+            self.rebuild_fold_projection();
+        }
+    }
+
+    /// Whether any line has a non-default [`LineStyle`].
+    pub fn has_styled_lines(&self) -> bool {
+        self.wrap_map.wrapper().has_styled_lines()
+    }
+
+    /// How tall the block below each line is, if set.
+    pub fn line_block(&self) -> Option<LineBlockMeasureFn> {
+        self.wrap_map.line_block()
+    }
+
     /// Style of a buffer line.
     pub fn line_style(&self, line: usize) -> LineStyle {
         self.wrap_map
@@ -269,25 +308,34 @@ impl DisplayMap {
 
     // ==================== Vertical Geometry ====================
 
-    /// Extra height (in line heights) of the tall rows before `display_row`.
-    fn extra_rows_before(&self, display_row: usize) -> f32 {
+    /// Extra height of the tall rows before `display_row`.
+    fn extra_before(&self, display_row: usize) -> TallRow {
         let ix = self.tall_rows.partition_point(|&(row, _)| row < display_row);
-        self.tall_rows_prefix.get(ix).copied().unwrap_or(0.)
+        self.tall_rows_prefix.get(ix).copied().unwrap_or_default()
+    }
+
+    /// Extra height of `display_row`.
+    fn extra_of(&self, display_row: usize) -> TallRow {
+        match self.tall_rows.binary_search_by_key(&display_row, |&(row, _)| row) {
+            Ok(ix) => self.tall_rows[ix].1,
+            Err(_) => TallRow::default(),
+        }
     }
 
     /// Top of a display row in content space. `display_row` may equal the row count, giving
     /// the total content height.
     pub fn display_row_top(&self, display_row: usize, line_height: Pixels) -> Pixels {
-        line_height * (display_row as f32 + self.extra_rows_before(display_row))
+        line_height * display_row as f32 + self.extra_before(display_row).height(line_height)
     }
 
-    /// Height of a display row.
+    /// Height of a display row, including a line block below it.
     pub fn display_row_height(&self, display_row: usize, line_height: Pixels) -> Pixels {
-        let extra = match self.tall_rows.binary_search_by_key(&display_row, |&(row, _)| row) {
-            Ok(ix) => self.tall_rows[ix].1,
-            Err(_) => 0.,
-        };
-        line_height * (1. + extra)
+        line_height + self.extra_of(display_row).height(line_height)
+    }
+
+    /// Height of a display row's text, without a line block below it.
+    pub fn display_row_text_height(&self, display_row: usize, line_height: Pixels) -> Pixels {
+        line_height * (1. + self.extra_of(display_row).rows)
     }
 
     /// Total height of all display rows.
@@ -324,24 +372,37 @@ impl DisplayMap {
         if !self.wrap_map.wrapper().has_styled_lines() {
             return;
         }
-        let styled: Vec<(usize, f32)> = self
+        let styled: Vec<(usize, f32, Pixels)> = self
             .wrap_map
             .wrapper()
             .iter_lines()
             .enumerate()
-            .filter(|(_, item)| item.style.height_scale != 1.)
-            .map(|(line, item)| (line, item.style.height_scale - 1.))
+            .filter(|(_, item)| item.height_scale() != 1. || item.style.block_height > px(0.))
+            .map(|(line, item)| (line, item.height_scale(), item.style.block_height))
             .collect();
-        for (line, extra) in styled {
+        for (line, height_scale, block_height) in styled {
             if let Some(rows) = self.buffer_line_to_display_row_range(line) {
-                self.tall_rows.extend(rows.map(|row| (row, extra)));
+                let last = rows.end.saturating_sub(1);
+                self.tall_rows.extend(rows.filter_map(|row| {
+                    let extra = TallRow {
+                        rows: height_scale - 1.,
+                        // The block sits below the line's last row.
+                        block: if row == last {
+                            block_height
+                        } else {
+                            px(0.)
+                        },
+                    };
+                    (extra != TallRow::default()).then_some((row, extra))
+                }));
             }
         }
-        let mut sum = 0.;
+        let mut sum = TallRow::default();
         self.tall_rows_prefix.reserve(self.tall_rows.len() + 1);
         for &(_, extra) in &self.tall_rows {
             self.tall_rows_prefix.push(sum);
-            sum += extra;
+            sum.rows += extra.rows;
+            sum.block += extra.block;
         }
         self.tall_rows_prefix.push(sum);
     }

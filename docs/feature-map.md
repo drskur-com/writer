@@ -34,7 +34,7 @@
 | 되돌리기/다시실행 | P0 | 엔진 기본(세션 내), 세션 밖 히스토리는 P2 | `UndoManager` | M2 | ⬜ |
 | 문서 내 찾기/바꾸기 | P0 | `SearchSession` | `input::search` | M2 | ⬜ |
 | 이미지 붙여넣기 → 첨부 | P1 | `Editor::on_paste` 훅 | attachment | M2 | ⬜ |
-| 인라인 이미지 미리보기 | P2 | `InlineTokenRenderer` 스파이크 결과에 따라 | inline tokens | M2/M4 | ⬜ |
+| 인라인 이미지 미리보기 | P2 | 이미지 줄 아래 줄 블록에 그림, gpui-base 패치(ADR-0008) | display_map / `thumbnail` | M2/M4 | ✅ |
 | 맞춤법/문법 검사 | — | 범위 외(후속 LSP 연동 가능) | `Lsp` 훅 | — | 🚫 |
 | 협업 편집 | — | 범위 외 | — | — | 🚫 |
 

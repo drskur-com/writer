@@ -1,0 +1,984 @@
+diff --git a/src/input/base/element.rs b/src/input/base/element.rs
+index b801144..4a368ac 100644
+--- a/src/input/base/element.rs
++++ b/src/input/base/element.rs
+@@ -867,6 +867,7 @@ impl<M: InputModeKind> TextElement<M> {
+                 offset = end;
+                 y += row_height;
+             }
++            y += line.block_height;
+         }
+         (!corners.is_empty()).then_some(corners)
+     }
+@@ -1994,6 +1995,47 @@ impl<M: InputModeKind> TextElement<M> {
+             .collect()
+     }
+ 
++    /// Lay out the blocks below the visible lines, each at the bottom of its line.
++    fn prepaint_line_blocks(
++        &self,
++        layout: &LastLayout,
++        bounds: Bounds<Pixels>,
++        window: &mut Window,
++        cx: &mut App,
++    ) -> Vec<AnyElement> {
++        let state = self.state.read(cx);
++        let Some(render) = state.line_block_renderer.clone() else {
++            return vec![];
++        };
++        let width = layout.wrap_width.unwrap_or(layout.content_width);
++        let mut placements = Vec::new();
++        let mut y = layout.visible_top;
++        for (line, &row) in layout.lines.iter().zip(layout.visible_buffer_lines.iter()) {
++            let line_size = line.size(layout.line_height);
++            if line.block_height > px(0.) {
++                let top = y + line_size.height - line.block_height;
++                placements.push((
++                    super::LineBlockContext {
++                        line: row,
++                        text: state.text.slice_line(row).to_string().into(),
++                        size: size(width, line.block_height),
++                    },
++                    bounds.origin + point(layout.line_number_width, top),
++                ));
++            }
++            y += line_size.height;
++        }
++        placements
++            .into_iter()
++            .map(|(context, origin)| {
++                let mut element = render(&context, window, cx);
++                element.layout_as_root(context.size.map(gpui::AvailableSpace::Definite), window, cx);
++                element.prepaint_at(origin, window, cx);
++                element
++            })
++            .collect()
++    }
++
+     fn prepaint_tokens(
+         &self,
+         layout: &LastLayout,
+@@ -2192,9 +2234,11 @@ impl<M: InputModeKind> TextElement<M> {
+                 .with_background(line_has_background)
+                 .with_whitespaces(whitespace_indicators.clone())
+                 .row_height(
+-                    (line_style.height_scale != 1.)
+-                        .then(|| last_layout.line_height * line_style.height_scale),
+-                );
++                    (line_item.height_scale() != 1.)
++                        .then(|| last_layout.line_height * line_item.height_scale()),
++                )
++                .block_height(line_style.block_height)
++                .hidden(line_item.is_collapsed());
+             lines.push(line_layout);
+ 
+             // +1 for the `\n`
+@@ -2368,6 +2412,8 @@ pub(super) struct PrepaintState {
+     /// The lines of entire lines.
+     last_layout: LastLayout,
+     token_elements: Vec<AnyElement>,
++    /// Blocks drawn below lines (see [`crate::input::EditorState::set_line_blocks`]).
++    line_block_elements: Vec<AnyElement>,
+     /// The lines only contains the visible lines in the viewport, based on `visible_range`.
+     ///
+     /// The child is the soft lines.
+@@ -2692,6 +2738,10 @@ impl<M: InputModeKind> Element for TextElement<M> {
+             });
+         }
+ 
++        // Collapsed lines touched by a selection show their text (see `LineStyle::collapsed`).
++        self.state
++            .update(cx, |state, cx| state.sync_revealed_lines(cx));
++
+         let line_height = window.line_height();
+         let token_elements = self.measure_tokens(
+             (bounds.size.width - line_number_width - RIGHT_MARGIN).max(px(1.)),
+@@ -3094,8 +3144,10 @@ impl<M: InputModeKind> Element for TextElement<M> {
+         let hitbox = window.insert_hitbox(input_bounds, HitboxBehavior::Normal);
+ 
+         let token_elements = self.prepaint_tokens(&last_layout, bounds, token_elements, window, cx);
++        let line_block_elements = self.prepaint_line_blocks(&last_layout, bounds, window, cx);
+         PrepaintState {
+             token_elements,
++            line_block_elements,
+             hitbox,
+             bounds,
+             last_layout,
+@@ -3187,7 +3239,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
+                         ));
+                     }
+                 }
+-                offset_y += height;
++                offset_y += height + line_layout.block_height;
+             }
+         }
+ 
+@@ -3349,6 +3401,9 @@ impl<M: InputModeKind> Element for TextElement<M> {
+         for element in &mut prepaint.token_elements {
+             element.paint(window, cx);
+         }
++        for element in &mut prepaint.line_block_elements {
++            element.paint(window, cx);
++        }
+ 
+         // Paint blinking cursors (shared blink state for all carets)
+         if focused && show_cursor {
+@@ -3408,6 +3463,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
+                     _ = line.paint(p, row_height, TextAlign::Left, None, window, cx);
+                     offset_y += row_height;
+                 }
++                offset_y += line_layout.block_height;
+ 
+                 // Add ghost line height after cursor row for line numbers alignment
+                 if !prepaint.ghost_lines.is_empty() && prepaint.current_row == Some(buffer_line) {
+@@ -4256,6 +4312,7 @@ mod tests {
+                             crate::input::LineStyle {
+                                 text_scale: 2.,
+                                 height_scale: 2.5,
++                                ..Default::default()
+                             }
+                         } else {
+                             crate::input::LineStyle::default()
+@@ -4304,6 +4361,143 @@ mod tests {
+         });
+     }
+ 
++    #[gpui::test]
++    fn line_blocks_reserve_space_below_their_line(cx: &mut TestAppContext) {
++        let text = "body\n![img](a.png)\nmore";
++        let (editor, window) = decoration_editor(cx, text, false);
++        let mut cx = VisualTestContext::from_window(window.into(), cx);
++        let rendered = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
++        cx.update(|window, cx| {
++            let seen = rendered.clone();
++            editor.update(cx, |state, cx| {
++                state.set_line_blocks(
++                    |line: &str, _| if line.starts_with("![") { px(100.) } else { px(0.) },
++                    move |block: &crate::input::LineBlockContext, _, _| {
++                        seen.borrow_mut().push((block.line, block.text.clone(), block.size));
++                        gpui::Empty.into_any_element()
++                    },
++                    cx,
++                );
++            });
++            window.draw(cx).clear(cx);
++            let state = editor.read(cx);
++            let layout = state.last_layout.as_ref().unwrap();
++            let lh = layout.line_height;
++            let map = &state.display_map;
++
++            // Only the image row grows, by the block height.
++            assert_eq!(map.display_row_top(2, lh), lh * 2. + px(100.));
++            assert_eq!(map.display_row_height(1, lh), lh + px(100.));
++            assert_eq!(map.display_row_text_height(1, lh), lh);
++            assert_eq!(map.content_height(lh), lh * 3. + px(100.));
++            assert_eq!(layout.lines[1].size(lh).height, lh + px(100.));
++
++            // The next line's ranges sit below the block.
++            let more = TextElement::<EditorMode>::layout_range_corners(&(19..23), layout).unwrap();
++            assert_eq!(more[0].top_left.y, layout.visible_top + lh * 2. + px(100.));
++
++            // A click on the block lands on its line.
++            let origin = state.last_bounds.unwrap().origin;
++            let (ix, _) = state.index_for_mouse_position(origin + point(px(1.), lh * 1. + px(80.)));
++            assert!((5..=18).contains(&ix), "{ix}");
++
++            let rendered = rendered.borrow();
++            assert_eq!(rendered.len(), 1);
++            assert_eq!(rendered[0].0, 1);
++            assert_eq!(rendered[0].1.as_ref(), "![img](a.png)");
++            assert_eq!(rendered[0].2.height, px(100.));
++        });
++    }
++
++    #[gpui::test]
++    fn collapsed_lines_show_their_text_only_under_a_selection(cx: &mut TestAppContext) {
++        let text = "body\n![img](a.png)\nmore";
++        let (editor, window) = decoration_editor(cx, text, false);
++        let mut cx = VisualTestContext::from_window(window.into(), cx);
++        cx.update(|window, cx| {
++            editor.update(cx, |state, cx| {
++                state.set_line_style(
++                    Some(|line: &str| crate::input::LineStyle {
++                        collapsed: line.starts_with("!["),
++                        ..Default::default()
++                    }),
++                    cx,
++                );
++                state.set_line_blocks(
++                    |line: &str, _| {
++                        if line.starts_with("![") {
++                            px(100.)
++                        } else {
++                            px(0.)
++                        }
++                    },
++                    |_, _, _| gpui::Empty.into_any_element(),
++                    cx,
++                );
++                state.set_selected_range(0..0, cx);
++            });
++            window.draw(cx).clear(cx);
++            let lh = editor.read(cx).last_layout.as_ref().unwrap().line_height;
++
++            // The caret is elsewhere: only the block of the image line takes space.
++            let state = editor.read(cx);
++            assert_eq!(state.display_map.display_row_top(2, lh), lh + px(100.));
++            let origin = state.last_bounds.unwrap().origin;
++            // A click on the block puts the caret on the image line.
++            let (ix, _) = state.index_for_mouse_position(origin + point(px(1.), lh + px(50.)));
++            assert!((5..=18).contains(&ix), "{ix}");
++
++            // The caret on the image line shows its text again.
++            editor.update(cx, |state, cx| state.set_selected_range(ix..ix, cx));
++            window.draw(cx).clear(cx);
++            let state = editor.read(cx);
++            assert_eq!(state.display_map.display_row_top(2, lh), lh * 2. + px(100.));
++
++            // And hides it once the caret leaves.
++            editor.update(cx, |state, cx| state.set_selected_range(20..20, cx));
++            window.draw(cx).clear(cx);
++            let state = editor.read(cx);
++            assert_eq!(state.display_map.display_row_top(2, lh), lh + px(100.));
++        });
++    }
++
++    #[gpui::test]
++    fn clicking_a_collapsed_block_reveals_its_line(cx: &mut TestAppContext) {
++        let text = "body\n![img](a.png)\nmore";
++        let (editor, window) = decoration_editor(cx, text, false);
++        let mut cx = VisualTestContext::from_window(window.into(), cx);
++        cx.update(|window, cx| {
++            editor.update(cx, |state, cx| {
++                state.set_line_style(
++                    Some(|line: &str| crate::input::LineStyle {
++                        collapsed: line.starts_with("!["),
++                        ..Default::default()
++                    }),
++                    cx,
++                );
++                state.set_line_blocks(
++                    |line: &str, _| if line.starts_with("![") { px(60.) } else { px(0.) },
++                    |_, _, _| gpui::Empty.into_any_element(),
++                    cx,
++                );
++                state.set_selected_range(0..0, cx);
++            });
++            window.draw(cx).clear(cx);
++        });
++        let (origin, lh) = cx.update(|_, cx| {
++            let state = editor.read(cx);
++            (state.last_bounds.unwrap().origin, state.last_layout.as_ref().unwrap().line_height)
++        });
++        cx.simulate_click(origin + point(px(10.), lh + px(30.)), gpui::Modifiers::default());
++        cx.update(|window, cx| {
++            window.draw(cx).clear(cx);
++            let state = editor.read(cx);
++            let cursor = state.cursor();
++            assert!((5..=18).contains(&cursor), "{cursor}");
++            assert_eq!(state.display_map.display_row_top(2, lh), lh * 2. + px(60.));
++        });
++    }
++
+     #[gpui::test]
+     fn styled_lines_soft_wrap_at_their_text_size(cx: &mut TestAppContext) {
+         let words = "word ".repeat(12);
+@@ -4316,6 +4510,7 @@ mod tests {
+                     Some(|line: &str| crate::input::LineStyle {
+                         text_scale: if line.starts_with("# ") { 2. } else { 1. },
+                         height_scale: 1.,
++                        ..Default::default()
+                     }),
+                     cx,
+                 );
+diff --git a/src/input/base/state.rs b/src/input/base/state.rs
+index 4a9062f..70e40cb 100644
+--- a/src/input/base/state.rs
++++ b/src/input/base/state.rs
+@@ -413,6 +413,10 @@ pub struct InputBaseState<M: InputModeKind> {
+     pub(super) mode: LayoutMode,
+     pub(super) text: Rope,
+     pub(super) display_map: DisplayMap,
++    /// Draws the blocks reserved below lines (see [`crate::input::LineBlockMeasureFn`]).
++    pub(crate) line_block_renderer: Option<crate::input::LineBlockRenderer>,
++    /// Text revision and selected rows that collapsed lines were last revealed for.
++    revealed_rows: Option<(u64, Vec<std::ops::Range<usize>>)>,
+     pub(super) undo_manager: UndoManager,
+     pub(super) inline_tokens: Option<Box<super::inline_tokens::InlineTokenStore>>,
+     pub(super) pending_token: Option<super::InlineToken>,
+@@ -871,6 +875,8 @@ impl<M: InputModeKind> InputBaseState<M> {
+             cursor_surrounding_lines: None,
+             blink_cursor,
+             undo_manager,
++            line_block_renderer: None,
++            revealed_rows: None,
+             inline_tokens: None,
+             pending_token: None,
+             replaying_history: false,
+@@ -1057,6 +1063,30 @@ impl<M: InputModeKind> InputBaseState<M> {
+         cx.notify();
+     }
+ 
++    /// Show the text of collapsed lines that a selection touches and hide the others (see
++    /// [`crate::input::LineStyle::collapsed`]). Runs before each layout; does nothing unless the
++    /// selected rows or the text changed.
++    pub(super) fn sync_revealed_lines(&mut self, cx: &mut App) {
++        if !self.display_map.has_styled_lines() {
++            return;
++        }
++        let rows: Vec<std::ops::Range<usize>> = self
++            .selections
++            .iter()
++            .map(|selection| {
++                let start = self.text.offset_to_point(selection.start.min(self.text.len())).row;
++                let end = self.text.offset_to_point(selection.end.min(self.text.len())).row;
++                start..end + 1
++            })
++            .collect();
++        let key = (self.document_revision, rows);
++        if self.revealed_rows.as_ref() == Some(&key) {
++            return;
++        }
++        self.display_map.set_revealed_rows(key.1.clone(), cx);
++        self.revealed_rows = Some(key);
++    }
++
+     /// Find which line and sub-line the given offset belongs to, along with the position within that sub-line.
+     ///
+     /// Returns:
+@@ -2885,7 +2915,10 @@ impl<M: InputModeKind> InputBaseState<M> {
+             .display_map
+             .offset_to_display_row(offset, self.line_end_affinity_at(offset));
+         let row_offset_y = self.display_map.display_row_top(display_row, line_height);
+-        let row_height = self.display_map.display_row_height(display_row, line_height);
++        // A block below the row (e.g. an image) need not be revealed with the caret.
++        let row_height = self
++            .display_map
++            .display_row_text_height(display_row, line_height);
+ 
+         // For Right alignment use 0 margin: the cursor indicator is clamped inside bounds
+         // in layout_cursors, so shifting the text here would cause a first-click visual jump.
+@@ -3521,6 +3554,7 @@ impl<M: InputModeKind> InputBaseState<M> {
+             .zip(last_layout.visible_line_byte_offsets.last())
+             .map(|((line_layout, pos), line_start)| {
+                 let last_row_top = (line_layout.size(line_height).height
++                    - line_layout.block_height
+                     - line_layout.row_height_or(line_height))
+                 .max(px(0.));
+                 let pos = point(pos.x, last_row_top);
+diff --git a/src/input/editor/display_map/display_map.rs b/src/input/editor/display_map/display_map.rs
+index 91bbb4f..21bf0c5 100644
+--- a/src/input/editor/display_map/display_map.rs
++++ b/src/input/editor/display_map/display_map.rs
+@@ -6,13 +6,13 @@
+ /// - Automatic projection updates on text/layout changes
+ use std::ops::Range;
+ 
+-use gpui::{App, Font, Pixels};
++use gpui::{App, Font, Pixels, px};
+ use ropey::Rope;
+ 
+ use super::fold_map::FoldMap;
+ use super::folding::FoldRange;
+ pub use super::text_wrapper::WrappingIndent;
+-use super::text_wrapper::{LineItem, LineStyle, LineStyleFn, WrapDisplayPoint};
++use super::text_wrapper::{LineBlockMeasureFn, LineItem, LineStyle, LineStyleFn, WrapDisplayPoint};
+ use super::wrap_map::WrapMap;
+ use super::{BufferPoint, DisplayPoint};
+ use crate::input::Point as TreeSitterPoint;
+@@ -29,12 +29,26 @@ use crate::input::rope_ext::RopeExt as _;
+ pub struct DisplayMap {
+     wrap_map: WrapMap,
+     fold_map: FoldMap,
+-    /// Display rows taller than the line height (from [`LineStyle::height_scale`]), sorted by
+-    /// row: `(display_row, extra_rows)`, where `extra_rows` is the height beyond one line
+-    /// height, in line heights. Empty when every line has the default style.
+-    tall_rows: Vec<(usize, f32)>,
+-    /// `tall_rows_prefix[i]` = sum of `extra_rows` of `tall_rows[..i]`.
+-    tall_rows_prefix: Vec<f32>,
++    /// Display rows taller than the line height, sorted by row. Empty when every line has the
++    /// default style.
++    tall_rows: Vec<(usize, TallRow)>,
++    /// `tall_rows_prefix[i]` = sum of `tall_rows[..i]`.
++    tall_rows_prefix: Vec<TallRow>,
++}
++
++/// Height of a display row beyond one line height.
++#[derive(Debug, Clone, Copy, Default, PartialEq)]
++struct TallRow {
++    /// In line heights, from [`LineStyle::height_scale`].
++    rows: f32,
++    /// The block below a line's last row ([`LineStyle::block_height`]).
++    block: Pixels,
++}
++
++impl TallRow {
++    fn height(&self, line_height: Pixels) -> Pixels {
++        line_height * self.rows + self.block
++    }
+ }
+ 
+ impl DisplayMap {
+@@ -260,6 +274,31 @@ impl DisplayMap {
+         self.rebuild_fold_projection();
+     }
+ 
++    /// Set how tall the block below each line is (see [`LineBlockMeasureFn`]); `None` removes
++    /// every block.
++    pub fn set_line_block(&mut self, line_block: Option<LineBlockMeasureFn>, cx: &mut App) {
++        self.wrap_map.set_line_block(line_block, cx);
++        self.rebuild_fold_projection();
++    }
++
++    /// Show the text of collapsed lines (see [`LineStyle::collapsed`]) within `rows`, the buffer
++    /// rows touched by a selection, and hide the others.
++    pub fn set_revealed_rows(&mut self, rows: Vec<Range<usize>>, cx: &mut App) {
++        if self.wrap_map.set_reveal(rows, cx) {
++            self.rebuild_fold_projection();
++        }
++    }
++
++    /// Whether any line has a non-default [`LineStyle`].
++    pub fn has_styled_lines(&self) -> bool {
++        self.wrap_map.wrapper().has_styled_lines()
++    }
++
++    /// How tall the block below each line is, if set.
++    pub fn line_block(&self) -> Option<LineBlockMeasureFn> {
++        self.wrap_map.line_block()
++    }
++
+     /// Style of a buffer line.
+     pub fn line_style(&self, line: usize) -> LineStyle {
+         self.wrap_map
+@@ -269,25 +308,34 @@ impl DisplayMap {
+ 
+     // ==================== Vertical Geometry ====================
+ 
+-    /// Extra height (in line heights) of the tall rows before `display_row`.
+-    fn extra_rows_before(&self, display_row: usize) -> f32 {
++    /// Extra height of the tall rows before `display_row`.
++    fn extra_before(&self, display_row: usize) -> TallRow {
+         let ix = self.tall_rows.partition_point(|&(row, _)| row < display_row);
+-        self.tall_rows_prefix.get(ix).copied().unwrap_or(0.)
++        self.tall_rows_prefix.get(ix).copied().unwrap_or_default()
++    }
++
++    /// Extra height of `display_row`.
++    fn extra_of(&self, display_row: usize) -> TallRow {
++        match self.tall_rows.binary_search_by_key(&display_row, |&(row, _)| row) {
++            Ok(ix) => self.tall_rows[ix].1,
++            Err(_) => TallRow::default(),
++        }
+     }
+ 
+     /// Top of a display row in content space. `display_row` may equal the row count, giving
+     /// the total content height.
+     pub fn display_row_top(&self, display_row: usize, line_height: Pixels) -> Pixels {
+-        line_height * (display_row as f32 + self.extra_rows_before(display_row))
++        line_height * display_row as f32 + self.extra_before(display_row).height(line_height)
+     }
+ 
+-    /// Height of a display row.
++    /// Height of a display row, including a line block below it.
+     pub fn display_row_height(&self, display_row: usize, line_height: Pixels) -> Pixels {
+-        let extra = match self.tall_rows.binary_search_by_key(&display_row, |&(row, _)| row) {
+-            Ok(ix) => self.tall_rows[ix].1,
+-            Err(_) => 0.,
+-        };
+-        line_height * (1. + extra)
++        line_height + self.extra_of(display_row).height(line_height)
++    }
++
++    /// Height of a display row's text, without a line block below it.
++    pub fn display_row_text_height(&self, display_row: usize, line_height: Pixels) -> Pixels {
++        line_height * (1. + self.extra_of(display_row).rows)
+     }
+ 
+     /// Total height of all display rows.
+@@ -324,24 +372,37 @@ impl DisplayMap {
+         if !self.wrap_map.wrapper().has_styled_lines() {
+             return;
+         }
+-        let styled: Vec<(usize, f32)> = self
++        let styled: Vec<(usize, f32, Pixels)> = self
+             .wrap_map
+             .wrapper()
+             .iter_lines()
+             .enumerate()
+-            .filter(|(_, item)| item.style.height_scale != 1.)
+-            .map(|(line, item)| (line, item.style.height_scale - 1.))
++            .filter(|(_, item)| item.height_scale() != 1. || item.style.block_height > px(0.))
++            .map(|(line, item)| (line, item.height_scale(), item.style.block_height))
+             .collect();
+-        for (line, extra) in styled {
++        for (line, height_scale, block_height) in styled {
+             if let Some(rows) = self.buffer_line_to_display_row_range(line) {
+-                self.tall_rows.extend(rows.map(|row| (row, extra)));
++                let last = rows.end.saturating_sub(1);
++                self.tall_rows.extend(rows.filter_map(|row| {
++                    let extra = TallRow {
++                        rows: height_scale - 1.,
++                        // The block sits below the line's last row.
++                        block: if row == last {
++                            block_height
++                        } else {
++                            px(0.)
++                        },
++                    };
++                    (extra != TallRow::default()).then_some((row, extra))
++                }));
+             }
+         }
+-        let mut sum = 0.;
++        let mut sum = TallRow::default();
+         self.tall_rows_prefix.reserve(self.tall_rows.len() + 1);
+         for &(_, extra) in &self.tall_rows {
+             self.tall_rows_prefix.push(sum);
+-            sum += extra;
++            sum.rows += extra.rows;
++            sum.block += extra.block;
+         }
+         self.tall_rows_prefix.push(sum);
+     }
+diff --git a/src/input/editor/display_map/mod.rs b/src/input/editor/display_map/mod.rs
+index 80e448c..066c1cb 100644
+--- a/src/input/editor/display_map/mod.rs
++++ b/src/input/editor/display_map/mod.rs
+@@ -18,7 +18,7 @@ mod wrap_map;
+ // Re-export public API
+ pub use self::display_map::{DisplayMap, WrappingIndent};
+ pub(crate) use self::text_wrapper::LineLayout;
+-pub use self::text_wrapper::{LineStyle, LineStyleFn};
++pub use self::text_wrapper::{LineBlockMeasureFn, LineStyle, LineStyleFn};
+ 
+ // Re-export FoldRange and extract_fold_ranges
+ pub use folding::FoldRange;
+diff --git a/src/input/editor/display_map/text_wrapper.rs b/src/input/editor/display_map/text_wrapper.rs
+index 59b66a8..38eae7c 100644
+--- a/src/input/editor/display_map/text_wrapper.rs
++++ b/src/input/editor/display_map/text_wrapper.rs
+@@ -112,6 +112,11 @@ pub struct LineStyle {
+     pub text_scale: f32,
+     /// Multiplier for the editor line height (each wrapped row of the line).
+     pub height_scale: f32,
++    /// Height of a block painted below the line's last row (see [`LineBlockMeasureFn`]).
++    pub block_height: Pixels,
++    /// Hide the line's text (its rows take no height) unless a selection touches the line,
++    /// e.g. to show only the block of a Markdown image line until the caret enters it.
++    pub collapsed: bool,
+ }
+ 
+ impl Default for LineStyle {
+@@ -119,6 +124,8 @@ impl Default for LineStyle {
+         Self {
+             text_scale: 1.,
+             height_scale: 1.,
++            block_height: px(0.),
++            collapsed: false,
+         }
+     }
+ }
+@@ -133,6 +140,13 @@ impl LineStyle {
+ /// Decides the [`LineStyle`] of a buffer line from its text (without the trailing `\n`).
+ pub type LineStyleFn = Rc<dyn Fn(&str) -> LineStyle>;
+ 
++/// Decides the height of the block below a buffer line from its text (without the trailing
++/// `\n`) and the wrap width (`None` when not wrapping). Zero means no block.
++///
++/// Lets a host show content under a line, e.g. the image of a Markdown image line, while the
++/// line itself stays editable text.
++pub type LineBlockMeasureFn = Rc<dyn Fn(&str, Option<Pixels>) -> Pixels>;
++
+ /// A line with soft wrapped lines info.
+ #[derive(Debug, Clone)]
+ pub(crate) struct LineItem {
+@@ -149,6 +163,8 @@ pub(crate) struct LineItem {
+     pub(crate) wrapped_lines: SmallVec<[Range<usize>; 1]>,
+     /// Text size and row height of this line.
+     pub(crate) style: LineStyle,
++    /// Whether a selection touches this [`LineStyle::collapsed`] line, so its text shows.
++    pub(crate) revealed: bool,
+ }
+ 
+ impl LineItem {
+@@ -158,6 +174,22 @@ impl LineItem {
+         self.len
+     }
+ 
++    /// Whether the line's text is hidden (see [`LineStyle::collapsed`]).
++    #[inline]
++    pub(crate) fn is_collapsed(&self) -> bool {
++        self.style.collapsed && !self.revealed
++    }
++
++    /// Row height multiplier, zero while the line is collapsed.
++    #[inline]
++    pub(crate) fn height_scale(&self) -> f32 {
++        if self.is_collapsed() {
++            0.
++        } else {
++            self.style.height_scale
++        }
++    }
++
+     /// Get number of soft wrapped lines of this line (include the first line).
+     #[inline]
+     pub(crate) fn lines_len(&self) -> usize {
+@@ -267,6 +299,9 @@ pub(crate) struct TextWrapper {
+ 
+     inline_metrics: Rc<[(Range<usize>, Pixels)]>,
+     line_style: Option<LineStyleFn>,
++    line_block: Option<LineBlockMeasureFn>,
++    /// Buffer rows touched by a selection, where collapsed lines show their text.
++    reveal: Vec<Range<usize>>,
+     _initialized: bool,
+ }
+ 
+@@ -282,6 +317,8 @@ impl TextWrapper {
+             lines: SumTree::new(&()),
+             inline_metrics: Rc::from([]),
+             line_style: None,
++            line_block: None,
++            reveal: Vec::new(),
+             _initialized: false,
+         }
+     }
+@@ -392,6 +429,48 @@ impl TextWrapper {
+         }
+     }
+ 
++    /// Set how tall the block below each line is, and re-wrap every line.
++    pub(crate) fn set_line_block(&mut self, line_block: Option<LineBlockMeasureFn>, cx: &mut App) {
++        self.line_block = line_block;
++        if self._initialized {
++            self.update_all(&self.text.clone(), cx);
++        }
++    }
++
++    /// Show the text of collapsed lines within `rows` (buffer rows touched by a selection) and
++    /// hide the others. Returns whether any line changed.
++    pub(crate) fn set_reveal(&mut self, rows: Vec<Range<usize>>, cx: &mut App) -> bool {
++        self.reveal = rows;
++        let reveal = &self.reveal;
++        let changed: Vec<usize> = self
++            .lines
++            .iter()
++            .enumerate()
++            .filter(|(row, item)| {
++                let revealed = item.style.collapsed && reveal.iter().any(|r| r.contains(row));
++                item.revealed != revealed
++            })
++            .map(|(row, _)| row)
++            .collect();
++        let text = self.text.clone();
++        for &row in &changed {
++            let start = text.line_start_offset(row);
++            let end = text.line_end_offset(row);
++            self.update(
++                &text,
++                &(start..end),
++                &Rope::from(text.slice(start..end).to_string()),
++                cx,
++            );
++        }
++        !changed.is_empty()
++    }
++
++    /// How tall the block below each line is.
++    pub(crate) fn line_block(&self) -> Option<LineBlockMeasureFn> {
++        self.line_block.clone()
++    }
++
+     /// Whether any line has a non-default [`LineStyle`].
+     #[inline]
+     pub(crate) fn has_styled_lines(&self) -> bool {
+@@ -603,10 +682,14 @@ impl TextWrapper {
+             let mut indent_chars = 0;
+             // Borrowed for lines within a single rope chunk.
+             let line_str: Cow<str> = line.into();
+-            let style = self
++            let mut style = self
+                 .line_style
+                 .as_ref()
+                 .map_or_else(LineStyle::default, |line_style| line_style(&line_str));
++            if let Some(line_block) = &self.line_block {
++                style.block_height = line_block(&line_str, wrap_width).max(px(0.));
++            }
++            let revealed = style.collapsed && self.reveal.iter().any(|r| r.contains(&row));
+ 
+             // If wrap_width is Pixels::MAX, skip wrapping to disable word wrap
+             if let Some(wrap_width) = wrap_width {
+@@ -663,6 +746,7 @@ impl TextWrapper {
+                 indent: indent_chars,
+                 wrapped_lines,
+                 style,
++                revealed,
+             });
+         }
+ 
+@@ -820,6 +904,10 @@ pub(crate) struct LineLayout {
+     /// Height of each visual row of this line, when it differs from the editor line height
+     /// (see [`LineStyle`]).
+     row_height: Option<Pixels>,
++    /// Height of the block below the last visual row (see [`LineStyle::block_height`]).
++    pub(crate) block_height: Pixels,
++    /// The text is collapsed and not painted (see [`LineStyle::collapsed`]).
++    hidden: bool,
+ }
+ 
+ impl LineLayout {
+@@ -833,6 +921,8 @@ impl LineLayout {
+             whitespace_indicators: None,
+             has_background: false,
+             row_height: None,
++            block_height: px(0.),
++            hidden: false,
+         }
+     }
+ 
+@@ -842,6 +932,18 @@ impl LineLayout {
+         self
+     }
+ 
++    /// Do not paint the text (a collapsed line).
++    pub(crate) fn hidden(mut self, hidden: bool) -> Self {
++        self.hidden = hidden;
++        self
++    }
++
++    /// Reserve a block of `block_height` below the last visual row.
++    pub(crate) fn block_height(mut self, block_height: Pixels) -> Self {
++        self.block_height = block_height;
++        self
++    }
++
+     /// Height of each visual row of this line.
+     #[inline]
+     pub(crate) fn row_height_or(&self, line_height: Pixels) -> Pixels {
+@@ -1012,8 +1114,13 @@ impl LineLayout {
+         let mut line_top = px(0.);
+         let x_offset = last_layout.alignment_offset(self.longest_width);
+ 
++        let last = self.wrapped_lines.len().saturating_sub(1);
+         for (i, line) in self.wrapped_lines.iter().enumerate() {
+-            let line_bottom = line_top + self.row_height_or(last_layout.line_height);
++            let mut line_bottom = line_top + self.row_height_or(last_layout.line_height);
++            // The block below the line hits its last row.
++            if i == last {
++                line_bottom += self.block_height;
++            }
+             if pos.y >= line_top && pos.y < line_bottom {
+                 return Some((i, offset, pos.x - x_offset - self.line_indent(i)));
+             }
+@@ -1097,7 +1204,10 @@ impl LineLayout {
+             .map(|(ix, line)| line.width + self.line_indent(ix))
+             .max()
+             .unwrap_or(self.longest_width);
+-        size(width, self.wrapped_lines.len() * self.row_height_or(line_height))
++        size(
++            width,
++            self.wrapped_lines.len() * self.row_height_or(line_height) + self.block_height,
++        )
+     }
+ 
+     /// Paint only the glyph background quads of this line.
+@@ -1115,7 +1225,7 @@ impl LineLayout {
+     ) {
+         // Painting a background walks every glyph and pushes a scene layer, so skip the
+         // whole pass for lines that have no background color to paint.
+-        if !self.has_background {
++        if !self.has_background || self.hidden {
+             return;
+         }
+ 
+@@ -1141,6 +1251,9 @@ impl LineLayout {
+         window: &mut Window,
+         cx: &mut App,
+     ) {
++        if self.hidden {
++            return;
++        }
+         let line_height = self.row_height_or(line_height);
+         for (ix, line) in self.wrapped_lines.iter().enumerate() {
+             _ = line.paint(
+@@ -1598,18 +1711,21 @@ mod tests {
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..2],
+                     style: LineStyle::default(),
++                    revealed: false,
+                 },
+                 LineItem {
+                     len: 4,
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..2, 2..4],
+                     style: LineStyle::default(),
++                    revealed: false,
+                 },
+                 LineItem {
+                     len: 1,
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..1],
+                     style: LineStyle::default(),
++                    revealed: false,
+                 },
+             ],
+             &(),
+@@ -1772,12 +1888,14 @@ mod tests {
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..10],
+                     style: LineStyle::default(),
++                    revealed: false,
+                 },
+                 LineItem {
+                     len: Rope::from("this one wraps").len(),
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..9, 9..14],
+                     style: LineStyle::default(),
++                    revealed: false,
+                 },
+             ],
+             &(),
+@@ -1830,6 +1948,7 @@ mod tests {
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..15],
+                     style: LineStyle::default(),
++                    revealed: false,
+                 },
+                 // range: 16..36
+                 LineItem {
+@@ -1837,6 +1956,7 @@ mod tests {
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..10, 10..20],
+                     style: LineStyle::default(),
++                    revealed: false,
+                 },
+                 // range: 37..56
+                 LineItem {
+@@ -1844,6 +1964,7 @@ mod tests {
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..9, 9..15, 15..20],
+                     style: LineStyle::default(),
++                    revealed: false,
+                 },
+                 // range: 57..79
+                 LineItem {
+@@ -1851,6 +1972,7 @@ mod tests {
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..22],
+                     style: LineStyle::default(),
++                    revealed: false,
+                 },
+             ],
+             &(),
+diff --git a/src/input/editor/display_map/wrap_map.rs b/src/input/editor/display_map/wrap_map.rs
+index 8ceaf2c..52ac975 100644
+--- a/src/input/editor/display_map/wrap_map.rs
++++ b/src/input/editor/display_map/wrap_map.rs
+@@ -11,7 +11,7 @@ use ropey::Rope;
+ 
+ use super::fold_map::FoldMap;
+ use super::text_wrapper::{
+-    LineItem, LineStyleFn, TextWrapper, WrapDisplayPoint, WrappingIndent,
++    LineBlockMeasureFn, LineItem, LineStyleFn, TextWrapper, WrapDisplayPoint, WrappingIndent,
+ };
+ use super::{BufferPoint, WrapPoint};
+ use crate::input::RopeExt;
+@@ -136,6 +136,21 @@ impl WrapMap {
+         self.wrapper.set_line_style(line_style, cx);
+     }
+ 
++    /// Set how tall the block below each line is (see [`LineBlockMeasureFn`]).
++    pub(super) fn set_line_block(&mut self, line_block: Option<LineBlockMeasureFn>, cx: &mut App) {
++        self.wrapper.set_line_block(line_block, cx);
++    }
++
++    /// Show collapsed lines within `rows` (see [`TextWrapper::set_reveal`]).
++    pub(super) fn set_reveal(&mut self, rows: Vec<std::ops::Range<usize>>, cx: &mut App) -> bool {
++        self.wrapper.set_reveal(rows, cx)
++    }
++
++    /// How tall the block below each line is.
++    pub(super) fn line_block(&self) -> Option<LineBlockMeasureFn> {
++        self.wrapper.line_block()
++    }
++
+     /// Set font parameters
+     pub(super) fn set_font(&mut self, font: Font, font_size: Pixels, cx: &mut App) {
+         self.wrapper.set_font(font, font_size, cx);
+diff --git a/src/input/editor/mod.rs b/src/input/editor/mod.rs
+index c948c58..db7344e 100644
+--- a/src/input/editor/mod.rs
++++ b/src/input/editor/mod.rs
+@@ -295,4 +295,54 @@ impl InputBaseState<EditorMode> {
+         self.display_map.set_line_style(line_style, cx);
+         cx.notify();
+     }
++
++    /// Reserve a block below some lines and draw into it, e.g. the image of a Markdown image
++    /// line. The line itself stays ordinary editable text above its block.
++    ///
++    /// `measure` gets each buffer line without its trailing `\n` and the wrap width, and returns
++    /// the block height (zero for no block). Like `line_style`, it is called again for every
++    /// edited line and on every re-wrap, so it should be cheap. `render` draws a visible block;
++    /// clicks on it put the caret on its line.
++    pub fn set_line_blocks(
++        &mut self,
++        measure: impl Fn(&str, Option<gpui::Pixels>) -> gpui::Pixels + 'static,
++        render: impl Fn(&LineBlockContext, &mut Window, &mut App) -> gpui::AnyElement + 'static,
++        cx: &mut gpui::Context<Self>,
++    ) {
++        self.line_block_renderer = Some(std::rc::Rc::new(render));
++        self.display_map.set_line_block(
++            Some(std::rc::Rc::new(measure) as super::LineBlockMeasureFn),
++            cx,
++        );
++        cx.notify();
++    }
++
++    /// Remove every line block (see [`Self::set_line_blocks`]).
++    pub fn clear_line_blocks(&mut self, cx: &mut gpui::Context<Self>) {
++        self.line_block_renderer = None;
++        self.display_map.set_line_block(None, cx);
++        cx.notify();
++    }
++
++    /// Measure the line blocks again, e.g. after what they show finished loading.
++    pub fn refresh_line_blocks(&mut self, cx: &mut gpui::Context<Self>) {
++        if let Some(measure) = self.display_map.line_block() {
++            self.display_map.set_line_block(Some(measure), cx);
++            cx.notify();
++        }
++    }
++}
++
++/// A block below a line, for a [`LineBlockRenderer`].
++pub struct LineBlockContext {
++    /// Buffer line the block belongs to.
++    pub line: usize,
++    /// Text of the line, without the trailing `\n`.
++    pub text: gpui::SharedString,
++    /// Size of the block: the text width and the measured block height.
++    pub size: gpui::Size<gpui::Pixels>,
+ }
++
++/// Draws the block below a line (see [`EditorState::set_line_blocks`]).
++pub type LineBlockRenderer =
++    std::rc::Rc<dyn Fn(&LineBlockContext, &mut Window, &mut App) -> gpui::AnyElement>;
+diff --git a/src/input/mod.rs b/src/input/mod.rs
+index 8bad6fc..97b2d2a 100644
+--- a/src/input/mod.rs
++++ b/src/input/mod.rs
+@@ -91,9 +91,10 @@ pub use diagnostics::{
+     DiagnosticSummary, DiagnosticTag, RelatedInformation,
+ };
+ pub use display_map::{
+-    BufferPoint, DisplayMap, DisplayPoint, FoldRange, LineStyle, LineStyleFn, WrappingIndent,
++    BufferPoint, DisplayMap, DisplayPoint, FoldRange, LineBlockMeasureFn, LineStyle, LineStyleFn,
++    WrappingIndent,
+ };
+-pub use editor::{Editor, EditorState};
++pub use editor::{Editor, EditorState, LineBlockContext, LineBlockRenderer};
+ pub use highlighting::{
+     DiagnosticColors, FoldIconRenderer, HighlightStyleResolver, InputEditorStyle, InputHighlighter,
+     InputHighlighterFactory, SharedHighlightStyleResolver, SyntaxContext, SyntaxContextProvider,

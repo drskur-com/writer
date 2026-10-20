@@ -2,6 +2,7 @@
 
 mod book_info;
 mod editor;
+mod editor_image;
 mod file_view;
 mod insert_image;
 mod library_ops;

@@ -867,6 +867,7 @@ impl<M: InputModeKind> TextElement<M> {
                 offset = end;
                 y += row_height;
             }
+            y += line.block_height;
         }
         (!corners.is_empty()).then_some(corners)
     }
@@ -1994,6 +1995,47 @@ impl<M: InputModeKind> TextElement<M> {
             .collect()
     }
 
+    /// Lay out the blocks below the visible lines, each at the bottom of its line.
+    fn prepaint_line_blocks(
+        &self,
+        layout: &LastLayout,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<AnyElement> {
+        let state = self.state.read(cx);
+        let Some(render) = state.line_block_renderer.clone() else {
+            return vec![];
+        };
+        let width = layout.wrap_width.unwrap_or(layout.content_width);
+        let mut placements = Vec::new();
+        let mut y = layout.visible_top;
+        for (line, &row) in layout.lines.iter().zip(layout.visible_buffer_lines.iter()) {
+            let line_size = line.size(layout.line_height);
+            if line.block_height > px(0.) {
+                let top = y + line_size.height - line.block_height;
+                placements.push((
+                    super::LineBlockContext {
+                        line: row,
+                        text: state.text.slice_line(row).to_string().into(),
+                        size: size(width, line.block_height),
+                    },
+                    bounds.origin + point(layout.line_number_width, top),
+                ));
+            }
+            y += line_size.height;
+        }
+        placements
+            .into_iter()
+            .map(|(context, origin)| {
+                let mut element = render(&context, window, cx);
+                element.layout_as_root(context.size.map(gpui::AvailableSpace::Definite), window, cx);
+                element.prepaint_at(origin, window, cx);
+                element
+            })
+            .collect()
+    }
+
     fn prepaint_tokens(
         &self,
         layout: &LastLayout,
@@ -2192,9 +2234,11 @@ impl<M: InputModeKind> TextElement<M> {
                 .with_background(line_has_background)
                 .with_whitespaces(whitespace_indicators.clone())
                 .row_height(
-                    (line_style.height_scale != 1.)
-                        .then(|| last_layout.line_height * line_style.height_scale),
-                );
+                    (line_item.height_scale() != 1.)
+                        .then(|| last_layout.line_height * line_item.height_scale()),
+                )
+                .block_height(line_style.block_height)
+                .hidden(line_item.is_collapsed());
             lines.push(line_layout);
 
             // +1 for the `\n`
@@ -2368,6 +2412,8 @@ pub(super) struct PrepaintState {
     /// The lines of entire lines.
     last_layout: LastLayout,
     token_elements: Vec<AnyElement>,
+    /// Blocks drawn below lines (see [`crate::input::EditorState::set_line_blocks`]).
+    line_block_elements: Vec<AnyElement>,
     /// The lines only contains the visible lines in the viewport, based on `visible_range`.
     ///
     /// The child is the soft lines.
@@ -2691,6 +2737,10 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 state.display_map.set_wrapping_indent(wrapping_indent, cx);
             });
         }
+
+        // Collapsed lines touched by a selection show their text (see `LineStyle::collapsed`).
+        self.state
+            .update(cx, |state, cx| state.sync_revealed_lines(cx));
 
         let line_height = window.line_height();
         let token_elements = self.measure_tokens(
@@ -3094,8 +3144,10 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let hitbox = window.insert_hitbox(input_bounds, HitboxBehavior::Normal);
 
         let token_elements = self.prepaint_tokens(&last_layout, bounds, token_elements, window, cx);
+        let line_block_elements = self.prepaint_line_blocks(&last_layout, bounds, window, cx);
         PrepaintState {
             token_elements,
+            line_block_elements,
             hitbox,
             bounds,
             last_layout,
@@ -3187,7 +3239,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
                         ));
                     }
                 }
-                offset_y += height;
+                offset_y += height + line_layout.block_height;
             }
         }
 
@@ -3349,6 +3401,9 @@ impl<M: InputModeKind> Element for TextElement<M> {
         for element in &mut prepaint.token_elements {
             element.paint(window, cx);
         }
+        for element in &mut prepaint.line_block_elements {
+            element.paint(window, cx);
+        }
 
         // Paint blinking cursors (shared blink state for all carets)
         if focused && show_cursor {
@@ -3408,6 +3463,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
                     _ = line.paint(p, row_height, TextAlign::Left, None, window, cx);
                     offset_y += row_height;
                 }
+                offset_y += line_layout.block_height;
 
                 // Add ghost line height after cursor row for line numbers alignment
                 if !prepaint.ghost_lines.is_empty() && prepaint.current_row == Some(buffer_line) {
@@ -4256,6 +4312,7 @@ mod tests {
                             crate::input::LineStyle {
                                 text_scale: 2.,
                                 height_scale: 2.5,
+                                ..Default::default()
                             }
                         } else {
                             crate::input::LineStyle::default()
@@ -4305,6 +4362,143 @@ mod tests {
     }
 
     #[gpui::test]
+    fn line_blocks_reserve_space_below_their_line(cx: &mut TestAppContext) {
+        let text = "body\n![img](a.png)\nmore";
+        let (editor, window) = decoration_editor(cx, text, false);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let rendered = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|window, cx| {
+            let seen = rendered.clone();
+            editor.update(cx, |state, cx| {
+                state.set_line_blocks(
+                    |line: &str, _| if line.starts_with("![") { px(100.) } else { px(0.) },
+                    move |block: &crate::input::LineBlockContext, _, _| {
+                        seen.borrow_mut().push((block.line, block.text.clone(), block.size));
+                        gpui::Empty.into_any_element()
+                    },
+                    cx,
+                );
+            });
+            window.draw(cx).clear(cx);
+            let state = editor.read(cx);
+            let layout = state.last_layout.as_ref().unwrap();
+            let lh = layout.line_height;
+            let map = &state.display_map;
+
+            // Only the image row grows, by the block height.
+            assert_eq!(map.display_row_top(2, lh), lh * 2. + px(100.));
+            assert_eq!(map.display_row_height(1, lh), lh + px(100.));
+            assert_eq!(map.display_row_text_height(1, lh), lh);
+            assert_eq!(map.content_height(lh), lh * 3. + px(100.));
+            assert_eq!(layout.lines[1].size(lh).height, lh + px(100.));
+
+            // The next line's ranges sit below the block.
+            let more = TextElement::<EditorMode>::layout_range_corners(&(19..23), layout).unwrap();
+            assert_eq!(more[0].top_left.y, layout.visible_top + lh * 2. + px(100.));
+
+            // A click on the block lands on its line.
+            let origin = state.last_bounds.unwrap().origin;
+            let (ix, _) = state.index_for_mouse_position(origin + point(px(1.), lh * 1. + px(80.)));
+            assert!((5..=18).contains(&ix), "{ix}");
+
+            let rendered = rendered.borrow();
+            assert_eq!(rendered.len(), 1);
+            assert_eq!(rendered[0].0, 1);
+            assert_eq!(rendered[0].1.as_ref(), "![img](a.png)");
+            assert_eq!(rendered[0].2.height, px(100.));
+        });
+    }
+
+    #[gpui::test]
+    fn collapsed_lines_show_their_text_only_under_a_selection(cx: &mut TestAppContext) {
+        let text = "body\n![img](a.png)\nmore";
+        let (editor, window) = decoration_editor(cx, text, false);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            editor.update(cx, |state, cx| {
+                state.set_line_style(
+                    Some(|line: &str| crate::input::LineStyle {
+                        collapsed: line.starts_with("!["),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                state.set_line_blocks(
+                    |line: &str, _| {
+                        if line.starts_with("![") {
+                            px(100.)
+                        } else {
+                            px(0.)
+                        }
+                    },
+                    |_, _, _| gpui::Empty.into_any_element(),
+                    cx,
+                );
+                state.set_selected_range(0..0, cx);
+            });
+            window.draw(cx).clear(cx);
+            let lh = editor.read(cx).last_layout.as_ref().unwrap().line_height;
+
+            // The caret is elsewhere: only the block of the image line takes space.
+            let state = editor.read(cx);
+            assert_eq!(state.display_map.display_row_top(2, lh), lh + px(100.));
+            let origin = state.last_bounds.unwrap().origin;
+            // A click on the block puts the caret on the image line.
+            let (ix, _) = state.index_for_mouse_position(origin + point(px(1.), lh + px(50.)));
+            assert!((5..=18).contains(&ix), "{ix}");
+
+            // The caret on the image line shows its text again.
+            editor.update(cx, |state, cx| state.set_selected_range(ix..ix, cx));
+            window.draw(cx).clear(cx);
+            let state = editor.read(cx);
+            assert_eq!(state.display_map.display_row_top(2, lh), lh * 2. + px(100.));
+
+            // And hides it once the caret leaves.
+            editor.update(cx, |state, cx| state.set_selected_range(20..20, cx));
+            window.draw(cx).clear(cx);
+            let state = editor.read(cx);
+            assert_eq!(state.display_map.display_row_top(2, lh), lh + px(100.));
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_a_collapsed_block_reveals_its_line(cx: &mut TestAppContext) {
+        let text = "body\n![img](a.png)\nmore";
+        let (editor, window) = decoration_editor(cx, text, false);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            editor.update(cx, |state, cx| {
+                state.set_line_style(
+                    Some(|line: &str| crate::input::LineStyle {
+                        collapsed: line.starts_with("!["),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                state.set_line_blocks(
+                    |line: &str, _| if line.starts_with("![") { px(60.) } else { px(0.) },
+                    |_, _, _| gpui::Empty.into_any_element(),
+                    cx,
+                );
+                state.set_selected_range(0..0, cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+        let (origin, lh) = cx.update(|_, cx| {
+            let state = editor.read(cx);
+            (state.last_bounds.unwrap().origin, state.last_layout.as_ref().unwrap().line_height)
+        });
+        cx.simulate_click(origin + point(px(10.), lh + px(30.)), gpui::Modifiers::default());
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let state = editor.read(cx);
+            let cursor = state.cursor();
+            assert!((5..=18).contains(&cursor), "{cursor}");
+            assert_eq!(state.display_map.display_row_top(2, lh), lh * 2. + px(60.));
+        });
+    }
+
+    #[gpui::test]
     fn styled_lines_soft_wrap_at_their_text_size(cx: &mut TestAppContext) {
         let words = "word ".repeat(12);
         let text = format!("# {words}\n{words}");
@@ -4316,6 +4510,7 @@ mod tests {
                     Some(|line: &str| crate::input::LineStyle {
                         text_scale: if line.starts_with("# ") { 2. } else { 1. },
                         height_scale: 1.,
+                        ..Default::default()
                     }),
                     cx,
                 );

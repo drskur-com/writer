@@ -295,4 +295,54 @@ impl InputBaseState<EditorMode> {
         self.display_map.set_line_style(line_style, cx);
         cx.notify();
     }
+
+    /// Reserve a block below some lines and draw into it, e.g. the image of a Markdown image
+    /// line. The line itself stays ordinary editable text above its block.
+    ///
+    /// `measure` gets each buffer line without its trailing `\n` and the wrap width, and returns
+    /// the block height (zero for no block). Like `line_style`, it is called again for every
+    /// edited line and on every re-wrap, so it should be cheap. `render` draws a visible block;
+    /// clicks on it put the caret on its line.
+    pub fn set_line_blocks(
+        &mut self,
+        measure: impl Fn(&str, Option<gpui::Pixels>) -> gpui::Pixels + 'static,
+        render: impl Fn(&LineBlockContext, &mut Window, &mut App) -> gpui::AnyElement + 'static,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.line_block_renderer = Some(std::rc::Rc::new(render));
+        self.display_map.set_line_block(
+            Some(std::rc::Rc::new(measure) as super::LineBlockMeasureFn),
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Remove every line block (see [`Self::set_line_blocks`]).
+    pub fn clear_line_blocks(&mut self, cx: &mut gpui::Context<Self>) {
+        self.line_block_renderer = None;
+        self.display_map.set_line_block(None, cx);
+        cx.notify();
+    }
+
+    /// Measure the line blocks again, e.g. after what they show finished loading.
+    pub fn refresh_line_blocks(&mut self, cx: &mut gpui::Context<Self>) {
+        if let Some(measure) = self.display_map.line_block() {
+            self.display_map.set_line_block(Some(measure), cx);
+            cx.notify();
+        }
+    }
 }
+
+/// A block below a line, for a [`LineBlockRenderer`].
+pub struct LineBlockContext {
+    /// Buffer line the block belongs to.
+    pub line: usize,
+    /// Text of the line, without the trailing `\n`.
+    pub text: gpui::SharedString,
+    /// Size of the block: the text width and the measured block height.
+    pub size: gpui::Size<gpui::Pixels>,
+}
+
+/// Draws the block below a line (see [`EditorState::set_line_blocks`]).
+pub type LineBlockRenderer =
+    std::rc::Rc<dyn Fn(&LineBlockContext, &mut Window, &mut App) -> gpui::AnyElement>;

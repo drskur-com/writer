@@ -75,6 +75,30 @@ pub struct ImageOptions {
 }
 
 impl ImageOptions {
+    /// Pandoc 속성 블록 안쪽(`width=320px .align-left`)을 읽는다. 모르는 속성은 무시한다.
+    fn parse(attributes: &str) -> Self {
+        let mut options = Self::default();
+        let size = |value: &str| {
+            let value = value.trim_matches('"');
+            value.strip_suffix("px").unwrap_or(value).parse().ok()
+        };
+        for attribute in attributes.split_whitespace() {
+            match attribute {
+                ".align-left" => options.align = ImageAlign::Left,
+                ".align-right" => options.align = ImageAlign::Right,
+                ".full-page" => options.full_page = true,
+                _ => {
+                    if let Some(value) = attribute.strip_prefix("width=") {
+                        options.width = size(value);
+                    } else if let Some(value) = attribute.strip_prefix("height=") {
+                        options.height = size(value);
+                    }
+                }
+            }
+        }
+        options
+    }
+
     /// Pandoc 속성 블록. 기본값뿐이면 빈 문자열.
     fn attributes(&self) -> String {
         let mut parts = Vec::new();
@@ -115,6 +139,107 @@ pub fn image(alt: &str, destination: &str, options: &ImageOptions) -> String {
     } else {
         format!("![{escaped}]({destination}){attributes}")
     }
+}
+
+/// 이미지만 있는 줄(`![캡션](경로 "제목"){속성}`)의 내용.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageLine {
+    pub alt: String,
+    pub destination: String,
+    pub options: ImageOptions,
+}
+
+/// 한 줄이 이미지 하나뿐이면(앞 들여쓰기 3칸·뒤 공백 허용) 그 내용을 돌려준다. 줄 텍스트만 본다.
+///
+/// 에디터가 줄마다 즉시 판정해 이미지를 그릴 수 있도록 파서를 쓰지 않는다(`heading_level`과 같은
+/// 이유). 그래서 코드 블록 안의 이미지 줄도 이미지로 본다. 속성은 ADR-0007 문법만 읽고 모르는
+/// 속성은 무시한다.
+pub fn image_line(line: &str) -> Option<ImageLine> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = line[indent..].trim_end().strip_prefix("![")?;
+
+    // 캡션: 짝이 맞는 `]`까지. `\`는 다음 글자를 그대로 둔다.
+    let mut alt = String::new();
+    let mut depth = 0;
+    let mut chars = rest.char_indices();
+    let alt_end = loop {
+        let (ix, c) = chars.next()?;
+        match c {
+            '\\' => {
+                let (_, next) = chars.next()?;
+                if !matches!(next, '[' | ']' | '\\') {
+                    alt.push('\\');
+                }
+                alt.push(next);
+            }
+            '[' => {
+                depth += 1;
+                alt.push(c);
+            }
+            ']' if depth == 0 => break ix,
+            ']' => {
+                depth -= 1;
+                alt.push(c);
+            }
+            _ => alt.push(c),
+        }
+    };
+    let rest = rest[alt_end + 1..].strip_prefix('(')?.trim_start();
+
+    // 경로: `<…>` 또는 공백·짝 없는 `)` 앞까지.
+    let (destination, rest) = if let Some(inner) = rest.strip_prefix('<') {
+        let end = inner.find('>')?;
+        (&inner[..end], &inner[end + 1..])
+    } else {
+        let mut depth = 0usize;
+        let end = rest
+            .char_indices()
+            .find(|&(_, c)| match c {
+                '(' => {
+                    depth += 1;
+                    false
+                }
+                ')' if depth == 0 => true,
+                ')' => {
+                    depth -= 1;
+                    false
+                }
+                c => c.is_whitespace(),
+            })
+            .map_or(rest.len(), |(ix, _)| ix);
+        (&rest[..end], &rest[end..])
+    };
+    if destination.is_empty() {
+        return None;
+    }
+
+    // 제목(`"…"`·`'…'`·`(…)`)은 건너뛴다.
+    let rest = rest.trim_start();
+    let rest = match rest.chars().next()? {
+        ')' => rest,
+        open @ ('"' | '\'' | '(') => {
+            let close = if open == '(' { ')' } else { open };
+            let end = rest[1..].find(close)?;
+            rest[end + 2..].trim_start()
+        }
+        _ => return None,
+    };
+    let rest = rest.strip_prefix(')')?;
+
+    let options = if rest.is_empty() {
+        ImageOptions::default()
+    } else {
+        let attributes = rest.strip_prefix('{')?.strip_suffix('}')?;
+        ImageOptions::parse(attributes)
+    };
+    Some(ImageLine {
+        alt,
+        destination: destination.to_string(),
+        options,
+    })
 }
 
 /// 한 줄이 ATX 제목(`#`~`######`)이면 레벨을 돌려준다. 줄 텍스트만 본다.
@@ -239,8 +364,18 @@ fn walk(node: &Node, text: &str, in_quote: bool, out: &mut Vec<Span>) {
                 let end = children_range(node).map_or(range.end, |inner| inner.start);
                 push(range.start..end, SpanKind::Marker);
             }
+            // 바로 뒤 Pandoc 속성(`{width=320px}`, ADR-0007)도 기호다.
+            Node::Image(_) => {
+                let rest = &text[range.end..];
+                let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+                let attributes = line
+                    .starts_with('{')
+                    .then(|| line.find('}'))
+                    .flatten()
+                    .map_or(0, |end| end + 1);
+                push(range.start..range.end + attributes, SpanKind::Marker);
+            }
             Node::ThematicBreak(_)
-            | Node::Image(_)
             | Node::ImageReference(_)
             | Node::FootnoteReference(_)
             | Node::Yaml(_)
@@ -365,6 +500,67 @@ mod tests {
             ..sized
         };
         assert_eq!(image("표지", "a.png", &full), "![표지](a.png){.full-page}");
+    }
+
+    #[test]
+    fn image_line_reads_back_what_image_writes() {
+        let options = ImageOptions {
+            width: Some(320),
+            height: None,
+            align: ImageAlign::Right,
+            full_page: false,
+        };
+        for (alt, destination) in [
+            ("지도", "Extras/Attachments/a.png"),
+            ("[1] 표", "https://x.io/a.png?b=(1)"),
+            ("", "내 사진 (1).png"),
+        ] {
+            let line = image(alt, destination, &options);
+            assert_eq!(
+                image_line(&line),
+                Some(ImageLine {
+                    alt: alt.into(),
+                    destination: destination.into(),
+                    options,
+                }),
+                "{line}"
+            );
+        }
+        let full = image_line("![](a.png){.full-page}").unwrap();
+        assert!(full.options.full_page);
+    }
+
+    #[test]
+    fn image_line_only_matches_image_paragraph_lines() {
+        let plain = image_line("  ![a](b.png \"제목\")  ").unwrap();
+        assert_eq!(plain.destination, "b.png");
+        assert_eq!(plain.options, ImageOptions::default());
+        // 크기 단위가 없어도 px로 본다. 모르는 속성은 무시한다.
+        let sized = image_line("![](a.png){width=10 height=\"20px\" .wide #id}").unwrap();
+        assert_eq!(
+            (sized.options.width, sized.options.height),
+            (Some(10), Some(20))
+        );
+        for line in [
+            "글 ![a](b.png)",
+            "![a](b.png) 글",
+            "![a](b.png){width=1",
+            "![a]()",
+            "![a](b.png",
+            "    ![a](b.png)",
+            "[a](b.png)",
+        ] {
+            assert_eq!(image_line(line), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn image_and_attributes_are_markers() {
+        let text = "![캡션](a.png){width=320px}\n\n![b](c.png) 끝";
+        assert_eq!(
+            pieces(text, SpanKind::Marker),
+            ["![캡션](a.png){width=320px}", "![b](c.png)"]
+        );
     }
 
     /// 종류별로 스팬이 덮는 원문 조각을 모은다.

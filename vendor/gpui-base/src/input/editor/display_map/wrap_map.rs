@@ -11,7 +11,7 @@ use ropey::Rope;
 
 use super::fold_map::FoldMap;
 use super::text_wrapper::{
-    LineItem, LineStyleFn, TextWrapper, WrapDisplayPoint, WrappingIndent,
+    LineBlockMeasureFn, LineItem, LineStyleFn, TextWrapper, WrapDisplayPoint, WrappingIndent,
 };
 use super::{BufferPoint, WrapPoint};
 use crate::input::RopeExt;
@@ -134,6 +134,21 @@ impl WrapMap {
     /// Set how each line is sized (see [`LineStyle`]).
     pub(super) fn set_line_style(&mut self, line_style: Option<LineStyleFn>, cx: &mut App) {
         self.wrapper.set_line_style(line_style, cx);
+    }
+
+    /// Set how tall the block below each line is (see [`LineBlockMeasureFn`]).
+    pub(super) fn set_line_block(&mut self, line_block: Option<LineBlockMeasureFn>, cx: &mut App) {
+        self.wrapper.set_line_block(line_block, cx);
+    }
+
+    /// Show collapsed lines within `rows` (see [`TextWrapper::set_reveal`]).
+    pub(super) fn set_reveal(&mut self, rows: Vec<std::ops::Range<usize>>, cx: &mut App) -> bool {
+        self.wrapper.set_reveal(rows, cx)
+    }
+
+    /// How tall the block below each line is.
+    pub(super) fn line_block(&self) -> Option<LineBlockMeasureFn> {
+        self.wrapper.line_block()
     }
 
     /// Set font parameters

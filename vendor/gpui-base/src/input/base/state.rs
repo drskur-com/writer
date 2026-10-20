@@ -413,6 +413,10 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) mode: LayoutMode,
     pub(super) text: Rope,
     pub(super) display_map: DisplayMap,
+    /// Draws the blocks reserved below lines (see [`crate::input::LineBlockMeasureFn`]).
+    pub(crate) line_block_renderer: Option<crate::input::LineBlockRenderer>,
+    /// Text revision and selected rows that collapsed lines were last revealed for.
+    revealed_rows: Option<(u64, Vec<std::ops::Range<usize>>)>,
     pub(super) undo_manager: UndoManager,
     pub(super) inline_tokens: Option<Box<super::inline_tokens::InlineTokenStore>>,
     pub(super) pending_token: Option<super::InlineToken>,
@@ -871,6 +875,8 @@ impl<M: InputModeKind> InputBaseState<M> {
             cursor_surrounding_lines: None,
             blink_cursor,
             undo_manager,
+            line_block_renderer: None,
+            revealed_rows: None,
             inline_tokens: None,
             pending_token: None,
             replaying_history: false,
@@ -1055,6 +1061,30 @@ impl<M: InputModeKind> InputBaseState<M> {
     ) {
         self.placeholder = placeholder.into();
         cx.notify();
+    }
+
+    /// Show the text of collapsed lines that a selection touches and hide the others (see
+    /// [`crate::input::LineStyle::collapsed`]). Runs before each layout; does nothing unless the
+    /// selected rows or the text changed.
+    pub(super) fn sync_revealed_lines(&mut self, cx: &mut App) {
+        if !self.display_map.has_styled_lines() {
+            return;
+        }
+        let rows: Vec<std::ops::Range<usize>> = self
+            .selections
+            .iter()
+            .map(|selection| {
+                let start = self.text.offset_to_point(selection.start.min(self.text.len())).row;
+                let end = self.text.offset_to_point(selection.end.min(self.text.len())).row;
+                start..end + 1
+            })
+            .collect();
+        let key = (self.document_revision, rows);
+        if self.revealed_rows.as_ref() == Some(&key) {
+            return;
+        }
+        self.display_map.set_revealed_rows(key.1.clone(), cx);
+        self.revealed_rows = Some(key);
     }
 
     /// Find which line and sub-line the given offset belongs to, along with the position within that sub-line.
@@ -2885,7 +2915,10 @@ impl<M: InputModeKind> InputBaseState<M> {
             .display_map
             .offset_to_display_row(offset, self.line_end_affinity_at(offset));
         let row_offset_y = self.display_map.display_row_top(display_row, line_height);
-        let row_height = self.display_map.display_row_height(display_row, line_height);
+        // A block below the row (e.g. an image) need not be revealed with the caret.
+        let row_height = self
+            .display_map
+            .display_row_text_height(display_row, line_height);
 
         // For Right alignment use 0 margin: the cursor indicator is clamped inside bounds
         // in layout_cursors, so shifting the text here would cause a first-click visual jump.
@@ -3521,6 +3554,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             .zip(last_layout.visible_line_byte_offsets.last())
             .map(|((line_layout, pos), line_start)| {
                 let last_row_top = (line_layout.size(line_height).height
+                    - line_layout.block_height
                     - line_layout.row_height_or(line_height))
                 .max(px(0.));
                 let pos = point(pos.x, last_row_top);

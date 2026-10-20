@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use super::WriterApp;
+use super::editor_image::ImageBlocks;
 use super::style::*;
 use crate::markdown::{self, Span, SpanKind};
 use crate::{TogglePreview, icons, library};
@@ -77,13 +78,21 @@ pub(super) struct OpenSheet {
 }
 
 /// 제목 줄은 레벨에 따라 글자와 줄 높이를 키운다(gpui-base 패치, ADR-0006).
-fn heading_line_style(line: &str) -> LineStyle {
+/// 이미지 줄은 커서가 들어올 때만 글자를 보이고, 평소에는 아래 이미지만 보인다(ADR-0008).
+fn line_style(line: &str) -> LineStyle {
+    if markdown::image_line(line).is_some() {
+        return LineStyle {
+            collapsed: true,
+            ..Default::default()
+        };
+    }
     match markdown::heading_level(line) {
         Some(level) => {
             let (text_scale, height_scale) = HEADING_SCALES[usize::from(level) - 1];
             LineStyle {
                 text_scale,
                 height_scale,
+                ..Default::default()
             }
         }
         None => LineStyle::default(),
@@ -402,7 +411,15 @@ impl WriterApp {
                 .folding(false)
                 .cursor_surrounding_lines(Some(CURSOR_MARGIN_LINES))
                 .scroll_beyond_last_line(Some(CURSOR_MARGIN_LINES));
-            state.set_line_style(Some(heading_line_style), cx);
+            state.set_line_style(Some(line_style), cx);
+            // 이미지 줄 아래에 이미지를 그린다(ADR-0008).
+            let images = Rc::new(ImageBlocks::new(&path));
+            let measure = images.clone();
+            state.set_line_blocks(
+                move |line, wrap_width| measure.measure(line, wrap_width),
+                move |block, _, cx| images.render(&block.text, block.size, cx),
+                cx,
+            );
             state.set_value(text.clone(), window, cx);
             state
         });

@@ -19,6 +19,7 @@
 | [0005](./0005-group-meta-in-group-folder.md) | 그룹 메타는 그룹 폴더의 `.writer.toml`에 둔다 | Accepted | 2026-10-20 |
 | [0006](./0006-heading-line-style-gpui-base-patch.md) | 에디터 제목 줄 확대는 gpui-base를 vendor 패치해 줄 단위 LineStyle로 한다 | Proposed | 2026-10-20 |
 | [0007](./0007-image-attributes-pandoc-syntax.md) | 이미지 크기·정렬·전면 배치는 Pandoc 속성 문법으로 마크다운에 적는다 | Proposed | 2026-10-20 |
+| [0008](./0008-editor-image-line-blocks.md) | 에디터 이미지는 이미지 줄 아래 "줄 블록"으로 그리고, 이미지 줄은 커서가 있을 때만 보인다 | Proposed | 2026-10-20 |
 
 ## 작성 규칙
 

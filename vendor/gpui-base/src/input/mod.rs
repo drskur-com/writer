@@ -91,9 +91,10 @@ pub use diagnostics::{
     DiagnosticSummary, DiagnosticTag, RelatedInformation,
 };
 pub use display_map::{
-    BufferPoint, DisplayMap, DisplayPoint, FoldRange, LineStyle, LineStyleFn, WrappingIndent,
+    BufferPoint, DisplayMap, DisplayPoint, FoldRange, LineBlockMeasureFn, LineStyle, LineStyleFn,
+    WrappingIndent,
 };
-pub use editor::{Editor, EditorState};
+pub use editor::{Editor, EditorState, LineBlockContext, LineBlockRenderer};
 pub use highlighting::{
     DiagnosticColors, FoldIconRenderer, HighlightStyleResolver, InputEditorStyle, InputHighlighter,
     InputHighlighterFactory, SharedHighlightStyleResolver, SyntaxContext, SyntaxContextProvider,
