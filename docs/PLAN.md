@@ -57,7 +57,7 @@
 
 | 제약 | 근거 | 영향 & 대응 |
 | --- | --- | --- |
-| `HighlightStyle`에 `font_size` 필드가 없음 (color/font_weight/font_style/background_color/underline/strikethrough/fade_out만 존재) | `gpui-pre/src/style.rs:580` | **에디터 팬 안에서 제목을 크게 표시 불가** → Ulysses의 기본 "Markup" 모드와 동일 전략(굵기·색·마커 흐림으로 구분)을 P0으로, 큰 제목은 **프리뷰 팬**에서 구현. 필요 시 gpui-base 포킹/업스트림 패치를 M2 스파이크에서 판단 |
+| `HighlightStyle`·`TextRun`에 글자 크기가 없고, 에디터는 줄 하나를 `shape_line(font_size)` 한 번으로 그리며 행 높이는 `row * line_height` 고정 격자 | `gpui-pre/src/style.rs:580`, `gpui-base/src/input/base/element.rs` | **제목만 줄 단위로 확대**: gpui-base를 vendor 패치해 `LineStyle { text_scale, height_scale }`(줄별 글자·행 높이 배율)을 추가하고, ATX `#`~`######`를 줄 텍스트로 즉시 판정한다([ADR-0006](./adr/0006-heading-line-style-gpui-base-patch.md)). setext 제목과 한 줄 안 크기 혼합은 범위 외 |
 | 라인 높이가 에디터 단위(상대값)로 균일 | `input/editor.rs`의 private 상수 `EDITOR_LINE_HEIGHT = 1.5` | 블록 간 여백(문단/제목 spacing)은 에디터에서 표현 불가 → 프리뷰에서 해결 |
 | 인라인 이미지 블록(변하는 행 높이) 지원 불명확 | `InlineTokenRenderer`에 `available_width`만 노출 | **M2에서 1일 스파이크 필수**. 안 되면 이미지는 "칩 + 프리뷰 렌더"로 대체 |
 | gpui-pre는 Zed 스냅샷(버전 변동성 큼) | `Cargo.toml` 메타데이터 | `Cargo.lock` 커밋 유지, 업그레이드는 별도 브랜치 + 회귀 체크리스트 |
@@ -187,7 +187,8 @@ Rope(원문)
         ├─> BlockSpan[]  (heading/paragraph/list/quote/code/table/hr/image)
         └─> InlineSpan[] (strong/em/strike/code/link/keyword/footnote/marker)
               ├─(a) DecorationMapper → TextDecorationCollection / RangeDecorationCollection
-              │      · 마커(`#`, `*`, `[]()`) fade_out + 크기 축소 대신 색 약화
+              │      · 마커(`#`, `*`, `[]()`) fade_out
+              │      · 제목 줄: ATX 레벨별 글자·행 높이 배율(gpui-base 패치 `set_line_style`, 줄 텍스트로 동기 판정)
               │      · strong=bold, em=italic, code=mono+bg, link=underline+색, quote=색+좌측 RangeDecoration(Fill)
               │      · 현재 커서 줄/블록은 마커를 원래 색으로 복원(Ulysses 동작)
               ├─(b) 프리뷰: TextView::markdown(원문) + 커스텀 블록 파서/렌더러(키워드·각주·시트 참조)
@@ -231,13 +232,14 @@ Rope(원문)
 - **완료 기준**: 폴더를 열면 시트 목록이 뜨고, 편집→자동 저장→앱 재실행 후 상태(커서 제외)가 복원된다. **5,000개 시트 스캔 < 300ms**(1,000개 < 100ms).
 
 ### M2 — 에디터 코어 & 마크업 스타일링 (5~7일) ★핵심
-- [ ] **스파이크 A(1일)**: `EditorState` + markdown-rs mdast `position` → `TextDecorationCollection`로 `# 제목`/`**굵게**`/`[링크]()` 시각화 POC. 5k/20k 단어 전체 파싱 시간 측정
+- [x] **스파이크 A(1일)**: `EditorState` + markdown-rs mdast `position` → `TextDecorationCollection`로 `# 제목`/`**굵게**`/`[링크]()` 시각화 POC. 5k/20k 단어 전체 파싱 시간 측정 → release 9ms/35ms, 지연 경로는 백그라운드 파싱
 - [ ] **스파이크 B(1일)**: `InlineTokenRenderer`로 이미지/칩 인라인 렌더 가능 여부 → 불가 시 칩 대체안 확정
 - [ ] `markdown` 모듈: mdast → `BlockSpan/InlineSpan` 변환(offset = Rope 바이트/문자 단위 정합) + 골든 테스트(corpus)
 - [ ] DecorationMapper(커서 블록 마커 복원, quote/list 좌측 레일, 코드펜스 배경)
 - [ ] 소프트랩/래핑 인덴트, 에디터 패딩·최대 폭(가독 폭 중앙 정렬), 스크롤 여백
 - [ ] 포맷 액션 + 키맵(굵게/기울임/제목/리스트/인용/코드/링크), 선택 토글 동작
 - [ ] 붙여넣기 가로채기(이미지 → 첨부 저장 후 마크다운 삽입)
+- [x] **제목 줄 확대 패치**: gpui-kit/gpui-base 0.8 → `vendor/gpui-base` + `[patch.crates-io]` → `set_line_style(|line| LineStyle { text_scale, height_scale })`, wrapper 줄별 크기, 줄별 행 높이(`DisplayMap::display_row_top`/`display_row_at_y`) → ADR-0006, 패치 `docs/patches/`
 - [ ] (M2 후반) gpui 비의존 모듈을 `crates/{core, markdown}`로 분리 — 벤치/테스트가 gpui 없이 돌 때
 - **완료 기준**: 5,000단어 문서에서 키 입력→화면 반영 < 16ms(동기 경로), 지연 경로 재계산 < 50ms. 스팬 offset 골든 테스트(CommonMark 대표 예제 + Ulysses 구문 코퍼스) 통과. Ulysses 스크린샷 대비 마크업 색상 표 완성.
 

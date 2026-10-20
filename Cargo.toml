@@ -4,13 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gpui-kit = "0.7"
+gpui-kit = "0.8"
+# `LineStyle`처럼 gpui-kit이 다시 내보내지 않는 타입용. 버전은 gpui-kit과 맞춘다.
+gpui-base = "0.8"
 dirs = "5"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 ulid = "3"
 notify = "8"
 futures = "0.3"
+markdown = "1"
 
 [dev-dependencies]
 serde_json = "1"
@@ -21,3 +24,7 @@ debug = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# 제목 줄 확대를 위한 gpui-base 패치(PLAN §1.4).
+[patch.crates-io]
+gpui-base = { path = "vendor/gpui-base" }

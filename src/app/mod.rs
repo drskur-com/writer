@@ -198,6 +198,7 @@ impl WriterApp {
         }
 
         install_menus(cx);
+        self.refresh_markup(cx);
         #[cfg(not(target_os = "macos"))]
         self.menu_bar.update(cx, |menu_bar, cx| menu_bar.reload(cx));
         self.notify(message, window, cx);

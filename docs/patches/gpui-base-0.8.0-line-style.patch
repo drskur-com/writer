@@ -1,0 +1,1099 @@
+diff --git a/src/input/base/element.rs b/src/input/base/element.rs
+index 446bab6..b801144 100644
+--- a/src/input/base/element.rs
++++ b/src/input/base/element.rs
+@@ -624,7 +624,9 @@ impl<M: InputModeKind> TextElement<M> {
+         let visible_buffer_lines = &last_layout.visible_buffer_lines;
+         let caret_for = |row: usize, offset: usize, affinity: bool| -> Point<Pixels> {
+             // y of the top of buffer line `row` in content space.
+-            let top = line_height * state.display_map.buffer_line_to_display_row(row);
++            let top = state
++                .display_map
++                .display_row_top(state.display_map.buffer_line_to_display_row(row), line_height);
+             let line_origin = point(px(0.), top);
+ 
+             if let Some(vi) = visible_buffer_lines.iter().position(|&bl| bl == row) {
+@@ -640,12 +642,13 @@ impl<M: InputModeKind> TextElement<M> {
+             }
+             point(
+                 px(0.),
+-                line_height * state.display_map.offset_to_display_row(offset, affinity),
++                state.display_map.display_row_top(
++                    state.display_map.offset_to_display_row(offset, affinity),
++                    line_height,
++                ),
+             )
+         };
+ 
+-        let cursor_height = 0.85 * line_height;
+-
+         for selection in state.selections.iter() {
+             let is_active = selection.id == active_id;
+ 
+@@ -680,6 +683,10 @@ impl<M: InputModeKind> TextElement<M> {
+ 
+             let affinity = is_active && state.cursor_line_end_affinity;
+             let cursor_pos = caret_for(cursor_row, cursor, affinity);
++            // The caret follows its line's text size and is centered in its (maybe taller) row.
++            let line_style = state.display_map.line_style(cursor_row);
++            let row_height = line_height * line_style.height_scale;
++            let cursor_height = 0.85 * line_height * line_style.text_scale;
+             let cursor_start = caret_for(sel_start_row, selected_range.start, false);
+             let cursor_end = caret_for(sel_end_row, selected_range.end, false);
+ 
+@@ -715,7 +722,7 @@ impl<M: InputModeKind> TextElement<M> {
+                         scroll_offset.y = reveal_row(
+                             scroll_offset.y,
+                             cursor_pos.y,
+-                            line_height,
++                            row_height,
+                             bounds.size.height,
+                             top_bottom_margin,
+                         );
+@@ -754,7 +761,7 @@ impl<M: InputModeKind> TextElement<M> {
+                 bounds: Bounds::new(
+                     point(
+                         cursor_x,
+-                        bounds.top() + cursor_pos.y + ((line_height - cursor_height) / 2.),
++                        bounds.top() + cursor_pos.y + ((row_height - cursor_height) / 2.),
+                     ),
+                     size(CURSOR_WIDTH, cursor_height),
+                 ),
+@@ -831,6 +838,7 @@ impl<M: InputModeKind> TextElement<M> {
+         {
+             let mut offset = line_offset;
+             let alignment = last_layout.alignment_offset(line.longest_width);
++            let row_height = line.row_height_or(last_layout.line_height);
+             for (row, shaped) in line.wrapped_lines.iter().enumerate() {
+                 let end = offset + shaped.len;
+                 let start_ix = range.start.max(offset);
+@@ -852,12 +860,12 @@ impl<M: InputModeKind> TextElement<M> {
+                     corners.push(Corners {
+                         top_left: point(left, y),
+                         top_right: point(right, y),
+-                        bottom_left: point(left, y + last_layout.line_height),
+-                        bottom_right: point(right, y + last_layout.line_height),
++                        bottom_left: point(left, y + row_height),
++                        bottom_right: point(right, y + row_height),
+                     });
+                 }
+                 offset = end;
+-                y += last_layout.line_height;
++                y += row_height;
+             }
+         }
+         (!corners.is_empty()).then_some(corners)
+@@ -1098,7 +1106,6 @@ impl<M: InputModeKind> TextElement<M> {
+             return (0..1, vec![0], px(0.));
+         }
+ 
+-        let total_lines = state.display_map.wrap_row_count();
+         let display_count = state.display_map.display_row_count();
+         let buffer_line_count = state.display_map.buffer_line_count();
+         if display_count == 0 || buffer_line_count == 0 {
+@@ -1113,7 +1120,7 @@ impl<M: InputModeKind> TextElement<M> {
+         // Clamp as `layout_cursors` does, so we lay out the rows we paint.
+         // Ghost lines are left out: a tighter clamp only lays out extra rows
+         // above, and the last row stays in range.
+-        let scroll_height = line_height * total_lines
++        let scroll_height = state.display_map.content_height(line_height)
+             + empty_bottom_height(
+                 state.is_code_editor(),
+                 state.scroll_beyond_last_line,
+@@ -1122,15 +1129,18 @@ impl<M: InputModeKind> TextElement<M> {
+             );
+         scroll_top = clamp_vertical_scroll_offset(scroll_top, scroll_height, input_height);
+ 
+-        // Display rows are uniformly `line_height` tall, so the visible window maps
+-        // directly to a display-row range.
++        // Rows may be taller than `line_height` (see `LineStyle`), so the visible window
++        // maps to display rows through the display map's vertical geometry.
+         let viewport_top = (-scroll_top).max(px(0.));
+         let viewport_bottom = viewport_top + input_height;
+-        let line_height_f = f32::from(line_height);
+-        let first_display =
+-            ((f32::from(viewport_top) / line_height_f).floor() as usize).min(display_count - 1);
+-        let last_display =
+-            ((f32::from(viewport_bottom) / line_height_f).ceil() as usize).min(display_count - 1);
++        let first_display = state
++            .display_map
++            .display_row_at_y(viewport_top, line_height);
++        let last_display = (state
++            .display_map
++            .display_row_at_y(viewport_bottom, line_height)
++            + 1)
++        .min(display_count - 1);
+ 
+         let start_line = state.display_map.display_row_to_buffer_line(first_display);
+         let end_line = state.display_map.display_row_to_buffer_line(last_display);
+@@ -1140,8 +1150,8 @@ impl<M: InputModeKind> TextElement<M> {
+             .display_map
+             .buffer_line_to_display_row_range(start_line)
+         {
+-            Some(range) => line_height * range.start,
+-            None => line_height * first_display,
++            Some(range) => state.display_map.display_row_top(range.start, line_height),
++            None => state.display_map.display_row_top(first_display, line_height),
+         };
+ 
+         let visible_range = start_line..(end_line + 1 + extra_rows).min(buffer_line_count);
+@@ -1398,7 +1408,7 @@ impl<M: InputModeKind> TextElement<M> {
+                     });
+                 }
+ 
+-                offset_y += line.wrapped_lines.len() * last_layout.line_height;
++                offset_y += line.size(last_layout.line_height).height;
+             }
+ 
+             infos
+@@ -2138,6 +2148,8 @@ impl<M: InputModeKind> TextElement<M> {
+ 
+             let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
+             let mut line_has_background = false;
++            let line_style = line_item.style;
++            let line_font_size = font_size * line_style.text_scale;
+ 
+             for range in &line_item.wrapped_lines {
+                 let line_runs = runs_for_range(runs, run_offset, &range);
+@@ -2156,7 +2168,7 @@ impl<M: InputModeKind> TextElement<M> {
+                     align_runs_to_char_boundaries(&sub_line, &line_runs).unwrap_or(line_runs);
+                 let shaped_line = window
+                     .text_system()
+-                    .shape_line(sub_line, font_size, &line_runs, None);
++                    .shape_line(sub_line, line_font_size, &line_runs, None);
+ 
+                 line_has_background |= has_background(&line_runs);
+                 wrapped_lines.push(shaped_line);
+@@ -2178,7 +2190,11 @@ impl<M: InputModeKind> TextElement<M> {
+                 .lines(wrapped_lines)
+                 .wrap_indent(wrap_indent)
+                 .with_background(line_has_background)
+-                .with_whitespaces(whitespace_indicators.clone());
++                .with_whitespaces(whitespace_indicators.clone())
++                .row_height(
++                    (line_style.height_scale != 1.)
++                        .then(|| last_layout.line_height * line_style.height_scale),
++                );
+             lines.push(line_layout);
+ 
+             // +1 for the `\n`
+@@ -2880,7 +2896,6 @@ impl<M: InputModeKind> Element for TextElement<M> {
+         let ghost_line_count = ghost_lines.len();
+         let ghost_lines_height = ghost_line_count as f32 * line_height;
+ 
+-        let total_wrapped_lines = state.display_map.wrap_row_count();
+         let empty_bottom_height = empty_bottom_height(
+             state.is_code_editor(),
+             state.scroll_beyond_last_line,
+@@ -2897,7 +2912,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
+             } else {
+                 longest_line_width
+             },
+-            (total_wrapped_lines as f32 * line_height
++            (state.display_map.content_height(line_height)
+                 + empty_bottom_height.max(ghost_lines_height))
+             .max(bounds.size.height),
+         );
+@@ -3155,13 +3170,14 @@ impl<M: InputModeKind> Element for TextElement<M> {
+             offset_y += invisible_top_padding;
+ 
+             // Each item is the normal lines.
+-            for (lines, &buffer_line) in line_numbers
++            for ((lines, &buffer_line), line_layout) in line_numbers
+                 .iter()
+                 .zip(prepaint.last_layout.visible_buffer_lines.iter())
++                .zip(prepaint.last_layout.lines.iter())
+             {
+                 let is_active = prepaint.current_row == Some(buffer_line);
+                 let p = point(input_bounds.origin.x, origin.y + offset_y);
+-                let height = line_height * lines.len() as f32;
++                let height = line_layout.row_height_or(line_height) * lines.len() as f32;
+                 // Paint the current line background
+                 if is_active {
+                     if let Some(bg_color) = active_line_color {
+@@ -3365,14 +3381,16 @@ impl<M: InputModeKind> Element for TextElement<M> {
+             window.paint_quad(fill(gutter_bounds, gutter_bg));
+ 
+             // Each item is the normal lines.
+-            for (lines, &buffer_line) in line_numbers
++            for ((lines, &buffer_line), line_layout) in line_numbers
+                 .iter()
+                 .zip(prepaint.last_layout.visible_buffer_lines.iter())
++                .zip(prepaint.last_layout.lines.iter())
+             {
+                 let p = point(input_bounds.origin.x, origin.y + offset_y);
+                 let is_active = prepaint.current_row == Some(buffer_line);
++                let row_height = line_layout.row_height_or(line_height);
+ 
+-                let height = line_height * lines.len() as f32;
++                let height = row_height * lines.len() as f32;
+                 // paint active line number background
+                 if is_active {
+                     if let Some(bg_color) = active_line_color {
+@@ -3387,8 +3405,8 @@ impl<M: InputModeKind> Element for TextElement<M> {
+                 }
+ 
+                 for line in lines {
+-                    _ = line.paint(p, line_height, TextAlign::Left, None, window, cx);
+-                    offset_y += line_height;
++                    _ = line.paint(p, row_height, TextAlign::Left, None, window, cx);
++                    offset_y += row_height;
+                 }
+ 
+                 // Add ghost line height after cursor row for line numbers alignment
+@@ -4225,6 +4243,96 @@ mod tests {
+         });
+     }
+ 
++    #[gpui::test]
++    fn styled_lines_get_their_own_row_height_and_text_size(cx: &mut TestAppContext) {
++        let text = "# Title\nbody\nmore";
++        let (editor, window) = decoration_editor(cx, text, false);
++        let mut cx = VisualTestContext::from_window(window.into(), cx);
++        cx.update(|window, cx| {
++            editor.update(cx, |state, cx| {
++                state.set_line_style(
++                    Some(|line: &str| {
++                        if line.starts_with("# ") {
++                            crate::input::LineStyle {
++                                text_scale: 2.,
++                                height_scale: 2.5,
++                            }
++                        } else {
++                            crate::input::LineStyle::default()
++                        }
++                    }),
++                    cx,
++                );
++            });
++            window.draw(cx).clear(cx);
++            let state = editor.read(cx);
++            let layout = state.last_layout.as_ref().unwrap();
++            let lh = layout.line_height;
++            let map = &state.display_map;
++
++            // Vertical geometry: the heading row is 2.5 line heights tall.
++            assert_eq!(map.display_row_top(1, lh), lh * 2.5);
++            assert_eq!(map.display_row_top(2, lh), lh * 3.5);
++            assert_eq!(map.display_row_height(0, lh), lh * 2.5);
++            assert_eq!(map.display_row_height(1, lh), lh);
++            assert_eq!(map.content_height(lh), lh * 4.5);
++            assert_eq!(map.display_row_at_y(lh * 2.4, lh), 0);
++            assert_eq!(map.display_row_at_y(lh * 2.6, lh), 1);
++            assert_eq!(map.display_row_at_y(lh * 100., lh), 2);
++
++            // Layout: the heading line is taller and shaped with the larger font.
++            assert_eq!(layout.lines[0].size(lh).height, lh * 2.5);
++            assert_eq!(layout.lines[1].size(lh).height, lh);
++            let title = layout.lines[0].wrapped_lines[0].width;
++            let body = TextElement::<EditorMode>::layout_range_corners(&(8..12), layout).unwrap();
++            assert_eq!(body[0].top_left.y, layout.visible_top + lh * 2.5);
++            assert_eq!(body[0].bottom_left.y - body[0].top_left.y, lh);
++            let heading = TextElement::<EditorMode>::layout_range_corners(&(0..7), layout).unwrap();
++            assert_eq!(heading[0].bottom_left.y - heading[0].top_left.y, lh * 2.5);
++            assert!(title > layout.lines[1].wrapped_lines[0].width * 1.2);
++
++            // Hit testing: the lower part of the heading row is still the heading line.
++            let origin = state.last_bounds.unwrap().origin;
++            let (ix, _) = state.index_for_mouse_position(origin + point(px(1.), lh * 2.2));
++            assert!(ix <= 7, "{ix}");
++            let (ix, _) = state.index_for_mouse_position(origin + point(px(1.), lh * 2.7));
++            assert!((8..=12).contains(&ix), "{ix}");
++
++            // The caret on the heading follows the heading's text size.
++            let caret = layout.cursor_bounds.unwrap();
++            assert!(caret.size.height > lh * 1.5, "{caret:?}");
++        });
++    }
++
++    #[gpui::test]
++    fn styled_lines_soft_wrap_at_their_text_size(cx: &mut TestAppContext) {
++        let words = "word ".repeat(12);
++        let text = format!("# {words}\n{words}");
++        let (editor, window) = decoration_editor(cx, &text, true);
++        let mut cx = VisualTestContext::from_window(window.into(), cx);
++        cx.update(|window, cx| {
++            editor.update(cx, |state, cx| {
++                state.set_line_style(
++                    Some(|line: &str| crate::input::LineStyle {
++                        text_scale: if line.starts_with("# ") { 2. } else { 1. },
++                        height_scale: 1.,
++                    }),
++                    cx,
++                );
++            });
++            window.draw(cx).clear(cx);
++            let state = editor.read(cx);
++            let layout = state.last_layout.as_ref().unwrap();
++            let heading_rows = layout.lines[0].wrapped_lines.len();
++            let body_rows = layout.lines[1].wrapped_lines.len();
++            assert!(heading_rows > body_rows, "{heading_rows} vs {body_rows}");
++            let wrap_width = layout.wrap_width.unwrap();
++            for line in &layout.lines[0].wrapped_lines {
++                assert!(line.width <= wrap_width + px(1.), "{} > {wrap_width}", line.width);
++            }
++        });
++    }
++
+     #[gpui::test]
+     fn geometric_decorations_use_shaped_wrap_boundaries_and_newline_cells(cx: &mut TestAppContext) {
+         let text = "    héllo world héllo world héllo world héllo world\n\nlast";
+diff --git a/src/input/base/movement.rs b/src/input/base/movement.rs
+index 10304df..99c9ace 100644
+--- a/src/input/base/movement.rs
++++ b/src/input/base/movement.rs
+@@ -155,7 +155,8 @@ impl<M: InputModeKind> InputBaseState<M> {
+                 if let Some((x, line_end_affinity)) = line.closest_index_for_position(
+                     Point {
+                         x: preferred_x,
+-                        y: next_display_point.local_row * last_layout.line_height,
++                        y: next_display_point.local_row
++                            * line.row_height_or(last_layout.line_height),
+                     },
+                     last_layout,
+                 ) {
+diff --git a/src/input/base/state.rs b/src/input/base/state.rs
+index 295a585..4a9062f 100644
+--- a/src/input/base/state.rs
++++ b/src/input/base/state.rs
+@@ -1078,7 +1078,7 @@ impl<M: InputModeKind> InputBaseState<M> {
+             let prev_lines_offset = last_layout.visible_line_byte_offsets[vi];
+             let local_offset = offset.saturating_sub(prev_lines_offset);
+             if let Some(pos) = line.position_for_index(local_offset, last_layout, false) {
+-                let sub_line_index = (pos.y / line_height) as usize;
++                let sub_line_index = (pos.y / line.row_height_or(line_height)) as usize;
+                 let adjusted_pos = point(pos.x + last_layout.line_number_width, pos.y + y_offset);
+                 return (vi, sub_line_index, Some(adjusted_pos));
+             }
+@@ -2884,7 +2884,8 @@ impl<M: InputModeKind> InputBaseState<M> {
+         let display_row = self
+             .display_map
+             .offset_to_display_row(offset, self.line_end_affinity_at(offset));
+-        let row_offset_y = line_height * display_row;
++        let row_offset_y = self.display_map.display_row_top(display_row, line_height);
++        let row_height = self.display_map.display_row_height(display_row, line_height);
+ 
+         // For Right alignment use 0 margin: the cursor indicator is clamped inside bounds
+         // in layout_cursors, so shifting the text here would cause a first-click visual jump.
+@@ -2930,7 +2931,7 @@ impl<M: InputModeKind> InputBaseState<M> {
+         scroll_offset.y = super::element::reveal_row(
+             scroll_offset.y,
+             row_offset_y,
+-            line_height,
++            row_height,
+             bounds.size.height,
+             edge_height,
+         );
+@@ -3519,7 +3520,9 @@ impl<M: InputModeKind> InputBaseState<M> {
+             .zip(last_line_pos)
+             .zip(last_layout.visible_line_byte_offsets.last())
+             .map(|((line_layout, pos), line_start)| {
+-                let last_row_top = (line_layout.size(line_height).height - line_height).max(px(0.));
++                let last_row_top = (line_layout.size(line_height).height
++                    - line_layout.row_height_or(line_height))
++                .max(px(0.));
+                 let pos = point(pos.x, last_row_top);
+                 (
+                     self.resolve_index(line_start + line_layout.len()),
+@@ -4727,6 +4730,8 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
+ 
+         let mut start_origin = None;
+         let mut end_origin = None;
++        // The IME panel goes under the row of the range start, which may be a tall row.
++        let mut start_row_height = line_height;
+         let line_number_origin = point(line_number_width, px(0.));
+         let mut y_offset = last_layout.visible_top;
+ 
+@@ -4744,6 +4749,7 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
+                     false,
+                 ) {
+                     start_origin = Some(p + point(px(0.), y_offset));
++                    start_row_height = line.row_height_or(line_height);
+                 }
+             }
+ 
+@@ -4772,7 +4778,9 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
+         Some(Bounds::from_corners(
+             bounds.origin + line_number_origin + start_origin,
+             // + line_height for show IME panel under the cursor line.
+-            bounds.origin + line_number_origin + point(end_origin.x, end_origin.y + line_height),
++            bounds.origin
++                + line_number_origin
++                + point(end_origin.x, end_origin.y + start_row_height),
+         ))
+     }
+ 
+diff --git a/src/input/editor/display_map/display_map.rs b/src/input/editor/display_map/display_map.rs
+index 3bd072a..91bbb4f 100644
+--- a/src/input/editor/display_map/display_map.rs
++++ b/src/input/editor/display_map/display_map.rs
+@@ -12,7 +12,7 @@ use ropey::Rope;
+ use super::fold_map::FoldMap;
+ use super::folding::FoldRange;
+ pub use super::text_wrapper::WrappingIndent;
+-use super::text_wrapper::{LineItem, WrapDisplayPoint};
++use super::text_wrapper::{LineItem, LineStyle, LineStyleFn, WrapDisplayPoint};
+ use super::wrap_map::WrapMap;
+ use super::{BufferPoint, DisplayPoint};
+ use crate::input::Point as TreeSitterPoint;
+@@ -29,6 +29,12 @@ use crate::input::rope_ext::RopeExt as _;
+ pub struct DisplayMap {
+     wrap_map: WrapMap,
+     fold_map: FoldMap,
++    /// Display rows taller than the line height (from [`LineStyle::height_scale`]), sorted by
++    /// row: `(display_row, extra_rows)`, where `extra_rows` is the height beyond one line
++    /// height, in line heights. Empty when every line has the default style.
++    tall_rows: Vec<(usize, f32)>,
++    /// `tall_rows_prefix[i]` = sum of `extra_rows` of `tall_rows[..i]`.
++    tall_rows_prefix: Vec<f32>,
+ }
+ 
+ impl DisplayMap {
+@@ -36,6 +42,8 @@ impl DisplayMap {
+         Self {
+             wrap_map: WrapMap::new(font, font_size, wrap_width),
+             fold_map: FoldMap::new(),
++            tall_rows: Vec::new(),
++            tall_rows_prefix: Vec::new(),
+         }
+     }
+ 
+@@ -246,6 +254,98 @@ impl DisplayMap {
+         self.rebuild_fold_projection();
+     }
+ 
++    /// Set how each line is sized (see [`LineStyle`]); `None` restores uniform lines.
++    pub fn set_line_style(&mut self, line_style: Option<LineStyleFn>, cx: &mut App) {
++        self.wrap_map.set_line_style(line_style, cx);
++        self.rebuild_fold_projection();
++    }
++
++    /// Style of a buffer line.
++    pub fn line_style(&self, line: usize) -> LineStyle {
++        self.wrap_map
++            .line(line)
++            .map_or_else(LineStyle::default, |item| item.style)
++    }
++
++    // ==================== Vertical Geometry ====================
++
++    /// Extra height (in line heights) of the tall rows before `display_row`.
++    fn extra_rows_before(&self, display_row: usize) -> f32 {
++        let ix = self.tall_rows.partition_point(|&(row, _)| row < display_row);
++        self.tall_rows_prefix.get(ix).copied().unwrap_or(0.)
++    }
++
++    /// Top of a display row in content space. `display_row` may equal the row count, giving
++    /// the total content height.
++    pub fn display_row_top(&self, display_row: usize, line_height: Pixels) -> Pixels {
++        line_height * (display_row as f32 + self.extra_rows_before(display_row))
++    }
++
++    /// Height of a display row.
++    pub fn display_row_height(&self, display_row: usize, line_height: Pixels) -> Pixels {
++        let extra = match self.tall_rows.binary_search_by_key(&display_row, |&(row, _)| row) {
++            Ok(ix) => self.tall_rows[ix].1,
++            Err(_) => 0.,
++        };
++        line_height * (1. + extra)
++    }
++
++    /// Total height of all display rows.
++    pub fn content_height(&self, line_height: Pixels) -> Pixels {
++        self.display_row_top(self.display_row_count(), line_height)
++    }
++
++    /// Display row under content-space `y`, clamped to the existing rows.
++    pub fn display_row_at_y(&self, y: Pixels, line_height: Pixels) -> usize {
++        let count = self.display_row_count();
++        if count == 0 || line_height <= Pixels::ZERO {
++            return 0;
++        }
++        if self.tall_rows.is_empty() {
++            return ((y / line_height).max(0.) as usize).min(count - 1);
++        }
++        // Last row whose top is at or above `y`.
++        let (mut low, mut high) = (0, count);
++        while low + 1 < high {
++            let mid = (low + high) / 2;
++            if self.display_row_top(mid, line_height) <= y {
++                low = mid;
++            } else {
++                high = mid;
++            }
++        }
++        low
++    }
++
++    /// Recompute [`Self::tall_rows`] after wrap, fold or style changes.
++    fn rebuild_tall_rows(&mut self) {
++        self.tall_rows.clear();
++        self.tall_rows_prefix.clear();
++        if !self.wrap_map.wrapper().has_styled_lines() {
++            return;
++        }
++        let styled: Vec<(usize, f32)> = self
++            .wrap_map
++            .wrapper()
++            .iter_lines()
++            .enumerate()
++            .filter(|(_, item)| item.style.height_scale != 1.)
++            .map(|(line, item)| (line, item.style.height_scale - 1.))
++            .collect();
++        for (line, extra) in styled {
++            if let Some(rows) = self.buffer_line_to_display_row_range(line) {
++                self.tall_rows.extend(rows.map(|row| (row, extra)));
++            }
++        }
++        let mut sum = 0.;
++        self.tall_rows_prefix.reserve(self.tall_rows.len() + 1);
++        for &(_, extra) in &self.tall_rows {
++            self.tall_rows_prefix.push(sum);
++            sum += extra;
++        }
++        self.tall_rows_prefix.push(sum);
++    }
++
+     /// Set font parameters
+     pub fn set_font(&mut self, font: Font, font_size: Pixels, cx: &mut App) {
+         self.wrap_map.set_font(font, font_size, cx);
+@@ -279,6 +379,7 @@ impl DisplayMap {
+             self.fold_map
+                 .mark_dirty_with_wrap_count(self.wrap_map.wrap_row_count());
+         }
++        self.rebuild_tall_rows();
+     }
+ 
+     // ==================== Wrap Display Point Operations ====================
+diff --git a/src/input/editor/display_map/mod.rs b/src/input/editor/display_map/mod.rs
+index 0ebaf62..80e448c 100644
+--- a/src/input/editor/display_map/mod.rs
++++ b/src/input/editor/display_map/mod.rs
+@@ -18,6 +18,7 @@ mod wrap_map;
+ // Re-export public API
+ pub use self::display_map::{DisplayMap, WrappingIndent};
+ pub(crate) use self::text_wrapper::LineLayout;
++pub use self::text_wrapper::{LineStyle, LineStyleFn};
+ 
+ // Re-export FoldRange and extract_fold_ranges
+ pub use folding::FoldRange;
+diff --git a/src/input/editor/display_map/text_wrapper.rs b/src/input/editor/display_map/text_wrapper.rs
+index 4c59bf2..59b66a8 100644
+--- a/src/input/editor/display_map/text_wrapper.rs
++++ b/src/input/editor/display_map/text_wrapper.rs
+@@ -102,6 +102,37 @@ fn measured_wrap_boundaries(
+     result
+ }
+ 
++/// Per-line text size and row height, relative to the editor's font size and line height.
++///
++/// Lets a host enlarge whole lines (e.g. Markdown headings) without mixing font sizes inside a
++/// line. Every visual row of the line uses the same scale.
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub struct LineStyle {
++    /// Multiplier for the editor font size.
++    pub text_scale: f32,
++    /// Multiplier for the editor line height (each wrapped row of the line).
++    pub height_scale: f32,
++}
++
++impl Default for LineStyle {
++    fn default() -> Self {
++        Self {
++            text_scale: 1.,
++            height_scale: 1.,
++        }
++    }
++}
++
++impl LineStyle {
++    #[inline]
++    pub(crate) fn is_default(&self) -> bool {
++        *self == Self::default()
++    }
++}
++
++/// Decides the [`LineStyle`] of a buffer line from its text (without the trailing `\n`).
++pub type LineStyleFn = Rc<dyn Fn(&str) -> LineStyle>;
++
+ /// A line with soft wrapped lines info.
+ #[derive(Debug, Clone)]
+ pub(crate) struct LineItem {
+@@ -116,6 +147,8 @@ pub(crate) struct LineItem {
+     ///
+     /// Not contains the line end `\n`.
+     pub(crate) wrapped_lines: SmallVec<[Range<usize>; 1]>,
++    /// Text size and row height of this line.
++    pub(crate) style: LineStyle,
+ }
+ 
+ impl LineItem {
+@@ -143,6 +176,8 @@ pub(crate) struct LineSummary {
+     bytes: usize,
+     /// Byte length of the longest line in this subtree.
+     max_line_len: usize,
++    /// Number of lines with a non-default [`LineStyle`].
++    styled_lines: usize,
+     /// Buffer row (relative to this subtree) of the first line achieving `max_line_len`.
+     longest_row: usize,
+ }
+@@ -156,6 +191,7 @@ impl sum_tree::Summary for LineSummary {
+             wrap_rows: 0,
+             bytes: 0,
+             max_line_len: 0,
++            styled_lines: 0,
+             longest_row: 0,
+         }
+     }
+@@ -169,6 +205,7 @@ impl sum_tree::Summary for LineSummary {
+         self.buffer_rows += other.buffer_rows;
+         self.wrap_rows += other.wrap_rows;
+         self.bytes += other.bytes;
++        self.styled_lines += other.styled_lines;
+     }
+ }
+ 
+@@ -181,6 +218,7 @@ impl sum_tree::Item for LineItem {
+             wrap_rows: self.lines_len(),
+             bytes: self.len(),
+             max_line_len: self.len(),
++            styled_lines: usize::from(!self.style.is_default()),
+             longest_row: 0,
+         }
+     }
+@@ -228,6 +266,7 @@ pub(crate) struct TextWrapper {
+     pub(crate) lines: SumTree<LineItem>,
+ 
+     inline_metrics: Rc<[(Range<usize>, Pixels)]>,
++    line_style: Option<LineStyleFn>,
+     _initialized: bool,
+ }
+ 
+@@ -242,6 +281,7 @@ impl TextWrapper {
+             wrapping_indent: WrappingIndent::default(),
+             lines: SumTree::new(&()),
+             inline_metrics: Rc::from([]),
++            line_style: None,
+             _initialized: false,
+         }
+     }
+@@ -344,6 +384,20 @@ impl TextWrapper {
+         self.update_all(&self.text.clone(), cx);
+     }
+ 
++    /// Set how each line is sized, and re-wrap every line.
++    pub(crate) fn set_line_style(&mut self, line_style: Option<LineStyleFn>, cx: &mut App) {
++        self.line_style = line_style;
++        if self._initialized {
++            self.update_all(&self.text.clone(), cx);
++        }
++    }
++
++    /// Whether any line has a non-default [`LineStyle`].
++    #[inline]
++    pub(crate) fn has_styled_lines(&self) -> bool {
++        self.lines.summary().styled_lines > 0
++    }
++
+     pub(crate) fn prepare_if_need(&mut self, text: &Rope, cx: &mut App) -> bool {
+         if self._initialized {
+             return false;
+@@ -381,7 +435,8 @@ impl TextWrapper {
+             changed_text,
+             range,
+             new_text,
+-            &mut |line_str, wrap_width, line_start| {
++            &mut |line_str, wrap_width, line_start, text_scale| {
++                let font_size = font_size * text_scale;
+                 let mut fragments = Vec::new();
+                 let mut offset = 0;
+                 let first = metrics.partition_point(|(r, _)| r.end <= line_start);
+@@ -522,7 +577,7 @@ impl TextWrapper {
+         new_text: &Rope,
+         wrap_line: &mut F,
+     ) where
+-        F: FnMut(&str, Pixels, usize) -> Vec<gpui::Boundary>,
++        F: FnMut(&str, Pixels, usize, f32) -> Vec<gpui::Boundary>,
+     {
+         // Remove the old changed lines.
+         let buffer_line_count = self.lines_count();
+@@ -546,18 +601,25 @@ impl TextWrapper {
+             let mut wrapped_lines = SmallVec::<[Range<usize>; 1]>::new();
+             let mut prev_boundary_ix = 0;
+             let mut indent_chars = 0;
++            // Borrowed for lines within a single rope chunk.
++            let line_str: Cow<str> = line.into();
++            let style = self
++                .line_style
++                .as_ref()
++                .map_or_else(LineStyle::default, |line_style| line_style(&line_str));
+ 
+             // If wrap_width is Pixels::MAX, skip wrapping to disable word wrap
+             if let Some(wrap_width) = wrap_width {
+-                // Borrowed for lines within a single rope chunk.
+-                let line_str: Cow<str> = line.into();
+                 match self.wrapping_indent {
+                     WrappingIndent::Same => {
+                         // Here only have wrapped line, if there is no wrap meet, the `line_wraps`
+                         // result will empty.
+-                        for boundary in
+-                            wrap_line(&line_str, wrap_width, changed_text.line_start_offset(row))
+-                        {
++                        for boundary in wrap_line(
++                            &line_str,
++                            wrap_width,
++                            changed_text.line_start_offset(row),
++                            style.text_scale,
++                        ) {
+                             wrapped_lines.push(prev_boundary_ix..boundary.ix);
+                             prev_boundary_ix = boundary.ix;
+                             indent_chars = boundary.next_indent;
+@@ -566,8 +628,12 @@ impl TextWrapper {
+                     WrappingIndent::None => {
+                         // The first visual line keeps the line's leading indentation, so it is
+                         // wrapped as is.
+-                        let boundaries =
+-                            wrap_line(&line_str, wrap_width, changed_text.line_start_offset(row));
++                        let boundaries = wrap_line(
++                            &line_str,
++                            wrap_width,
++                            changed_text.line_start_offset(row),
++                            style.text_scale,
++                        );
+                         if let Some(first_ix) = boundaries.first().map(|b| b.ix) {
+                             wrapped_lines.push(prev_boundary_ix..first_ix);
+                             prev_boundary_ix = first_ix;
+@@ -576,6 +642,7 @@ impl TextWrapper {
+                                 &line_str[first_ix..],
+                                 wrap_width,
+                                 changed_text.line_start_offset(row) + first_ix,
++                                style.text_scale,
+                             ) {
+                                 let ix = first_ix + boundary.ix;
+                                 wrapped_lines.push(prev_boundary_ix..ix);
+@@ -595,6 +662,7 @@ impl TextWrapper {
+                 len: line.len(),
+                 indent: indent_chars,
+                 wrapped_lines,
++                style,
+             });
+         }
+ 
+@@ -749,6 +817,9 @@ pub(crate) struct LineLayout {
+     /// Whether any run of this line carries a background color, so [`Self::paint_background`]
+     /// can skip the glyph walk for the common case of a line without highlights.
+     has_background: bool,
++    /// Height of each visual row of this line, when it differs from the editor line height
++    /// (see [`LineStyle`]).
++    row_height: Option<Pixels>,
+ }
+ 
+ impl LineLayout {
+@@ -761,9 +832,22 @@ impl LineLayout {
+             whitespace_chars: Vec::new(),
+             whitespace_indicators: None,
+             has_background: false,
++            row_height: None,
+         }
+     }
+ 
++    /// Set the height of each visual row, overriding the editor line height.
++    pub(crate) fn row_height(mut self, row_height: Option<Pixels>) -> Self {
++        self.row_height = row_height;
++        self
++    }
++
++    /// Height of each visual row of this line.
++    #[inline]
++    pub(crate) fn row_height_or(&self, line_height: Pixels) -> Pixels {
++        self.row_height.unwrap_or(line_height)
++    }
++
+     /// Record whether any run of this line carries a background color.
+     pub(crate) fn with_background(mut self, has_background: bool) -> Self {
+         self.has_background = has_background;
+@@ -888,7 +972,7 @@ impl LineLayout {
+             // Always advance by actual line length. The last line gets +1 so the
+             // cursor can be placed after the final character.
+             acc_len += if is_last { line.len + 1 } else { line.len };
+-            offset_y += last_layout.line_height;
++            offset_y += self.row_height_or(last_layout.line_height);
+         }
+ 
+         None
+@@ -929,7 +1013,7 @@ impl LineLayout {
+         let x_offset = last_layout.alignment_offset(self.longest_width);
+ 
+         for (i, line) in self.wrapped_lines.iter().enumerate() {
+-            let line_bottom = line_top + last_layout.line_height;
++            let line_bottom = line_top + self.row_height_or(last_layout.line_height);
+             if pos.y >= line_top && pos.y < line_bottom {
+                 return Some((i, offset, pos.x - x_offset - self.line_indent(i)));
+             }
+@@ -1013,7 +1097,7 @@ impl LineLayout {
+             .map(|(ix, line)| line.width + self.line_indent(ix))
+             .max()
+             .unwrap_or(self.longest_width);
+-        size(width, self.wrapped_lines.len() * line_height)
++        size(width, self.wrapped_lines.len() * self.row_height_or(line_height))
+     }
+ 
+     /// Paint only the glyph background quads of this line.
+@@ -1035,6 +1119,7 @@ impl LineLayout {
+             return;
+         }
+ 
++        let line_height = self.row_height_or(line_height);
+         for (ix, line) in self.wrapped_lines.iter().enumerate() {
+             _ = line.paint_background(
+                 pos + point(self.line_indent(ix), ix * line_height),
+@@ -1056,6 +1141,7 @@ impl LineLayout {
+         window: &mut Window,
+         cx: &mut App,
+     ) {
++        let line_height = self.row_height_or(line_height);
+         for (ix, line) in self.wrapped_lines.iter().enumerate() {
+             _ = line.paint(
+                 pos + point(self.line_indent(ix), ix * line_height),
+@@ -1213,7 +1299,7 @@ mod tests {
+                 &text,
+                 &(start..previous.len()),
+                 &inserted,
+-                &mut |line, width, _| {
++                &mut |line, width, _, _| {
+                     measured_wrap_boundaries(line, width, WrappingIndent::None, measure)
+                 },
+             );
+@@ -1264,7 +1350,7 @@ mod tests {
+             "Hello, 世界!\r\nThis is second line.\nThis is third line.\n这里是第 4 行。",
+         );
+ 
+-        fn fake_wrap_line(_line: &str, _wrap_width: Pixels, _: usize) -> Vec<Boundary> {
++        fn fake_wrap_line(_line: &str, _wrap_width: Pixels, _: usize, _: f32) -> Vec<Boundary> {
+             vec![]
+         }
+ 
+@@ -1461,7 +1547,7 @@ mod tests {
+     fn test_longest_row_after_shrink() {
+         let mut wrapper = TextWrapper::new(test_font(), px(14.), None);
+         let mut text = Rope::from("aa\nthis is the longest line\nbb");
+-        wrapper._update(&text, &(0..text.len()), &text, &mut |_, _, _| vec![]);
++        wrapper._update(&text, &(0..text.len()), &text, &mut |_, _, _, _| vec![]);
+         assert_eq!(wrapper.longest_row(), 1);
+ 
+         // Shrink line 1 so line 2-equivalent isn't longest.
+@@ -1471,7 +1557,7 @@ mod tests {
+         let range = start..end;
+         let new_text = "a very very long first line now";
+         text.replace(range.clone(), new_text);
+-        wrapper._update(&text, &range, &Rope::from(new_text), &mut |_, _, _| vec![]);
++        wrapper._update(&text, &range, &Rope::from(new_text), &mut |_, _, _, _| vec![]);
+         assert_eq!(wrapper.longest_row(), 0);
+     }
+ 
+@@ -1480,7 +1566,7 @@ mod tests {
+     fn test_edit_last_line_and_full_delete() {
+         let mut wrapper = TextWrapper::new(test_font(), px(14.), None);
+         let mut text = Rope::from("one\ntwo\nthree");
+-        wrapper._update(&text, &(0..text.len()), &text, &mut |_, _, _| vec![]);
++        wrapper._update(&text, &(0..text.len()), &text, &mut |_, _, _, _| vec![]);
+         assert_eq!(wrapper.lines_count(), 3);
+ 
+         // Replace the last line only.
+@@ -1488,14 +1574,14 @@ mod tests {
+         let range = start..text.len();
+         let new_text = "THREE EDITED";
+         text.replace(range.clone(), new_text);
+-        wrapper._update(&text, &range, &Rope::from(new_text), &mut |_, _, _| vec![]);
++        wrapper._update(&text, &range, &Rope::from(new_text), &mut |_, _, _, _| vec![]);
+         assert_eq!(wrapper.lines_count(), 3);
+         assert_eq!(wrapper.line(2).unwrap().len(), "THREE EDITED".len());
+ 
+         // Delete everything.
+         let range = 0..text.len();
+         text.replace(range.clone(), "");
+-        wrapper._update(&text, &range, &Rope::from(""), &mut |_, _, _| vec![]);
++        wrapper._update(&text, &range, &Rope::from(""), &mut |_, _, _, _| vec![]);
+         assert_eq!(wrapper.lines_count(), 1);
+         assert_eq!(wrapper.len(), 1);
+         assert_eq!(wrapper.line(0).unwrap().wrapped_lines.as_slice(), [0..0]);
+@@ -1511,16 +1597,19 @@ mod tests {
+                     len: 2,
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..2],
++                    style: LineStyle::default(),
+                 },
+                 LineItem {
+                     len: 4,
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..2, 2..4],
++                    style: LineStyle::default(),
+                 },
+                 LineItem {
+                     len: 1,
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..1],
++                    style: LineStyle::default(),
+                 },
+             ],
+             &(),
+@@ -1550,7 +1639,7 @@ mod tests {
+     fn test_wrap_row_queries_after_incremental_splice() {
+         let mut wrapper = TextWrapper::new(test_font(), px(14.), Some(px(10.)));
+         let mut text = Rope::from("aa\nbbbb\nc");
+-        let mut fake_wrap_line = |line: &str, _wrap_width: Pixels, _: usize| {
++        let mut fake_wrap_line = |line: &str, _wrap_width: Pixels, _: usize, _: f32| {
+             if line.len() > 2 {
+                 vec![Boundary {
+                     ix: 2,
+@@ -1682,11 +1771,13 @@ mod tests {
+                     len: Rope::from("first line").len(),
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..10],
++                    style: LineStyle::default(),
+                 },
+                 LineItem {
+                     len: Rope::from("this one wraps").len(),
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..9, 9..14],
++                    style: LineStyle::default(),
+                 },
+             ],
+             &(),
+@@ -1738,24 +1829,28 @@ mod tests {
+                     len: Rope::from("Hello, 世界!\r").len(),
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..15],
++                    style: LineStyle::default(),
+                 },
+                 // range: 16..36
+                 LineItem {
+                     len: Rope::from("This is second line.\n").len(),
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..10, 10..20],
++                    style: LineStyle::default(),
+                 },
+                 // range: 37..56
+                 LineItem {
+                     len: Rope::from("This is third line.\n").len(),
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..9, 9..15, 15..20],
++                    style: LineStyle::default(),
+                 },
+                 // range: 57..79
+                 LineItem {
+                     len: Rope::from("这里是第 4 行。").len(),
+                     indent: 0,
+                     wrapped_lines: smallvec::smallvec![0..22],
++                    style: LineStyle::default(),
+                 },
+             ],
+             &(),
+@@ -1830,7 +1925,7 @@ mod tests {
+         let mut wrapper = TextWrapper::new(test_font(), px(14.0), Some(px(10.)));
+         wrapper.wrapping_indent = WrappingIndent::Same;
+         let text = Rope::from("  abcdefghijklmnopqrstuv");
+-        let mut fake_wrap_line = |line: &str, _wrap_width: Pixels, _: usize| {
++        let mut fake_wrap_line = |line: &str, _wrap_width: Pixels, _: usize, _: f32| {
+             if line.starts_with(' ') {
+                 vec![Boundary {
+                     ix: 5,
+@@ -1862,7 +1957,7 @@ mod tests {
+         let mut wrapper = TextWrapper::new(test_font(), px(14.0), Some(px(10.)));
+         wrapper.wrapping_indent = WrappingIndent::None;
+         let text = Rope::from("  abcdefghijklmnopqrstuv");
+-        let mut fake_wrap_line = |line: &str, _wrap_width: Pixels, _: usize| {
++        let mut fake_wrap_line = |line: &str, _wrap_width: Pixels, _: usize, _: f32| {
+             if line.starts_with(' ') {
+                 vec![Boundary {
+                     ix: 5,
+diff --git a/src/input/editor/display_map/wrap_map.rs b/src/input/editor/display_map/wrap_map.rs
+index 0cbb3d0..8ceaf2c 100644
+--- a/src/input/editor/display_map/wrap_map.rs
++++ b/src/input/editor/display_map/wrap_map.rs
+@@ -10,7 +10,9 @@ use gpui::{App, Font, Pixels};
+ use ropey::Rope;
+ 
+ use super::fold_map::FoldMap;
+-use super::text_wrapper::{LineItem, TextWrapper, WrapDisplayPoint, WrappingIndent};
++use super::text_wrapper::{
++    LineItem, LineStyleFn, TextWrapper, WrapDisplayPoint, WrappingIndent,
++};
+ use super::{BufferPoint, WrapPoint};
+ use crate::input::RopeExt;
+ 
+@@ -129,6 +131,11 @@ impl WrapMap {
+         self.wrapper.set_wrapping_indent(wrapping_indent, cx);
+     }
+ 
++    /// Set how each line is sized (see [`LineStyle`]).
++    pub(super) fn set_line_style(&mut self, line_style: Option<LineStyleFn>, cx: &mut App) {
++        self.wrapper.set_line_style(line_style, cx);
++    }
++
+     /// Set font parameters
+     pub(super) fn set_font(&mut self, font: Font, font_size: Pixels, cx: &mut App) {
+         self.wrapper.set_font(font, font_size, cx);
+diff --git a/src/input/editor/indent.rs b/src/input/editor/indent.rs
+index d50bff1..4aa2f49 100644
+--- a/src/input/editor/indent.rs
++++ b/src/input/editor/indent.rs
+@@ -128,6 +128,7 @@ impl<M: InputModeKind> TextElement<M> {
+             .zip(last_layout.lines.iter())
+         {
+             let line = state.text.slice_line(buffer_line);
++            let line_height = line_layout.row_height_or(line_height);
+             let mut current_indents = vec![];
+             if line.len() > 0 {
+                 let indent_count = tab_size.indent_count(&line);
+@@ -153,7 +154,7 @@ impl<M: InputModeKind> TextElement<M> {
+                 current_indents = last_indents.clone();
+             }
+ 
+-            offset_y += line_layout.wrapped_lines.len() * line_height;
++            offset_y += line_layout.size(line_height).height;
+             last_indents = current_indents;
+         }
+ 
+diff --git a/src/input/editor/mod.rs b/src/input/editor/mod.rs
+index 6850df7..c948c58 100644
+--- a/src/input/editor/mod.rs
++++ b/src/input/editor/mod.rs
+@@ -277,3 +277,22 @@ impl crate::input::InputExtras for super::EditorExtras {
+         )
+     }
+ }
++
++impl InputBaseState<EditorMode> {
++    /// Size whole lines from their text, e.g. to enlarge Markdown headings.
++    ///
++    /// `line_style` gets each buffer line without its trailing `\n` and returns its
++    /// [`super::LineStyle`]: a font size multiplier and a row height multiplier. It is called
++    /// again for every edited line, so it should be cheap and depend only on the line text.
++    /// Pass `None` to make every line uniform again.
++    pub fn set_line_style(
++        &mut self,
++        line_style: Option<impl Fn(&str) -> super::LineStyle + 'static>,
++        cx: &mut gpui::Context<Self>,
++    ) {
++        let line_style =
++            line_style.map(|line_style| std::rc::Rc::new(line_style) as super::LineStyleFn);
++        self.display_map.set_line_style(line_style, cx);
++        cx.notify();
++    }
++}
+diff --git a/src/input/mod.rs b/src/input/mod.rs
+index 6c5c2c1..8bad6fc 100644
+--- a/src/input/mod.rs
++++ b/src/input/mod.rs
+@@ -90,7 +90,9 @@ pub use diagnostics::{
+     Diagnostic, DiagnosticEntry, DiagnosticRelatedInformation, DiagnosticSet, DiagnosticSeverity,
+     DiagnosticSummary, DiagnosticTag, RelatedInformation,
+ };
+-pub use display_map::{BufferPoint, DisplayMap, DisplayPoint, FoldRange, WrappingIndent};
++pub use display_map::{
++    BufferPoint, DisplayMap, DisplayPoint, FoldRange, LineStyle, LineStyleFn, WrappingIndent,
++};
+ pub use editor::{Editor, EditorState};
+ pub use highlighting::{
+     DiagnosticColors, FoldIconRenderer, HighlightStyleResolver, InputEditorStyle, InputHighlighter,

@@ -24,11 +24,11 @@
 | --- | --- | --- | --- | --- | --- |
 | 마크다운 시트 편집 | P0 | `Entity<EditorState>` + 로프 | `input::Editor`, gpui-base 엔진 | M2 | ⬜ |
 | 소프트랩 / 가독 폭 | P0 | `soft_wrap(true)`, `wrapping_indent`, 최대폭 + 중앙 정렬 | DisplayMap wrap_map | M2 | ⬜ |
-| 마크업 스타일링(마크어 흐림, 굵게/기울임/코드/링크) | P0 | 자체 스팬 → `TextDecorationCollection` | decorations API | M2 | ⬜ |
+| 마크업 스타일링(마크어 흐림, 굵게/기울임/코드/링크) | P0 | 자체 스팬 → `TextDecorationCollection` | decorations API | M2 | ✅ |
 | 커서 블록 마커 복원 | P0 | 현재 줄 range 검사 후 스타일 오버라이드 | — | M2 | ⬜ |
 | 인용/리스트 좌측 레일 | P1 | `RangeDecoration(Fill)` | decorations | M2 | ⬜ |
 | 코드펜스 언어 하이라이트 | P1 | tree-sitter(코드펜스 내부) | `highlighter` | M2 | ⬜ |
-| 제목 크기 확대(인라인 리치) | P2 | **제약**: `HighlightStyle.font_size` 부재 → 프리뷰에서 | — | M4 | ⛔ |
+| 제목 크기 확대(줄 단위, H1~H6) | P1 | ATX 레벨별 글자·행 높이 배율, gpui-base 패치(ADR-0006) | display_map / wrapper | M2 | ✅ |
 | 포맷 액션/단축키(굵게/기울임/제목/리스트/인용/코드/링크) | P0 | `actions!` + keymap | `gpui` 액션 | M2 | ⬜ |
 | 다중 커서/선택 | P0 | 엔진 기본 | `add_selection` | M2 | ⬜ |
 | 되돌리기/다시실행 | P0 | 엔진 기본(세션 내), 세션 밖 히스토리는 P2 | `UndoManager` | M2 | ⬜ |

@@ -1,7 +1,10 @@
 //! 에디터 영역: 떠 있는 툴바 + 본문, 열린 시트의 편집·자동 저장.
 
-use gpui_kit::component::input::{Editor, EditorState, InputEvent};
+use gpui_base::input::LineStyle;
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::input::{
+    Editor, EditorState, InputEvent, TextDecoration, TextDecorationCollection,
+};
 use gpui_kit::gpui::prelude::StatefulInteractiveElement as _;
 use gpui_kit::gpui::*;
 use std::cell::Cell;
@@ -11,10 +14,32 @@ use std::time::Duration;
 
 use super::WriterApp;
 use super::style::*;
+use crate::markdown::{self, Span, SpanKind};
 use crate::{TogglePreview, icons, library};
 
 /// 마지막 입력 후 자동 저장까지 기다리는 시간.
 const AUTOSAVE_DELAY: Duration = Duration::from_secs(1);
+
+/// 마지막 입력 후 마크업 표시를 다시 계산하기까지 기다리는 시간.
+/// 그 사이 기존 표시는 편집을 따라 움직인다.
+const MARKUP_DELAY: Duration = Duration::from_millis(150);
+
+/// 마크업 기호(`#`, `**`, `[]()` 등)를 흐리게 하는 정도.
+const MARKER_FADE: f32 = 0.6;
+
+/// 인용 본문을 흐리게 하는 정도.
+const QUOTE_FADE: f32 = 0.3;
+
+/// 제목 레벨(H1~H6)별 (글자 크기 배율, 줄 높이 배율). 본문 대비.
+/// 줄 높이를 글자보다 더 키워 제목 위아래에 여백을 둔다.
+const HEADING_SCALES: [(f32, f32); 6] = [
+    (1.6, 2.0),
+    (1.4, 1.75),
+    (1.25, 1.5),
+    (1.15, 1.25),
+    (1.05, 1.25),
+    (1.0, 1.0),
+];
 
 /// 본문 최대 폭(가독 폭). 창이 넓으면 가운데에 둔다.
 const EDITOR_MAX_WIDTH: f32 = 680.0;
@@ -43,9 +68,138 @@ pub(super) struct OpenSheet {
     words: usize,
     /// 자동 저장 대기 태스크. 입력이 오면 새로 만들어 이전 대기를 취소한다.
     autosave: Option<Task<()>>,
+    markup: Markup,
+    /// 마크업 재계산 대기 태스크(자동 저장과 같은 방식).
+    markup_refresh: Option<Task<()>>,
     /// 지금 적용한 좌우 여백. 영역 폭이 바뀔 때만 다시 넣는다.
     side_padding: Rc<Cell<Pixels>>,
     _subscription: Subscription,
+}
+
+/// 제목 줄은 레벨에 따라 글자와 줄 높이를 키운다(gpui-base 패치, ADR-0006).
+fn heading_line_style(line: &str) -> LineStyle {
+    match markdown::heading_level(line) {
+        Some(level) => {
+            let (text_scale, height_scale) = HEADING_SCALES[usize::from(level) - 1];
+            LineStyle {
+                text_scale,
+                height_scale,
+            }
+        }
+        None => LineStyle::default(),
+    }
+}
+
+/// 마크다운 마크업 표시. 겹치는 스팬이 같은 스타일 속성을 다투지 않도록 종류별로 나눈다.
+/// 먼저 만든 묶음이 우선한다.
+struct Markup {
+    /// ATX 제목 굵기와 `#` 흐림. 줄 크기와 함께 바뀌도록 키 입력마다 즉시 다시 계산한다.
+    headings: TextDecorationCollection,
+    /// 기호 흐림.
+    markers: TextDecorationCollection,
+    /// 굵게·기울임·취소선·인라인 코드·링크.
+    inline: TextDecorationCollection,
+    /// setext 제목·인용·코드 블록.
+    blocks: TextDecorationCollection,
+}
+
+impl Markup {
+    fn new(state: &Entity<EditorState>, cx: &mut App) -> Self {
+        state.update(cx, |state, cx| Self {
+            headings: state.create_decorations_collection(Vec::new(), cx),
+            markers: state.create_decorations_collection(Vec::new(), cx),
+            inline: state.create_decorations_collection(Vec::new(), cx),
+            blocks: state.create_decorations_collection(Vec::new(), cx),
+        })
+    }
+
+    /// ATX 제목 표시를 원문에서 바로 다시 계산한다. 줄 텍스트만 보므로 긴 문서도 가볍다.
+    fn apply_headings(&self, text: &str, cx: &mut App) {
+        let decorations = markdown::heading_spans(text)
+            .into_iter()
+            .map(|span| {
+                let style = match span.kind {
+                    SpanKind::Marker => HighlightStyle {
+                        fade_out: Some(MARKER_FADE),
+                        ..Default::default()
+                    },
+                    _ => FontWeight::BOLD.into(),
+                };
+                TextDecoration::new(span.range, style)
+            })
+            .collect();
+        self.headings.set(decorations, cx);
+    }
+
+    /// 파서 스팬으로 표시를 바꾼다. 색은 지금 테마에서 가져온다.
+    fn apply(&self, spans: Vec<Span>, cx: &mut App) {
+        let theme = cx.theme();
+        let code_background = theme.muted;
+        let link = theme.link;
+        let (mut markers, mut inline, mut blocks) = (Vec::new(), Vec::new(), Vec::new());
+        for span in spans {
+            let (target, style) = match span.kind {
+                SpanKind::Marker => (
+                    &mut markers,
+                    HighlightStyle {
+                        fade_out: Some(MARKER_FADE),
+                        ..Default::default()
+                    },
+                ),
+                SpanKind::Strong => (&mut inline, FontWeight::BOLD.into()),
+                SpanKind::Emphasis => (&mut inline, FontStyle::Italic.into()),
+                SpanKind::Strikethrough => (
+                    &mut inline,
+                    HighlightStyle {
+                        strikethrough: Some(StrikethroughStyle {
+                            thickness: px(1.0),
+                            color: None,
+                        }),
+                        ..Default::default()
+                    },
+                ),
+                SpanKind::InlineCode => (
+                    &mut inline,
+                    HighlightStyle {
+                        background_color: Some(code_background),
+                        ..Default::default()
+                    },
+                ),
+                SpanKind::Link => (
+                    &mut inline,
+                    HighlightStyle {
+                        color: Some(link),
+                        underline: Some(UnderlineStyle {
+                            thickness: px(1.0),
+                            color: None,
+                            wavy: false,
+                        }),
+                        ..Default::default()
+                    },
+                ),
+                // setext 제목. ATX 제목은 `apply_headings`가 맡는다.
+                SpanKind::Heading(_) => (&mut blocks, FontWeight::BOLD.into()),
+                SpanKind::Quote => (
+                    &mut blocks,
+                    HighlightStyle {
+                        fade_out: Some(QUOTE_FADE),
+                        ..Default::default()
+                    },
+                ),
+                SpanKind::CodeBlock => (
+                    &mut blocks,
+                    HighlightStyle {
+                        background_color: Some(code_background),
+                        ..Default::default()
+                    },
+                ),
+            };
+            target.push(TextDecoration::new(span.range, style));
+        }
+        self.markers.set(markers, cx);
+        self.inline.set(inline, cx);
+        self.blocks.set(blocks, cx);
+    }
 }
 
 impl WriterApp {
@@ -221,9 +375,13 @@ impl WriterApp {
                 .folding(false)
                 .cursor_surrounding_lines(Some(CURSOR_MARGIN_LINES))
                 .scroll_beyond_last_line(Some(CURSOR_MARGIN_LINES));
-            state.set_value(text, window, cx);
+            state.set_line_style(Some(heading_line_style), cx);
+            state.set_value(text.clone(), window, cx);
             state
         });
+        let markup = Markup::new(&state, cx);
+        markup.apply_headings(&text, cx);
+        markup.apply(markdown::spans(&text), cx);
         let subscription = cx.subscribe_in(
             &state,
             window,
@@ -245,18 +403,55 @@ impl WriterApp {
             disk_modified,
             words,
             autosave: None,
+            markup,
+            markup_refresh: None,
             side_padding: Rc::new(Cell::new(px(-1.0))),
             _subscription: subscription,
         });
     }
 
-    /// 본문이 바뀌면 단어 수를 갱신하고 자동 저장을 (다시) 예약한다.
+    /// 테마가 바뀌면 열린 시트의 마크업 색을 다시 입힌다.
+    pub(super) fn refresh_markup(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = &self.editor {
+            let text = editor.state.read(cx).value();
+            editor.markup.apply(markdown::spans(&text), cx);
+        }
+    }
+
+    /// 본문이 바뀌면 단어 수를 갱신하고 자동 저장·마크업 재계산을 (다시) 예약한다.
     fn on_editor_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = &mut self.editor else {
             return;
         };
         editor.dirty = true;
         editor.words = library::count_words(editor.state.read(cx).text().chars());
+        // 제목 크기는 엔진이 즉시 바꾸므로 굵기·`#` 흐림도 같은 프레임에 맞춘다.
+        let text = editor.state.read(cx).value();
+        editor.markup.apply_headings(&text, cx);
+        editor.markup_refresh = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(MARKUP_DELAY).await;
+            let Ok(text) = this.update(cx, |this, cx| {
+                this.editor
+                    .as_ref()
+                    .map(|editor| editor.state.read(cx).value())
+            }) else {
+                return;
+            };
+            let Some(text) = text else {
+                return;
+            };
+            // 긴 문서(2만 단어 ≈ 35ms)도 UI 스레드를 막지 않도록 파싱은 백그라운드에서.
+            let spans = cx
+                .background_executor()
+                .spawn(async move { markdown::spans(&text) })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(editor) = &this.editor {
+                    editor.markup.apply(spans, cx);
+                }
+            })
+            .ok();
+        }));
         editor.autosave = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(AUTOSAVE_DELAY).await;
             this.update_in(cx, |this, window, cx| {
@@ -318,6 +513,8 @@ impl WriterApp {
         editor.disk_modified = modified;
         editor
             .state
-            .update(cx, |state, cx| state.set_value(text, window, cx));
+            .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
+        editor.markup.apply_headings(&text, cx);
+        editor.markup.apply(markdown::spans(&text), cx);
     }
 }

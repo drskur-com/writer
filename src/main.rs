@@ -7,6 +7,7 @@ mod assets;
 mod config;
 mod icons;
 mod library;
+mod markdown;
 mod menus;
 mod theme;
 mod watch;

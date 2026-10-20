@@ -17,6 +17,7 @@
 | [0003](./0003-library-layout-and-folder-ux.md) | 라이브러리는 단일 루트 + 섹션(Inbox/Notes/Projects) 하위 폴더로 둔다 | Accepted (일부 Superseded by 0005) | 2026-10-20 |
 | [0004](./0004-icon-pack.md) | 아이콘 팩은 Lucide 전체 카탈로그(AllAssets)를 쓰고 매핑을 한 곳에 둔다 | Accepted | 2026-10-20 |
 | [0005](./0005-group-meta-in-group-folder.md) | 그룹 메타는 그룹 폴더의 `.writer.toml`에 둔다 | Accepted | 2026-10-20 |
+| [0006](./0006-heading-line-style-gpui-base-patch.md) | 에디터 제목 줄 확대는 gpui-base를 vendor 패치해 줄 단위 LineStyle로 한다 | Proposed | 2026-10-20 |
 
 ## 작성 규칙
 
