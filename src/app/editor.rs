@@ -453,6 +453,7 @@ impl WriterApp {
             }
         }
         self.selected_sheet = path;
+        self.selected_sheets.clear();
         self.open_file = None;
         self.book_style = None;
         if focus && let Some(editor) = &self.editor {

@@ -215,6 +215,16 @@ pub fn link() -> IconName {
     IconName::Link
 }
 
+/// 시트 접합.
+pub fn glue() -> IconName {
+    IconName::Link2
+}
+
+/// 시트 접합 해제.
+pub fn unglue() -> IconName {
+    IconName::Unlink2
+}
+
 pub fn paragraph() -> IconName {
     IconName::Pilcrow
 }

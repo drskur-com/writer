@@ -231,6 +231,34 @@ impl WriterApp {
         cx.notify();
     }
 
+    /// 그룹의 `range` 시트를 접합하거나(`glue`) 앞뒤 시트에서 떼어 내고 그룹 메타에 저장한다.
+    pub(super) fn set_glued(
+        &mut self,
+        group_path: &std::path::Path,
+        range: std::ops::Range<usize>,
+        glue: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = self
+            .library
+            .as_mut()
+            .and_then(|lib| lib.find_group_mut(group_path))
+        else {
+            return;
+        };
+        let result = if glue {
+            library::glue_sheets(group, range)
+        } else {
+            library::unglue_sheets(group, range)
+        };
+        if let Err(err) = result {
+            self.notify(format!("시트 접합을 저장할 수 없습니다: {err}"), window, cx);
+            return;
+        }
+        cx.notify();
+    }
+
     /// 파일 그룹에서 파일 순서를 바꾸고 그룹 메타에 저장한다.
     pub(super) fn move_file(
         &mut self,

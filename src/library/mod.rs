@@ -28,8 +28,8 @@ pub use document::{count_words, read_sheet, write_sheet};
 pub use files::{FileItem, FileKind, GroupKind, format_size, move_file};
 pub use layout::{FolderKind, initialize, inspect};
 pub use meta::{
-    create_group, create_project, create_sheet, move_sheet, move_to_trash, set_sort,
-    set_sort_descending, update_group, update_project,
+    create_group, create_project, create_sheet, glue_sheets, move_sheet, move_to_trash, set_sort,
+    set_sort_descending, unglue_sheets, update_group, update_project,
 };
 pub use preview::{Preview, read_preview};
 pub use style::{
@@ -184,6 +184,9 @@ pub struct Sheet {
     pub modified: u128,
     /// 만든 시각(나노초). 파일명이 ULID면 거기서, 아니면(밖에서 가져온 파일) 파일 메타데이터에서 얻는다.
     pub created: u128,
+    /// 앞 시트에 접합됐는지(그룹 메타 `glued`). 접합한 시트는 프리뷰·내보내기에서 앞 시트와 하나로 이어진다.
+    /// 그룹의 첫 시트에는 의미가 없다.
+    pub glued: bool,
 }
 
 /// 그룹(폴더). 프로젝트도 `Projects/` 바로 아래의 그룹이다.
@@ -376,6 +379,9 @@ fn scan_group(dir: &Path, project: bool) -> io::Result<Group> {
     // 메타에 나열된 파일을 그 순서대로 앞에 두고, 나머지는 최근 수정순으로 뒤에 붙인다.
     sort_recent_first(&mut sheets);
     order_by_names(&mut sheets, &meta.sheets, sheet_file_name);
+    for sheet in &mut sheets {
+        sheet.glued = meta.glued.contains(&sheet_file_name(sheet));
+    }
     sort_groups(&mut groups, &meta);
     let files = match kind {
         GroupKind::Files => files::scan_files(dir, &meta.files)?,
@@ -461,6 +467,7 @@ fn sheet_from_path(path: &Path) -> Sheet {
         path: path.to_path_buf(),
         modified,
         created: created_nanos(path).unwrap_or(modified),
+        glued: false,
     }
 }
 

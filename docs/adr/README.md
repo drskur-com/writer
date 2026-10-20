@@ -23,6 +23,7 @@
 | [0009](./0009-project-book-styles.md) | 책 스타일은 프로젝트 `.writer.toml`의 `[styles.<대상>]`에 두고, 다른 프로젝트에서는 값을 복사해 가져온다 | Proposed | 2026-10-20 |
 | [0010](./0010-editor-book-layout.md) | 에디터는 책 스타일대로 문단을 배치하고, 블록 사이 여백은 앞 줄 아래에 둔다 | Proposed | 2026-10-20 |
 | [0011](./0011-line-per-paragraph-editing.md) | 에디터에서는 줄 하나가 문단이고, 파일에는 표준 마크다운으로 변환해 저장한다 | Proposed | 2026-10-20 |
+| [0012](./0012-sheet-glue-flag.md) | 시트 접합은 파일을 합치지 않고 그룹 메타 `glued`에 "앞 시트에 이어짐"으로 적는다 | Proposed | 2026-10-20 |
 
 ## 작성 규칙
 

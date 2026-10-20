@@ -59,8 +59,13 @@ pub(crate) struct WriterApp {
     expanded_groups: std::collections::HashSet<PathBuf>,
     /// 사이드바에서 선택한 항목(섹션/그룹). None이면 기본 선택을 쓴다.
     selected: Option<Selection>,
-    /// 선택한 시트.
+    /// 선택한 시트(에디터에 연 시트).
     selected_sheet: Option<PathBuf>,
+    /// Shift+클릭으로 넓힌 시트 선택(연 시트 포함, 목록 순서). 비면 `selected_sheet`만 선택이다.
+    selected_sheets: Vec<PathBuf>,
+    /// 시트를 끄는 중: (끄는 시트, 지금 올라가 있는 시트)의 목록 위치. 놓일 자리 표시에 쓴다.
+    /// 끌기가 끝났는지는 `has_active_drag`로 본다.
+    sheet_drop: Option<(usize, usize)>,
     /// 온보딩 화면에 표시할 안내/오류 문구.
     notice: Option<SharedString>,
     /// 읽어 둔 시트 미리보기(경로 → 읽은 시점의 수정 시각, 미리보기).
@@ -115,6 +120,8 @@ impl WriterApp {
             expanded_groups: std::collections::HashSet::new(),
             selected: None,
             selected_sheet: None,
+            selected_sheets: Vec::new(),
+            sheet_drop: None,
             previews: std::collections::HashMap::new(),
             preview_task: None,
             editor: None,

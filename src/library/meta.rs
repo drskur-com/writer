@@ -1,6 +1,7 @@
 //! 그룹 메타(`<Group>/.writer.toml`) 읽기/쓰기, 프로젝트·그룹·시트 파일 만들기와 순서 바꾸기.
 
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use super::{
@@ -20,6 +21,8 @@ pub(super) struct GroupMeta {
     pub(super) title: Option<String>,
     /// 시트 파일명 순서. 나열되지 않은 파일은 뒤에 이름순으로 붙는다.
     pub(super) sheets: Vec<String>,
+    /// 앞 시트에 접합한 시트 파일명.
+    pub(super) glued: Vec<String>,
     /// 하위 그룹 폴더 이름 순서. 나열되지 않은 그룹은 뒤에 이름순으로 붙는다.
     pub(super) groups: Vec<String>,
     /// 시트 정렬 방법(`SortMode::key`).
@@ -65,18 +68,94 @@ pub(super) fn write_group_meta_if_absent(
 /// 그룹 안에서 시트를 `from` 위치에서 `to` 위치로 옮기고, 새 순서를 `.writer.toml`에 쓴다.
 ///
 /// 범위를 벗어나면 아무것도 하지 않는다. 쓰기에 실패하면 메모리의 순서도 되돌린다.
+/// 접합한 시트는 묶음째 옮긴다(ADR-0012). 놓는 자리가 다른 묶음이면 그 묶음 앞(위로 옮길 때)이나
+/// 뒤(아래로 옮길 때)에 놓아 묶음을 가르지 않는다. 같은 묶음 안에 놓으면 그대로 둔다.
 pub fn move_sheet(group: &mut Group, from: usize, to: usize) -> io::Result<()> {
     if from >= group.sheets.len() || to >= group.sheets.len() || from == to {
         return Ok(());
     }
-    let sheet = group.sheets.remove(from);
-    group.sheets.insert(to, sheet);
-    let order: Vec<String> = group.sheets.iter().map(sheet_file_name).collect();
-    let order = order.into_iter().map(toml::Value::String).collect();
-    if let Err(err) = write_meta_values(&group.path, [("sheets", Some(toml::Value::Array(order)))])
-    {
-        let sheet = group.sheets.remove(to);
-        group.sheets.insert(from, sheet);
+    let block = glued_block(group, from);
+    let target = glued_block(group, to);
+    if block == target {
+        return Ok(());
+    }
+    let before = group.sheets.clone();
+    let moved: Vec<_> = group.sheets.drain(block.clone()).collect();
+    // 묶음을 빼낸 뒤의 자리: 위로 옮기면 대상 묶음 앞, 아래로 옮기면 대상 묶음 뒤.
+    let at = if target.start < block.start {
+        target.start
+    } else {
+        target.end - block.len()
+    };
+    group.sheets.splice(at..at, moved);
+    write_order_and_glue(group, before)
+}
+
+/// `index` 시트가 든 접합 묶음(접합하지 않은 시트는 자기 하나).
+fn glued_block(group: &Group, index: usize) -> Range<usize> {
+    let glued = |index: usize| index > 0 && group.sheets[index].glued;
+    let mut start = index;
+    while glued(start) {
+        start -= 1;
+    }
+    let mut end = index + 1;
+    while end < group.sheets.len() && group.sheets[end].glued {
+        end += 1;
+    }
+    start..end
+}
+
+/// `range`의 시트를 하나로 잇는다: 첫 시트 뒤의 시트를 모두 앞 시트에 접합한다.
+///
+/// 지금 순서를 메타 `sheets`에도 적는다. 순서가 정해지지 않은 시트는 수정할 때마다 자리가 바뀌어
+/// 접합한 이웃이 달라질 수 있어서다.
+pub fn glue_sheets(group: &mut Group, range: Range<usize>) -> io::Result<()> {
+    let end = range.end.min(group.sheets.len());
+    if range.start + 1 >= end {
+        return Ok(());
+    }
+    let before = group.sheets.clone();
+    for sheet in &mut group.sheets[range.start + 1..end] {
+        sheet.glued = true;
+    }
+    write_order_and_glue(group, before)
+}
+
+/// `range`의 시트를 앞뒤 시트에서 떼어 낸다: 범위의 시트와 범위 바로 뒤 시트의 접합을 푼다.
+pub fn unglue_sheets(group: &mut Group, range: Range<usize>) -> io::Result<()> {
+    let end = (range.end + 1).min(group.sheets.len());
+    if range.start >= end {
+        return Ok(());
+    }
+    let before = group.sheets.clone();
+    for sheet in &mut group.sheets[range.start..end] {
+        sheet.glued = false;
+    }
+    write_order_and_glue(group, before)
+}
+
+/// 시트 순서와 접합을 메타에 쓴다. 실패하면 `before`로 되돌린다.
+fn write_order_and_glue(group: &mut Group, before: Vec<super::Sheet>) -> io::Result<()> {
+    let names = |glued_only: bool| -> Vec<toml::Value> {
+        group
+            .sheets
+            .iter()
+            .enumerate()
+            .filter(|(index, sheet)| !glued_only || (*index > 0 && sheet.glued))
+            .map(|(_, sheet)| toml::Value::String(sheet_file_name(sheet)))
+            .collect()
+    };
+    let order = names(false);
+    let glued = names(true);
+    let glued = (!glued.is_empty()).then_some(toml::Value::Array(glued));
+    if let Err(err) = write_meta_values(
+        &group.path,
+        [
+            ("sheets", Some(toml::Value::Array(order))),
+            ("glued", glued),
+        ],
+    ) {
+        group.sheets = before;
         return Err(err);
     }
     Ok(())
@@ -651,6 +730,53 @@ mod tests {
         assert_eq!(titles, vec!["b", "c", "a"]);
         assert_eq!(rescanned.icon.as_deref(), Some("inbox"));
         assert!(!inbox.join(format!("{GROUP_META_FILE}.tmp")).exists());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn glue_and_unglue_sheets() {
+        let root = temp_dir("glue");
+        initialize(&root).unwrap();
+        let inbox = root.join("Notes").join(DEFAULT_INBOX);
+        for stem in ["a", "b", "c", "d"] {
+            std::fs::write(inbox.join(format!("{stem}.md")), stem).unwrap();
+        }
+        std::fs::write(
+            inbox.join(GROUP_META_FILE),
+            "sheets = [\"a.md\", \"b.md\", \"c.md\", \"d.md\"]\n",
+        )
+        .unwrap();
+        let glued =
+            |group: &Group| -> Vec<bool> { group.sheets.iter().map(|sheet| sheet.glued).collect() };
+
+        let mut group = scan_group(&inbox, false).unwrap();
+        glue_sheets(&mut group, 0..3).unwrap();
+        assert_eq!(glued(&group), vec![false, true, true, false]);
+        assert_eq!(read_group_meta(&inbox).glued, vec!["b.md", "c.md"]);
+        assert_eq!(glued(&scan_group(&inbox, false).unwrap()), glued(&group));
+
+        // 가운데 시트를 떼면 앞뒤 모두 떨어진다.
+        unglue_sheets(&mut group, 1..2).unwrap();
+        assert_eq!(glued(&group), vec![false, false, false, false]);
+        let text = std::fs::read_to_string(inbox.join(GROUP_META_FILE)).unwrap();
+        assert!(!text.contains("glued"), "{text}");
+
+        // 접합한 시트는 묶음째 옮기고, 다른 묶음을 가르지 않는다.
+        glue_sheets(&mut group, 1..3).unwrap(); // a [b c] d
+        let order = |group: &Group| -> Vec<String> { group.sheets.iter().map(stem).collect() };
+        move_sheet(&mut group, 2, 3).unwrap();
+        assert_eq!(order(&group), vec!["a", "d", "b", "c"]);
+        assert_eq!(glued(&group), vec![false, false, false, true]);
+        move_sheet(&mut group, 0, 3).unwrap();
+        assert_eq!(order(&group), vec!["d", "b", "c", "a"]);
+        move_sheet(&mut group, 3, 2).unwrap(); // c 위에 놓으면 묶음 앞으로
+        assert_eq!(order(&group), vec!["d", "a", "b", "c"]);
+        move_sheet(&mut group, 2, 3).unwrap(); // 같은 묶음 안은 그대로
+        assert_eq!(order(&group), vec!["d", "a", "b", "c"]);
+        let rescanned = scan_group(&inbox, false).unwrap();
+        assert_eq!(order(&rescanned), order(&group));
+        assert_eq!(glued(&rescanned), vec![false, false, false, true]);
 
         std::fs::remove_dir_all(&root).ok();
     }

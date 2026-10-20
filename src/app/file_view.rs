@@ -242,7 +242,11 @@ impl WriterApp {
             match &manual_group {
                 Some(group_path) => {
                     let group_path = group_path.clone();
-                    let dragged = DraggedSheet { index, label, pal };
+                    let dragged = DraggedSheet {
+                        index,
+                        labels: vec![label],
+                        pal,
+                    };
                     row.on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
                         .drag_over::<DraggedSheet>(move |style, dragged, _, _| {
                             if dragged.index < index {

@@ -1,7 +1,7 @@
 //! 사이드바 2단: 시트 목록(카드, 끌어서 정렬, 순서 애니메이션).
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::*;
 use gpui_kit::gpui::prelude::{
     FluentBuilder, InteractiveElement as _, StatefulInteractiveElement as _,
@@ -9,6 +9,7 @@ use gpui_kit::gpui::prelude::{
 use gpui_kit::gpui::*;
 
 use super::library_ops::SortChange;
+use super::library_panel::menu_row;
 use super::style::*;
 use super::{GroupSort, Selection, WriterApp};
 use crate::{NewSheet, icons, library};
@@ -26,6 +27,10 @@ const TITLE_LINE_HEIGHT: f32 = 20.0;
 /// 카드 발췌 줄 높이(px).
 const EXCERPT_LINE_HEIGHT: f32 = 16.0;
 
+/// 접합 표시 선 굵기와, 이어지지 않는 쪽 끝을 카드 안으로 들이는 정도(px).
+const GLUE_BAR_WIDTH: f32 = 3.0;
+const GLUE_BAR_INSET: f32 = 14.0;
+
 /// 순서가 바뀐 시트 카드가 새 자리로 옮겨 가는 스프링.
 const SHEET_ROW_SPRING: SpringConfig = SpringConfig::new(500.0, 45.0, 1.0);
 
@@ -38,32 +43,79 @@ pub(super) fn sheet_label(preview: Option<&library::Preview>) -> String {
     }
 }
 
+/// 끄는 접합 묶음 미리보기에 보일 최대 시트 수. 넘으면 "외 N개"로 줄인다.
+const DRAG_PREVIEW_MAX_SHEETS: usize = 5;
+
 /// 시트 목록에서 끌고 있는 시트. 끄는 동안 커서를 따라다니는 미리보기로도 그린다.
 /// 파일 그룹의 파일을 끌 때도 같은 모양을 쓴다.
 #[derive(Clone)]
 pub(super) struct DraggedSheet {
     /// 그룹 안에서의 원래 위치.
     pub(super) index: usize,
-    pub(super) label: SharedString,
+    /// 함께 옮기는 시트 이름(목록 순서). 접합 묶음이면 여럿이다(ADR-0012).
+    pub(super) labels: Vec<SharedString>,
     pub(super) pal: Palette,
 }
 
 impl Render for DraggedSheet {
+    /// 시트 하나는 이름 한 줄. 접합 묶음은 한 덩어리로 옮겨 가는 것이 보이게 이름을 이어 붙이고
+    /// 목록처럼 왼쪽 선으로 잇는다.
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let pal = self.pal;
+        let card = div()
             .px_3()
             .py_2()
             .max_w(px(SHEET_COLUMN_WIDTH - 32.0))
-            .truncate()
             .rounded_md()
             .border_1()
-            .border_color(self.pal.border)
-            .bg(self.pal.background)
+            .border_color(pal.border)
+            .bg(pal.background)
             .shadow_md()
             .text_sm()
-            .font_semibold()
-            .text_color(self.pal.foreground)
-            .child(self.label.clone())
+            .text_color(pal.foreground);
+        if self.labels.len() < 2 {
+            return card
+                .truncate()
+                .font_semibold()
+                .children(self.labels.first().cloned());
+        }
+        let rest = self.labels.len().saturating_sub(DRAG_PREVIEW_MAX_SHEETS);
+        let lines = self
+            .labels
+            .iter()
+            .take(DRAG_PREVIEW_MAX_SHEETS)
+            .map(|label| {
+                div()
+                    .h(px(TITLE_LINE_HEIGHT))
+                    .line_height(px(TITLE_LINE_HEIGHT))
+                    .truncate()
+                    .font_semibold()
+                    .child(label.clone())
+            });
+        card.flex()
+            .gap_2()
+            .child(
+                div()
+                    .w(px(GLUE_BAR_WIDTH))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(pal.accent),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .children(lines)
+                    .when(rest > 0, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(pal.muted)
+                                .child(format!("외 {rest}개 시트")),
+                        )
+                    }),
+            )
     }
 }
 
@@ -223,10 +275,43 @@ impl WriterApp {
                 Some(Selection::Section(kind)) => kind.dir().to_string(),
                 None => String::new(),
             };
+            // 접합은 수동 순서에서만 뜻이 있다(앞 시트에 이어짐).
+            let glued: Vec<bool> = sheets
+                .iter()
+                .enumerate()
+                .map(|(index, sheet)| group_path.is_some() && index > 0 && sheet.glued)
+                .collect();
+            // 끄는 중이면 놓일 자리: (시트 위치, 위쪽인지). 접합 묶음은 묶음째 옮기므로(ADR-0012)
+            // 대상 묶음의 앞(위로 옮길 때)이나 뒤(아래로 옮길 때) 가장자리에만 보인다.
+            let drop_edge =
+                self.sheet_drop
+                    .filter(|_| cx.has_active_drag())
+                    .and_then(|(from, over)| {
+                        let (block, target) =
+                            (glued_block(&glued, from), glued_block(&glued, over));
+                        if block == target {
+                            None
+                        } else if target.start < block.start {
+                            Some((target.start, true))
+                        } else {
+                            Some((target.end - 1, false))
+                        }
+                    });
+            let labels: Vec<SharedString> = sheets
+                .iter()
+                .map(|sheet| {
+                    sheet_label(self.previews.get(&sheet.path).map(|(_, preview)| preview)).into()
+                })
+                .collect();
+            let paths: std::rc::Rc<Vec<std::path::PathBuf>> =
+                std::rc::Rc::new(sheets.iter().map(|sheet| sheet.path.clone()).collect());
             let mut items: Vec<AnyElement> = Vec::with_capacity(sheets.len());
             for (index, sheet) in sheets.into_iter().enumerate() {
                 let path = sheet.path.clone();
-                let selected = self.selected_sheet.as_ref() == Some(&path);
+                let selected = self.selected_sheet.as_ref() == Some(&path)
+                    || self.selected_sheets.contains(&path);
+                let (glued_prev, glued_next) =
+                    (glued[index], glued.get(index + 1).copied().unwrap_or(false));
                 let preview = self.previews.get(&path).map(|(_, preview)| preview);
                 let is_empty = preview.is_some_and(|preview| preview.is_empty());
                 let excerpt = preview
@@ -240,7 +325,8 @@ impl WriterApp {
                     .overflow_hidden()
                     .py_3()
                     .border_b_1()
-                    .border_color(if selected {
+                    // 접합한 시트끼리는 구분선 없이 붙인다.
+                    .border_color(if selected || glued_next {
                         gpui_kit::gpui::transparent_black()
                     } else {
                         pal.panel_border
@@ -273,22 +359,58 @@ impl WriterApp {
                                 .child(excerpt),
                         )
                     });
-                let card = div().h_full().px_2().child(
-                    div()
-                        .h_full()
-                        .px_2()
-                        .rounded_md()
-                        .when(selected, |this| this.bg(pal.active))
-                        .child(content),
-                );
+                let card = div()
+                    .h_full()
+                    .px_2()
+                    .child(
+                        div()
+                            .h_full()
+                            .px_2()
+                            .rounded_md()
+                            .when(selected, |this| this.bg(pal.active))
+                            .child(content),
+                    )
+                    // 접합한 시트는 왼쪽 선으로 잇는다. 이어지는 쪽은 카드 끝까지 긋는다.
+                    .when(glued_prev || glued_next, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .left(px(3.0))
+                                .w(px(GLUE_BAR_WIDTH))
+                                .top(px(if glued_prev { 0.0 } else { GLUE_BAR_INSET }))
+                                .bottom(px(if glued_next { 0.0 } else { GLUE_BAR_INSET }))
+                                .rounded_full()
+                                .bg(pal.accent),
+                        )
+                    })
+                    .context_menu({
+                        let (app, path, paths) =
+                            (cx.entity().downgrade(), path.clone(), paths.clone());
+                        let group_path = group_path.clone();
+                        move |menu, _, cx| {
+                            sheet_menu(menu, &app, &path, &paths, group_path.as_deref(), cx)
+                        }
+                    });
 
                 // 끌어다 놓을 자리는 카드를 감싼 줄의 위/아래 선으로 보여준다.
                 let row = div()
                     .id(SharedString::from(format!("sheet-{}", path.display())))
                     .cursor_pointer()
                     .on_click(cx.listener({
-                        let path = path.clone();
-                        move |this, _, window, cx| {
+                        let (path, paths) = (path.clone(), paths.clone());
+                        move |this, event: &ClickEvent, window, cx| {
+                            // Shift+클릭: 연 시트부터 누른 시트까지 넓혀 고른다(연 시트는 그대로).
+                            if event.modifiers().shift
+                                && let Some(range) = this
+                                    .selected_sheet
+                                    .as_ref()
+                                    .and_then(|anchor| paths.iter().position(|p| p == anchor))
+                                    .map(|anchor| anchor.min(index)..anchor.max(index) + 1)
+                            {
+                                this.selected_sheets = paths[range].to_vec();
+                                cx.notify();
+                                return;
+                            }
                             this.select_sheet(Some(path.clone()), false, window, cx);
                         }
                     }))
@@ -296,23 +418,37 @@ impl WriterApp {
                 let row = match &group_path {
                     Some(group_path) => {
                         let group_path = group_path.clone();
+                        // 접합 묶음은 묶음째 옮기므로 미리보기도 묶음 전체다.
                         let dragged = DraggedSheet {
                             index,
-                            label: label.into(),
+                            labels: labels[glued_block(&glued, index)].to_vec(),
                             pal,
                         };
                         row.on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
-                            .drag_over::<DraggedSheet>(move |style, dragged, _, _| {
-                                if dragged.index < index {
-                                    style.border_b_2().border_color(pal.accent)
-                                } else if dragged.index > index {
-                                    style.border_t_2().border_color(pal.accent)
-                                } else {
-                                    style
+                            .on_drag_move(cx.listener(
+                                move |this, event: &DragMoveEvent<DraggedSheet>, _, cx| {
+                                    if !event.bounds.contains(&event.event.position) {
+                                        return;
+                                    }
+                                    let drop = Some((event.drag(cx).index, index));
+                                    if this.sheet_drop != drop {
+                                        this.sheet_drop = drop;
+                                        cx.notify();
+                                    }
+                                },
+                            ))
+                            .map(|row| match drop_edge {
+                                Some((edge, true)) if edge == index => {
+                                    row.border_t_2().border_color(pal.accent)
                                 }
+                                Some((edge, false)) if edge == index => {
+                                    row.border_b_2().border_color(pal.accent)
+                                }
+                                _ => row,
                             })
                             .on_drop(cx.listener(
                                 move |this, dragged: &DraggedSheet, window, cx| {
+                                    this.sheet_drop = None;
                                     this.move_sheet(&group_path, dragged.index, index, window, cx);
                                 },
                             ))
@@ -337,6 +473,16 @@ impl WriterApp {
                 .id("sheet-list")
                 .flex_1()
                 .overflow_y_scroll()
+                // 목록 밖으로 끌고 나가면 놓일 자리 표시를 지운다.
+                .on_drag_move(
+                    cx.listener(|this, event: &DragMoveEvent<DraggedSheet>, _, cx| {
+                        if !event.bounds.contains(&event.event.position)
+                            && this.sheet_drop.take().is_some()
+                        {
+                            cx.notify();
+                        }
+                    }),
+                )
                 .child(
                     div()
                         .relative()
@@ -383,4 +529,79 @@ impl WriterApp {
             )
             .child(list)
     }
+}
+
+/// `index` 시트가 든 접합 묶음(`glued[i]` = i번 시트가 앞 시트에 이어짐). `library::move_sheet`와 같은 규칙이다.
+fn glued_block(glued: &[bool], index: usize) -> std::ops::Range<usize> {
+    let mut start = index;
+    while start > 0 && glued[start] {
+        start -= 1;
+    }
+    let mut end = index + 1;
+    while glued.get(end).copied().unwrap_or(false) {
+        end += 1;
+    }
+    start..end
+}
+
+/// 시트 카드 우클릭 메뉴: 시트 접합, 접합 해제.
+///
+/// 누른 시트가 선택(Shift+클릭) 안에 있으면 선택한 시트 전체에, 아니면 누른 시트에 적용한다.
+/// 접합은 수동 순서 그룹(`group_path`)에서만 할 수 있다.
+fn sheet_menu(
+    menu: PopupMenu,
+    app: &WeakEntity<WriterApp>,
+    path: &std::path::Path,
+    paths: &[std::path::PathBuf],
+    group_path: Option<&std::path::Path>,
+    cx: &App,
+) -> PopupMenu {
+    let Some(clicked) = paths.iter().position(|p| p == path) else {
+        return menu;
+    };
+    let (range, sheets) = match app.upgrade() {
+        Some(app) => {
+            let app = app.read(cx);
+            let selected: Vec<usize> = app
+                .selected_sheets
+                .iter()
+                .filter_map(|selected| paths.iter().position(|p| p == selected))
+                .collect();
+            let range = match (selected.iter().min(), selected.iter().max()) {
+                (Some(&start), Some(&end)) if selected.contains(&clicked) => start..end + 1,
+                _ => clicked..clicked + 1,
+            };
+            let sheets = group_path
+                .and_then(|group| app.library.as_ref()?.find_group(group))
+                .map(|group| group.sheets.clone())
+                .unwrap_or_default();
+            (range, sheets)
+        }
+        None => return menu,
+    };
+    let glued = |index: usize| index > 0 && sheets.get(index).is_some_and(|sheet| sheet.glued);
+    // 접합: 둘 이상 골랐고 아직 다 이어지지 않았을 때. 해제: 범위 안이나 바로 뒤가 이어져 있을 때.
+    let can_glue = range.len() > 1 && (range.start + 1..range.end).any(|index| !glued(index));
+    let can_unglue = (range.start..range.end + 1).any(glued);
+    let item = |icon, label, enabled: bool, glue: bool| {
+        let (app, group, range) = (
+            app.clone(),
+            group_path.map(std::path::Path::to_path_buf),
+            range.clone(),
+        );
+        PopupMenuItem::element(move |_, _| menu_row(icon, label, None))
+            .disabled(!enabled || group.is_none())
+            .on_click(move |_, window, cx| {
+                let Some(group) = &group else {
+                    return;
+                };
+                app.update(cx, |app, cx| {
+                    app.set_glued(group, range.clone(), glue, window, cx)
+                })
+                .ok();
+            })
+    };
+    menu.min_w(px(200.0))
+        .item(item(icons::glue(), "시트 접합", can_glue, true))
+        .item(item(icons::unglue(), "접합 해제", can_unglue, false))
 }
