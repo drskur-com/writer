@@ -26,6 +26,11 @@ pub fn group_icon(name: Option<&str>) -> IconName {
     name.map(by_name).unwrap_or(IconName::Folder)
 }
 
+/// 설정 창의 "일반" 페이지.
+pub fn settings() -> IconName {
+    IconName::Settings
+}
+
 /// 사이드바 토글 아이콘(패널).
 pub fn panel() -> IconName {
     IconName::PanelLeft

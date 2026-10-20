@@ -22,6 +22,8 @@ pub struct Config {
     pub recent_libraries: Vec<PathBuf>,
     /// 마지막으로 선택한 테마 이름. 없으면 기본 라이트.
     pub theme: Option<String>,
+    /// 에디터 서체 이름. 없으면 시스템 서체.
+    pub editor_font: Option<String>,
 }
 
 /// 설정 디렉터리 (`<config_dir>/Writer`).

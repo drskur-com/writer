@@ -9,6 +9,7 @@ mod icons;
 mod library;
 mod markdown;
 mod menus;
+mod settings;
 mod theme;
 mod watch;
 
@@ -60,6 +61,9 @@ fn main() {
 
             // macOS: 네이티브 메뉴 / Windows·Linux: 인윈도우 AppMenuBar용 메뉴 등록
             install_menus(cx);
+            settings::Prefs::init(&config, cx);
+            // 설정 창은 어느 창에 포커스가 있든(또는 없든) 열 수 있어야 하므로 앱 전역에서 받는다.
+            cx.on_action(|_: &OpenSettings, cx| settings::open(cx));
 
             // 최소 단축키
             cx.bind_keys([
@@ -67,6 +71,8 @@ fn main() {
                 KeyBinding::new("ctrl-s", SaveSheet, None),
                 KeyBinding::new("ctrl-o", OpenLibrary, None),
                 KeyBinding::new("ctrl-,", OpenSettings, None),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-,", OpenSettings, None),
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),
                 KeyBinding::new("ctrl-shift-l", ToggleTheme, None),
             ]);

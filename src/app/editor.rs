@@ -261,7 +261,7 @@ impl WriterApp {
                         .appearance(false)
                         .bordered(false)
                         .size_full()
-                        .font_family(cx.theme().font_family.clone())
+                        .font_family(crate::settings::Prefs::editor_font_family(cx))
                         .text_size(px(EDITOR_FONT_SIZE))
                         .line_height(relative(EDITOR_LINE_HEIGHT)),
                 )

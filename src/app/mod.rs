@@ -18,7 +18,7 @@ use gpui_kit::component::menu::AppMenuBar;
 
 use crate::menus::install_menus;
 use crate::{
-    APP_NAME, CloseLibrary, OpenLibrary, OpenSettings, QuitApp, SaveSheet, SetTheme, ShowAbout,
+    APP_NAME, CloseLibrary, OpenLibrary, QuitApp, SaveSheet, SetTheme, ShowAbout,
     TogglePreview, ToggleSidebar, ToggleTheme, config, icons, library, theme,
 };
 use style::*;
@@ -52,6 +52,7 @@ pub(crate) struct WriterApp {
     editor: Option<editor::OpenSheet>,
     /// 앱 종료 직전에 열린 시트를 저장하는 구독.
     _quit_subscription: Subscription,
+    _prefs_subscription: Subscription,
     /// 라이브러리 폴더 감시(watcher + 변경 시 다시 스캔하는 태스크). 버리면 멈춘다.
     watcher: Option<(notify::RecommendedWatcher, Task<()>)>,
     #[cfg(not(target_os = "macos"))]
@@ -72,6 +73,8 @@ impl WriterApp {
             this.update(cx, |this, cx| this.close_sheet(cx)).ok();
             true
         });
+        // 설정(서체 등)이 바뀌면 다시 그린다.
+        let prefs_subscription = cx.observe_global::<crate::settings::Prefs>(|_, cx| cx.notify());
         let quit_subscription = cx.on_app_quit(|this, cx| {
             this.close_sheet(cx);
             async {}
@@ -88,6 +91,7 @@ impl WriterApp {
             preview_task: None,
             editor: None,
             _quit_subscription: quit_subscription,
+            _prefs_subscription: prefs_subscription,
             watcher: None,
             #[cfg(not(target_os = "macos"))]
             menu_bar: AppMenuBar::new(cx),
@@ -134,11 +138,6 @@ impl WriterApp {
         self.selected = None;
         self.selected_sheet = None;
         cx.notify();
-    }
-
-    fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
-        // TODO(M8): 실제 환경설정 페이지로 교체
-        self.notify("환경설정 (준비 중)", window, cx);
     }
 
     fn on_show_about(&mut self, _: &ShowAbout, window: &mut Window, cx: &mut Context<Self>) {
@@ -349,7 +348,6 @@ impl Render for WriterApp {
             .on_action(cx.listener(Self::on_save_sheet))
             .on_action(cx.listener(Self::on_open_library))
             .on_action(cx.listener(Self::on_close_library))
-            .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_show_about))
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_toggle_preview))
