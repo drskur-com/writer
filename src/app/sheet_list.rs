@@ -12,7 +12,16 @@ use crate::{NewSheet, icons, library};
 
 /// 시트 카드 높이(제목 한 줄 + 발췌 두 줄 + 여백). 모든 카드가 같아서
 /// 위치를 `index * 높이`로 계산하고, 순서가 바뀌면 스프링으로 옮겨 간다.
+///
+/// gpui의 `text_sm`/`text_xs`는 줄 높이를 바꾸지 않으므로(기본 1.618배) 아래 줄 높이를 직접 지정한다.
+/// 12(위 여백) + 20(제목) + 4(간격) + 16×2(발췌) + 12(아래 여백) + 1(구분선) = 81.
 const SHEET_ROW_HEIGHT: f32 = 81.0;
+
+/// 카드 제목 줄 높이(px).
+const TITLE_LINE_HEIGHT: f32 = 20.0;
+
+/// 카드 발췌 줄 높이(px).
+const EXCERPT_LINE_HEIGHT: f32 = 16.0;
 
 /// 순서가 바뀐 시트 카드가 새 자리로 옮겨 가는 스프링.
 const SHEET_ROW_SPRING: SpringConfig = SpringConfig::new(500.0, 45.0, 1.0);
@@ -150,11 +159,13 @@ impl WriterApp {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    // 빈 시트는 흐린 기본 굵기로 가볍게 보인다.
+                    // 빈 시트는 흐린 기본 굵기로, 카드 가운데에 가볍게 보인다(Ulysses).
+                    .when(is_empty, |this| this.justify_center().items_center())
                     // 아직 안 읽은 시트도 한 줄 높이를 차지하게 한다.
                     .child(
                         div()
-                            .min_h(rems(1.25))
+                            .h(px(TITLE_LINE_HEIGHT))
+                            .line_height(px(TITLE_LINE_HEIGHT))
                             .truncate()
                             .when(is_empty, |this| this.text_color(pal.muted))
                             .when(!is_empty, |this| this.font_semibold())
@@ -164,6 +175,7 @@ impl WriterApp {
                         this.child(
                             div()
                                 .text_xs()
+                                .line_height(px(EXCERPT_LINE_HEIGHT))
                                 .text_color(pal.muted)
                                 .line_clamp(2)
                                 .text_ellipsis()
