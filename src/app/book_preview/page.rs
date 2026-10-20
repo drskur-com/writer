@@ -15,6 +15,9 @@ const PAPER: Hsla = Hsla {
     a: 1.,
 };
 
+/// 이미지를 칸보다 크게 그려 잘라 내는 폭(가장자리 번짐 숨김).
+const EDGE_BLEED: f32 = 1.0;
+
 /// `index` 페이지를 `scale`배로 그린다.
 pub(super) fn page(layout: Rc<BookLayout>, index: usize, scale: f32) -> AnyElement {
     let setup = layout.setup;
@@ -36,7 +39,12 @@ pub(super) fn page(layout: Rc<BookLayout>, index: usize, scale: f32) -> AnyEleme
                 source,
                 cover,
             } => {
+                // 소수 픽셀 위치에 그리면 가장자리가 흐려지므로 정수 픽셀로 맞춘다.
                 let bounds = scaled(*bounds);
+                let bounds = Bounds::new(
+                    point(bounds.origin.x.round(), bounds.origin.y.round()),
+                    size(bounds.size.width.round(), bounds.size.height.round()),
+                );
                 let fit = if *cover {
                     ObjectFit::Cover
                 } else {
@@ -58,15 +66,29 @@ pub(super) fn page(layout: Rc<BookLayout>, index: usize, scale: f32) -> AnyEleme
                         .w(bounds.size.width)
                         .h(bounds.size.height)
                         .overflow_hidden()
-                        .child(img(source).size_full().object_fit(fit).with_fallback(|| {
-                            div()
-                                .size_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(Icon::new(icons::image()).small().text_color(MUTED_INK))
-                                .into_any_element()
-                        }))
+                        // gpui는 아틀라스에서 이미지를 선형 보간으로 읽어 오른쪽·아래 가장자리에 옆 타일
+                        // 색이 섞인다(회색 테두리처럼 보임). 칸보다 조금 크게 그리고 칸에서 잘라 숨긴다
+                        // (`editor_image.rs`와 같은 방법).
+                        .child(
+                            img(source)
+                                .absolute()
+                                .left(-px(EDGE_BLEED))
+                                .top(-px(EDGE_BLEED))
+                                .w(bounds.size.width + px(EDGE_BLEED * 2.))
+                                .h(bounds.size.height + px(EDGE_BLEED * 2.))
+                                .object_fit(fit)
+                                .with_fallback(|| {
+                                    div()
+                                        .size_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            Icon::new(icons::image()).small().text_color(MUTED_INK),
+                                        )
+                                        .into_any_element()
+                                }),
+                        )
                         .into_any_element(),
                 )
             }

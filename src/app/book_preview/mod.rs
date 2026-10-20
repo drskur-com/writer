@@ -42,9 +42,6 @@ const DEFAULT_ZOOM: usize = 3;
 /// pt → 화면 px.
 const PX_PER_PT: f32 = 96.0 / 72.0;
 
-/// 기기 테두리 두께(화면 px).
-const BEZEL: f32 = 14.0;
-
 /// 파일이 바뀐 뒤 다시 읽기까지 기다리는 시간. 저장은 이벤트가 연달아 온다.
 const RELOAD_DEBOUNCE_MS: u64 = 300;
 
@@ -738,7 +735,6 @@ impl BookPreview {
         layout: Rc<BookLayout>,
         window: &Window,
         cx: &mut Context<Self>,
-        pal: Palette,
     ) -> AnyElement {
         let setup = layout.setup;
         // 창 높이에 맞춰 줄인다(키우지는 않는다).
@@ -747,12 +743,8 @@ impl BookPreview {
             viewport.width - px(64.0),
             viewport.height - px(TOOLBAR_HEIGHT + 64.0),
         );
-        let frame = size(
-            setup.width + px(BEZEL * 2.0),
-            setup.height + px(BEZEL * 2.0),
-        );
-        let scale = (available.width / frame.width)
-            .min(available.height / frame.height)
+        let scale = (available.width / setup.width)
+            .min(available.height / setup.height)
             .clamp(0.3, 1.0);
         let index = self.epub_page;
         // 화면 왼쪽 절반을 누르면 앞 페이지, 오른쪽 절반은 다음 페이지(리더처럼).
@@ -776,19 +768,9 @@ impl BookPreview {
             .child(
                 div()
                     .relative()
-                    .p(px(BEZEL * scale))
-                    .rounded(px(36.0 * scale))
-                    .bg(pal.foreground.opacity(0.85))
-                    .shadow_lg()
-                    .child(
-                        div()
-                            .relative()
-                            .rounded(px(6.0 * scale))
-                            .overflow_hidden()
-                            .child(page::page(layout, index, scale))
-                            .child(half("page-left", -1, cx))
-                            .child(half("page-right", 1, cx)),
-                    ),
+                    .child(page::page(layout, index, scale))
+                    .child(half("page-left", -1, cx))
+                    .child(half("page-right", 1, cx)),
             )
             .into_any_element()
     }
@@ -816,7 +798,7 @@ impl Render for BookPreview {
             (None, None) => message("원고를 읽는 중…".into()),
             (Some(layout), None) => match self.format {
                 Format::Pdf => self.render_pdf(layout),
-                Format::Epub => self.render_epub(layout, window, cx, pal),
+                Format::Epub => self.render_epub(layout, window, cx),
             },
         };
 
