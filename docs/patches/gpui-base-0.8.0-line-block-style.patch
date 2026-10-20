@@ -1,0 +1,232 @@
+diff --git a/vendor/gpui-base/src/input/base/element.rs b/vendor/gpui-base/src/input/base/element.rs
+index 19732bb..2fa520e 100644
+--- a/vendor/gpui-base/src/input/base/element.rs
++++ b/vendor/gpui-base/src/input/base/element.rs
+@@ -2009,6 +2009,19 @@ impl<M: InputModeKind> TextElement<M> {
+         };
+         let width = layout.wrap_width.unwrap_or(layout.content_width);
+         let mut placements = Vec::new();
++        // The header above the first line, while that line is laid out.
++        let inset = state.display_map.top_inset();
++        if inset > px(0.) && layout.visible_buffer_lines.first() == Some(&0) {
++            placements.push((
++                super::LineBlockContext {
++                    line: 0,
++                    text: state.text.slice_line(0).to_string().into(),
++                    size: size(width, inset),
++                    above: true,
++                },
++                bounds.origin + point(layout.line_number_width, layout.visible_top - inset),
++            ));
++        }
+         let mut y = layout.visible_top;
+         for (line, &row) in layout.lines.iter().zip(layout.visible_buffer_lines.iter()) {
+             let line_size = line.size(layout.line_height);
+@@ -2021,6 +2034,7 @@ impl<M: InputModeKind> TextElement<M> {
+                         line: row,
+                         text: state.text.slice_line(row).to_string().into(),
+                         size: size(width, content_height),
++                        above: false,
+                     },
+                     bounds.origin + point(layout.line_number_width, top),
+                 ));
+@@ -4561,6 +4575,89 @@ mod tests {
+         });
+     }
+ 
++    #[gpui::test]
++    fn line_style_blocks_add_to_measured_blocks(cx: &mut TestAppContext) {
++        let text = "![img](a.png)\nbody";
++        let (editor, window) = decoration_editor(cx, text, false);
++        let mut cx = VisualTestContext::from_window(window.into(), cx);
++        let rendered = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
++        cx.update(|window, cx| {
++            let seen = rendered.clone();
++            editor.update(cx, |state, cx| {
++                state.set_line_style(
++                    Some(|line: crate::input::LineContext<'_>| crate::input::LineStyle {
++                        block_height: px(if line.next.is_some() { 20. } else { 0. }),
++                        ..Default::default()
++                    }),
++                    cx,
++                );
++                state.set_line_blocks(
++                    |line: &str, _| if line.starts_with("![") { px(100.) } else { px(0.) },
++                    move |block: &crate::input::LineBlockContext, _, _| {
++                        seen.borrow_mut().push((block.line, block.size.height));
++                        gpui::Empty.into_any_element()
++                    },
++                    cx,
++                );
++            });
++            window.draw(cx).clear(cx);
++            let state = editor.read(cx);
++            let lh = state.last_layout.as_ref().unwrap().line_height;
++            assert_eq!(state.display_map.display_row_height(0, lh), lh + px(120.));
++            assert_eq!(state.display_map.display_row_height(1, lh), lh);
++            assert_eq!(*rendered.borrow(), vec![(0, px(120.))]);
++        });
++    }
++
++    #[gpui::test]
++    fn first_line_block_before_insets_the_document(cx: &mut TestAppContext) {
++        let text = "title\nbody";
++        let (editor, window) = decoration_editor(cx, text, false);
++        let mut cx = VisualTestContext::from_window(window.into(), cx);
++        let rendered = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
++        cx.update(|window, cx| {
++            let seen = rendered.clone();
++            editor.update(cx, |state, cx| {
++                // Every line asks for a block above; only the first line's counts.
++                state.set_line_style(
++                    Some(|_: crate::input::LineContext<'_>| crate::input::LineStyle {
++                        block_before: px(40.),
++                        ..Default::default()
++                    }),
++                    cx,
++                );
++                state.set_line_blocks(
++                    |_: &str, _| px(0.),
++                    move |block: &crate::input::LineBlockContext, _, _| {
++                        seen.borrow_mut().push((block.line, block.above, block.size.height));
++                        gpui::Empty.into_any_element()
++                    },
++                    cx,
++                );
++            });
++            window.draw(cx).clear(cx);
++            let state = editor.read(cx);
++            let layout = state.last_layout.as_ref().unwrap();
++            let lh = layout.line_height;
++            let map = &state.display_map;
++            assert_eq!(map.display_row_top(0, lh), px(40.));
++            assert_eq!(map.display_row_top(1, lh), px(40.) + lh);
++            assert_eq!(map.content_height(lh), px(40.) + lh * 2.);
++            assert_eq!(map.display_row_at_y(px(40.) + lh * 1.5, lh), 1);
++            assert_eq!(layout.visible_top, px(40.));
++
++            // A click in the header lands on the first line; one on the second line stays there.
++            let origin = state.last_bounds.unwrap().origin;
++            let (ix, _) = state.index_for_mouse_position(origin + point(px(1.), px(10.)));
++            assert!((0..=5).contains(&ix), "{ix}");
++            let (ix, _) =
++                state.index_for_mouse_position(origin + point(px(1.), px(40.) + lh * 1.5));
++            assert!((6..=10).contains(&ix), "{ix}");
++
++            assert_eq!(*rendered.borrow(), vec![(0, true, px(40.))]);
++        });
++    }
++
+     #[gpui::test]
+     fn collapsed_lines_show_their_text_only_under_a_selection(cx: &mut TestAppContext) {
+         let text = "body\n![img](a.png)\nmore";
+diff --git a/vendor/gpui-base/src/input/editor/display_map/display_map.rs b/vendor/gpui-base/src/input/editor/display_map/display_map.rs
+index b22cd71..2f7055b 100644
+--- a/vendor/gpui-base/src/input/editor/display_map/display_map.rs
++++ b/vendor/gpui-base/src/input/editor/display_map/display_map.rs
+@@ -34,6 +34,8 @@ pub struct DisplayMap {
+     tall_rows: Vec<(usize, TallRow)>,
+     /// `tall_rows_prefix[i]` = sum of `tall_rows[..i]`.
+     tall_rows_prefix: Vec<TallRow>,
++    /// Space above the first row: the first line's [`LineStyle::block_before`].
++    top_inset: Pixels,
+ }
+ 
+ /// Height of a display row beyond one line height.
+@@ -58,6 +60,7 @@ impl DisplayMap {
+             fold_map: FoldMap::new(),
+             tall_rows: Vec::new(),
+             tall_rows_prefix: Vec::new(),
++            top_inset: px(0.),
+         }
+     }
+ 
+@@ -325,7 +328,14 @@ impl DisplayMap {
+     /// Top of a display row in content space. `display_row` may equal the row count, giving
+     /// the total content height.
+     pub fn display_row_top(&self, display_row: usize, line_height: Pixels) -> Pixels {
+-        line_height * display_row as f32 + self.extra_before(display_row).height(line_height)
++        self.top_inset
++            + line_height * display_row as f32
++            + self.extra_before(display_row).height(line_height)
++    }
++
++    /// Space above the first row (see [`LineStyle::block_before`]).
++    pub fn top_inset(&self) -> Pixels {
++        self.top_inset
+     }
+ 
+     /// Height of a display row, including a line block below it.
+@@ -350,7 +360,7 @@ impl DisplayMap {
+             return 0;
+         }
+         if self.tall_rows.is_empty() {
+-            return ((y / line_height).max(0.) as usize).min(count - 1);
++            return (((y - self.top_inset) / line_height).max(0.) as usize).min(count - 1);
+         }
+         // Last row whose top is at or above `y`.
+         let (mut low, mut high) = (0, count);
+@@ -369,6 +379,7 @@ impl DisplayMap {
+     fn rebuild_tall_rows(&mut self) {
+         self.tall_rows.clear();
+         self.tall_rows_prefix.clear();
++        self.top_inset = self.line_style(0).block_before.max(px(0.));
+         if !self.wrap_map.wrapper().has_styled_lines() {
+             return;
+         }
+diff --git a/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs b/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
+index d14bc01..e366fcc 100644
+--- a/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
++++ b/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
+@@ -113,13 +113,19 @@ pub struct LineStyle {
+     pub text_scale: f32,
+     /// Multiplier for the editor line height (each wrapped row of the line).
+     pub height_scale: f32,
+-    /// Height of a block painted below the line's last row (see [`LineBlockMeasureFn`]).
++    /// Height of a block painted below the line's last row. The measured block
++    /// ([`LineBlockMeasureFn`]) is added to it, so a line style can reserve room below the
++    /// measured block, e.g. for a page break mark the block renderer draws in the rest.
+     pub block_height: Pixels,
+     /// Hide the line's text (its rows take no height) unless a selection touches the line,
+     /// e.g. to show only the block of a Markdown image line until the caret enters it.
+     pub collapsed: bool,
+     /// Empty space below the line (after its block), e.g. the gap between paragraphs.
+     pub space_after: Pixels,
++    /// Height of a block painted above the line. Only the first buffer line's is used: it is
++    /// a header above the document that scrolls with it (the block renderer gets
++    /// [`crate::input::LineBlockContext::above`]), e.g. a page break mark before a title.
++    pub block_before: Pixels,
+     /// Extra left offset of the line's first visual row, e.g. a paragraph's first-line indent.
+     /// The first row wraps that much narrower.
+     pub first_indent: Pixels,
+@@ -149,6 +155,7 @@ impl Default for LineStyle {
+             block_height: px(0.),
+             collapsed: false,
+             space_after: px(0.),
++            block_before: px(0.),
+             first_indent: px(0.),
+             align: LineAlign::Start,
+         }
+@@ -765,7 +772,7 @@ impl TextWrapper {
+                 None => LineStyle::default(),
+             };
+             if let Some(line_block) = &self.line_block {
+-                style.block_height = line_block(&line_str, wrap_width).max(px(0.));
++                style.block_height += line_block(&line_str, wrap_width).max(px(0.));
+             }
+             let revealed = style.collapsed && self.reveal.iter().any(|r| r.contains(&row));
+ 
+diff --git a/vendor/gpui-base/src/input/editor/mod.rs b/vendor/gpui-base/src/input/editor/mod.rs
+index 6d764f7..e632ec6 100644
+--- a/vendor/gpui-base/src/input/editor/mod.rs
++++ b/vendor/gpui-base/src/input/editor/mod.rs
+@@ -342,6 +342,9 @@ pub struct LineBlockContext {
+     pub text: gpui::SharedString,
+     /// Size of the block: the text width and the measured block height.
+     pub size: gpui::Size<gpui::Pixels>,
++    /// The block sits above the line (the first line's [`super::LineStyle::block_before`])
++    /// rather than below it.
++    pub above: bool,
+ }
+ 
+ /// Draws the block below a line (see [`EditorState::set_line_blocks`]).

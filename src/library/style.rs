@@ -68,19 +68,26 @@ impl StyleTarget {
     }
 
     /// 대상의 기본 스타일. 파일에 없는 값은 이것으로 채운다.
+    /// 부는 별도 제목 페이지, 장은 새 페이지 첫머리, 절은 앞 내용에 이어서 놓는다.
     pub fn defaults(self) -> ResolvedStyle {
         let body = ResolvedStyle {
             font: None,
             embed_font: false,
             font_size: 1.0,
+            font_weight: 400,
             line_height: 1.6,
             align: Align::Justify,
             first_line_indent: 1.0,
             space_before: 0.0,
             space_after: 0.0,
+            placement: Placement::Inline,
+            page_break: false,
+            prefix: String::new(),
+            vertical_align: VerticalAlign::Center,
         };
         let title = |font_size, align, space_before, space_after| ResolvedStyle {
             font_size,
+            font_weight: 700,
             line_height: 1.3,
             align,
             first_line_indent: 0.0,
@@ -90,8 +97,15 @@ impl StyleTarget {
         };
         match self {
             StyleTarget::Body => body,
-            StyleTarget::Part => title(1.6, Align::Center, 4.0, 2.0),
-            StyleTarget::Chapter => title(1.4, Align::Center, 3.0, 1.5),
+            StyleTarget::Part => ResolvedStyle {
+                placement: Placement::Page,
+                page_break: true,
+                ..title(1.6, Align::Center, 4.0, 2.0)
+            },
+            StyleTarget::Chapter => ResolvedStyle {
+                page_break: true,
+                ..title(1.4, Align::Center, 3.0, 1.5)
+            },
             StyleTarget::Section => title(1.2, Align::Left, 1.5, 0.75),
         }
     }
@@ -121,6 +135,63 @@ impl Align {
     }
 }
 
+/// 제목 배치.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Placement {
+    /// 본문 첫머리(제목 뒤에 본문이 이어진다).
+    Inline,
+    /// 제목만 있는 별도 페이지. 본문은 다음 페이지에서 시작한다.
+    Page,
+    /// 제목을 보이지 않는다(목차에는 남는다).
+    Hidden,
+}
+
+impl Placement {
+    pub const ALL: [Placement; 3] = [Placement::Inline, Placement::Page, Placement::Hidden];
+
+    /// 표시 이름.
+    pub fn title(self) -> &'static str {
+        match self {
+            Placement::Inline => "본문 첫머리",
+            Placement::Page => "별도 제목 페이지",
+            Placement::Hidden => "제목 숨김",
+        }
+    }
+}
+
+/// 제목 페이지 안 세로 위치.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VerticalAlign {
+    Top,
+    Center,
+    Bottom,
+}
+
+impl VerticalAlign {
+    pub const ALL: [VerticalAlign; 3] = [
+        VerticalAlign::Top,
+        VerticalAlign::Center,
+        VerticalAlign::Bottom,
+    ];
+
+    /// 표시 이름.
+    pub fn title(self) -> &'static str {
+        match self {
+            VerticalAlign::Top => "위",
+            VerticalAlign::Center => "가운데",
+            VerticalAlign::Bottom => "아래",
+        }
+    }
+}
+
+/// 고를 수 있는 글자 굵기.
+pub const FONT_WEIGHTS: [u16; 7] = [300, 400, 500, 600, 700, 800, 900];
+
+/// 제목 접두사에서 자동 번호로 바뀌는 자리.
+pub const PREFIX_NUMBER: &str = "{n}";
+
 /// 한 대상의 스타일. 비어 있는 값은 기본값을 따른다. 길이 단위는 em(본문 글자 크기 대비)이다.
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
@@ -134,6 +205,9 @@ pub struct StyleSpec {
     /// 글자 크기(본문 대비 배율).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f64>,
+    /// 글자 굵기(100~900).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_weight: Option<u16>,
     /// 줄 간격(글자 크기 대비).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_height: Option<f64>,
@@ -148,6 +222,18 @@ pub struct StyleSpec {
     /// 뒤 여백(em). 본문에서는 문단 사이 간격이다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_after: Option<f64>,
+    /// 제목 배치(제목만).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placement: Option<Placement>,
+    /// 새 페이지에서 시작하는지(제목만). 별도 제목 페이지는 늘 새 페이지다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_break: Option<bool>,
+    /// 제목 앞에 붙는 글(제목만). `{n}`은 자동 번호로 바뀐다(예: `제{n}장 `).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// 별도 제목 페이지 안 세로 위치(제목만).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vertical_align: Option<VerticalAlign>,
 }
 
 impl StyleSpec {
@@ -163,11 +249,16 @@ impl StyleSpec {
             font: self.font.clone().or(defaults.font),
             embed_font: self.embed_font.unwrap_or(defaults.embed_font),
             font_size: self.font_size.unwrap_or(defaults.font_size),
+            font_weight: self.font_weight.unwrap_or(defaults.font_weight),
             line_height: self.line_height.unwrap_or(defaults.line_height),
             align: self.align.unwrap_or(defaults.align),
             first_line_indent: self.first_line_indent.unwrap_or(defaults.first_line_indent),
             space_before: self.space_before.unwrap_or(defaults.space_before),
             space_after: self.space_after.unwrap_or(defaults.space_after),
+            placement: self.placement.unwrap_or(defaults.placement),
+            page_break: self.page_break.unwrap_or(defaults.page_break),
+            prefix: self.prefix.clone().unwrap_or(defaults.prefix),
+            vertical_align: self.vertical_align.unwrap_or(defaults.vertical_align),
         }
     }
 
@@ -191,11 +282,26 @@ pub struct ResolvedStyle {
     pub font: Option<String>,
     pub embed_font: bool,
     pub font_size: f64,
+    pub font_weight: u16,
     pub line_height: f64,
     pub align: Align,
     pub first_line_indent: f64,
     pub space_before: f64,
     pub space_after: f64,
+    pub placement: Placement,
+    pub page_break: bool,
+    pub prefix: String,
+    pub vertical_align: VerticalAlign,
+}
+
+impl ResolvedStyle {
+    /// 접두사를 붙인 제목. `{n}`을 번호로 바꾼다.
+    pub fn title_text(&self, number: usize, title: &str) -> String {
+        format!(
+            "{}{title}",
+            self.prefix.replace(PREFIX_NUMBER, &number.to_string())
+        )
+    }
 }
 
 /// 프로젝트의 책 스타일(`[styles]` 표). 바꾸지 않은 대상은 파일에 쓰지 않는다.
@@ -366,6 +472,27 @@ mod tests {
         let chapter = styles.resolve(StyleTarget::Chapter);
         assert_eq!(chapter.font.as_deref(), Some("Pretendard"));
         assert!(!chapter.embed_font);
+    }
+
+    #[test]
+    fn title_layout_defaults_and_prefix() {
+        let styles = Styles::default();
+        let part = styles.resolve(StyleTarget::Part);
+        assert_eq!(part.placement, Placement::Page);
+        assert_eq!(part.font_weight, 700);
+        assert!(styles.resolve(StyleTarget::Chapter).page_break);
+        assert!(!styles.resolve(StyleTarget::Section).page_break);
+        assert_eq!(styles.resolve(StyleTarget::Body).font_weight, 400);
+
+        let mut styles = Styles::default();
+        styles.chapter.prefix = Some("제{n}장 ".into());
+        styles.chapter.placement = Some(Placement::Hidden);
+        let text = toml::to_string(&styles).unwrap();
+        assert!(text.contains("prefix = \"제{n}장 \""), "{text}");
+        assert!(text.contains("placement = \"hidden\""), "{text}");
+        let chapter = styles.resolve(StyleTarget::Chapter);
+        assert_eq!(chapter.title_text(3, "시라 강 건너"), "제3장 시라 강 건너");
+        assert_eq!(part.title_text(1, "강을 건너며"), "강을 건너며");
     }
 
     #[test]

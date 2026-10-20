@@ -18,11 +18,12 @@ use gpui_kit::component::{
 use gpui_kit::gpui::prelude::{FluentBuilder as _, InteractiveElement as _};
 use gpui_kit::gpui::*;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use super::WriterApp;
 use super::style::*;
 use crate::icons;
-use crate::library::{self, Align, StyleTarget};
+use crate::library::{self, Align, Placement, StyleTarget, VerticalAlign};
 use crate::settings::{FontItem, Prefs, font_items};
 
 /// 내용 최대 폭.
@@ -46,19 +47,31 @@ const PREVIEW_FONT_SIZE: f32 = 16.0;
 /// 줄 간격 슬라이더 범위.
 const LINE_HEIGHT_RANGE: (f32, f32) = (1.0, 2.5);
 
+/// 별도 제목 페이지 미리보기 높이.
+const PREVIEW_TITLE_PAGE_HEIGHT: f32 = 220.0;
+
 /// 미리보기 본문.
 const SAMPLE_BODY: [&str; 2] = [
     "문장은 저마다 고유한 리듬을 가지고 있습니다. 글꼴과 줄 간격은 그 리듬을 읽는 경험으로 바꿉니다.",
     "문단의 들여쓰기와 간격을 조절해 책에 어울리는 호흡을 만들어 보세요.",
 ];
 
-/// 대상별 미리보기 제목.
+/// 대상별 미리보기 제목. 접두사(`제{n}장 ` 등)는 스타일에서 붙인다.
 fn sample_title(target: StyleTarget) -> &'static str {
     match target {
         StyleTarget::Body => "",
-        StyleTarget::Part => "제1부 강을 건너며",
-        StyleTarget::Chapter => "제1장 시라 강 건너",
-        StyleTarget::Section => "1. 아타고 참배",
+        StyleTarget::Part => "강을 건너며",
+        StyleTarget::Chapter => "시라 강 건너",
+        StyleTarget::Section => "아타고 참배",
+    }
+}
+
+/// 글자 굵기 표시 이름.
+fn weight_title(weight: u16) -> SharedString {
+    match weight {
+        400 => "400 (보통)".into(),
+        700 => "700 (굵게)".into(),
+        _ => weight.to_string().into(),
     }
 }
 
@@ -148,6 +161,8 @@ struct TargetForm {
     font: Entity<SelectState<SearchableVec<FontItem>>>,
     line_height: Entity<SliderState>,
     numbers: Vec<(NumberField, Entity<InputState>)>,
+    /// 제목 접두사(제목 대상만).
+    prefix: Option<Entity<InputState>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -291,11 +306,33 @@ impl BookStyleView {
             })
             .collect();
 
+        let prefix = target.is_title().then(|| {
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("예: 제{n}장 ")
+                    .default_value(spec.prefix.clone().unwrap_or_default())
+            });
+            subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                move |this, input, event: &InputEvent, window, cx| {
+                    if !matches!(event, InputEvent::Change) {
+                        return;
+                    }
+                    let value = input.read(cx).value().to_string();
+                    let value = (!value.is_empty()).then_some(value);
+                    this.update_spec(target, window, cx, |spec| spec.prefix = value);
+                },
+            ));
+            input
+        });
+
         self.form = Some(TargetForm {
             target,
             font,
             line_height,
             numbers,
+            prefix,
             _subscriptions: subscriptions,
         });
         cx.notify();
@@ -527,95 +564,157 @@ impl BookStyleView {
                 .child(control)
         };
 
-        let embed_view = view.clone();
-        let embed = Button::new("style-embed-font")
-            .label(if resolved.embed_font {
-                "서체 파일 넣기"
-            } else {
-                "리더의 시스템 서체 사용"
-            })
-            .dropdown_caret(true)
-            .w_full()
-            .dropdown_menu(move |menu, _, _| {
-                [(false, "리더의 시스템 서체 사용"), (true, "서체 파일 넣기")]
-                    .into_iter()
-                    .fold(menu.min_w(px(220.0)), |menu, (embed, title)| {
-                        let view = embed_view.clone();
-                        menu.item(
-                            PopupMenuItem::new(title)
-                                .checked(embed == resolved.embed_font)
-                                .on_click(move |_, window, cx| {
-                                    view.update(cx, |view, cx| {
-                                        view.set_embed(target, embed, window, cx)
-                                    })
-                                    .ok();
-                                }),
-                        )
-                    })
-            });
-
-        let align_view = view.clone();
-        let current_align = resolved.align;
-        let align = Button::new("style-align")
-            .label(current_align.title())
-            .dropdown_caret(true)
-            .w_full()
-            .dropdown_menu(move |menu, _, _| {
-                Align::ALL
-                    .into_iter()
-                    .fold(menu.min_w(px(160.0)), |menu, align| {
-                        let view = align_view.clone();
-                        menu.item(
-                            PopupMenuItem::new(align.title())
-                                .checked(align == current_align)
-                                .on_click(move |_, window, cx| {
-                                    view.update(cx, |view, cx| {
-                                        view.update_spec(target, window, cx, |spec| {
-                                            spec.align = Some(align)
-                                        })
-                                    })
-                                    .ok();
-                                }),
-                        )
-                    })
-            });
-
-        let numbers = form.numbers.iter().map(|(number, input)| {
-            field(
-                number.label(target).into(),
-                Input::new(input).focus_ring(false).into_any_element(),
-            )
-        });
+        let embed = choice(
+            "style-embed-font",
+            &view,
+            resolved.embed_font,
+            [
+                (false, "리더의 시스템 서체 사용".into()),
+                (true, "서체 파일 넣기".into()),
+            ],
+            220.0,
+            move |view, embed, window, cx| view.set_embed(target, embed, window, cx),
+        );
+        let align = choice(
+            "style-align",
+            &view,
+            resolved.align,
+            Align::ALL.map(|align| (align, align.title().into())),
+            160.0,
+            move |view, align, window, cx| {
+                view.update_spec(target, window, cx, |spec| spec.align = Some(align))
+            },
+        );
+        let number = |wanted: NumberField| {
+            form.numbers
+                .iter()
+                .find(|(number, _)| *number == wanted)
+                .map(|(number, input)| {
+                    field(
+                        number.label(target).into(),
+                        Input::new(input).focus_ring(false).into_any_element(),
+                    )
+                })
+        };
+        let font = field(
+            "서체".into(),
+            Select::new(&form.font)
+                .focus_ring(false)
+                .menu_max_h(px(320.0))
+                .search_placeholder("서체 검색")
+                .into_any_element(),
+        );
+        let embed = field("서체 포함".into(), embed.into_any_element());
+        let line_height = field(
+            format!("줄 간격 · {}", format_number(resolved.line_height)).into(),
+            Slider::new(&form.line_height).into_any_element(),
+        );
 
         let fields = div()
             .w(px(FORM_WIDTH))
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .gap_5()
-            .child(field(
-                "서체".into(),
-                Select::new(&form.font)
-                    .focus_ring(false)
-                    .menu_max_h(px(320.0))
-                    .search_placeholder("서체 검색")
-                    .into_any_element(),
-            ))
-            .child(field("서체 포함".into(), embed.into_any_element()))
-            .child(field(
-                format!("줄 간격 · {}", format_number(resolved.line_height)).into(),
-                Slider::new(&form.line_height).into_any_element(),
-            ))
-            .child(field(
-                if target.is_title() {
-                    "정렬"
-                } else {
-                    "문단 정렬"
-                }
-                .into(),
-                align.into_any_element(),
-            ))
-            .children(numbers);
+            .gap_5();
+        let fields = if target.is_title() {
+            // 제목: 배치 → 접두사 → 글자 → 배치에 따른 위치·여백(epubly 스타일 화면과 같은 순서).
+            let inline = resolved.placement == Placement::Inline;
+            let page = resolved.placement == Placement::Page;
+            let placement = choice(
+                "style-placement",
+                &view,
+                resolved.placement,
+                Placement::ALL.map(|placement| (placement, placement.title().into())),
+                200.0,
+                move |view, placement, window, cx| {
+                    view.update_spec(target, window, cx, |spec| spec.placement = Some(placement))
+                },
+            );
+            let page_break = choice(
+                "style-page-break",
+                &view,
+                resolved.page_break,
+                [
+                    (true, "항상 새 페이지".into()),
+                    (false, "앞 내용에 이어서".into()),
+                ],
+                200.0,
+                move |view, page_break, window, cx| {
+                    view.update_spec(target, window, cx, |spec| {
+                        spec.page_break = Some(page_break)
+                    })
+                },
+            );
+            let weight = choice(
+                "style-font-weight",
+                &view,
+                resolved.font_weight,
+                library::FONT_WEIGHTS.map(|weight| (weight, weight_title(weight))),
+                160.0,
+                move |view, weight, window, cx| {
+                    view.update_spec(target, window, cx, |spec| spec.font_weight = Some(weight))
+                },
+            );
+            let vertical = choice(
+                "style-vertical-align",
+                &view,
+                resolved.vertical_align,
+                VerticalAlign::ALL.map(|align| (align, align.title().into())),
+                160.0,
+                move |view, align, window, cx| {
+                    view.update_spec(target, window, cx, |spec| spec.vertical_align = Some(align))
+                },
+            );
+            let prefix = form.prefix.as_ref().map(|input| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().text_sm().text_color(pal.muted).child("제목 접두사"))
+                    .child(Input::new(input).focus_ring(false))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(pal.muted)
+                            .child(format!("{}은 자동 번호로 바뀝니다", library::PREFIX_NUMBER)),
+                    )
+            });
+            fields
+                .child(field("제목 배치".into(), placement.into_any_element()))
+                .when(!page, |this| {
+                    this.child(field(
+                        "새 페이지에서 시작".into(),
+                        page_break.into_any_element(),
+                    ))
+                })
+                .children(prefix)
+                .child(font)
+                .child(embed)
+                .children(number(NumberField::FontSize))
+                .child(field("글자 굵기".into(), weight.into_any_element()))
+                .child(line_height)
+                .child(field("정렬".into(), align.into_any_element()))
+                .when(page, |this| {
+                    this.child(field(
+                        "제목 페이지 세로 위치".into(),
+                        vertical.into_any_element(),
+                    ))
+                })
+                .when(inline && !resolved.page_break, |this| {
+                    this.children(number(NumberField::SpaceBefore))
+                })
+                .when(inline, |this| {
+                    this.children(number(NumberField::SpaceAfter))
+                })
+        } else {
+            fields
+                .child(font)
+                .child(embed)
+                .child(line_height)
+                .child(field("문단 정렬".into(), align.into_any_element()))
+                .children(number(NumberField::FirstLineIndent))
+                .children(number(NumberField::SpaceAfter))
+        };
 
         let preview = div()
             .flex_1()
@@ -697,59 +796,137 @@ impl BookStyleView {
             .into_any_element()
     }
 
-    /// 미리보기: 내보낸 책에서 보일 모습. 제목 대상이면 제목 뒤에 본문을 이어 그린다.
+    /// 미리보기: 내보낸 책에서 보일 모습. 제목 대상이면 배치에 따라 제목·쪽 나눔·본문을 그린다.
     ///
     /// 서체를 넣지 않으면 리더 기본 서체로 보이므로 시스템 서체로 그린다.
     /// 화면 텍스트는 양쪽 정렬이 없어 왼쪽 정렬로, 첫 줄 들여쓰기는 앞 공백으로 흉내 낸다.
     fn render_preview(&self, target: StyleTarget, cx: &App) -> impl IntoElement {
+        let pal = Palette::from_theme(cx.theme());
         let reader_family = cx.theme().font_family.clone();
-        let body = self.styles.resolve(StyleTarget::Body);
-        let paragraph =
-            |style: &library::ResolvedStyle, family: SharedString, text: String, bold: bool| {
-                let size = PREVIEW_FONT_SIZE * style.font_size as f32;
-                let family = if style.embed_font {
-                    family
-                } else {
-                    reader_family.clone()
-                };
-                div()
-                    .w_full()
-                    .whitespace_normal()
-                    .font_family(family)
-                    .text_size(px(size))
-                    .line_height(relative(style.line_height as f32))
-                    .pt(px(PREVIEW_FONT_SIZE * style.space_before as f32))
-                    .pb(px(PREVIEW_FONT_SIZE * style.space_after as f32))
-                    .when(bold, |this| this.font_weight(FontWeight::BOLD))
-                    .map(|this| match style.align {
-                        Align::Center => this.text_center(),
-                        Align::Right => this.text_right(),
-                        Align::Left | Align::Justify => this.text_left(),
-                    })
-                    .child(format!("{}{text}", indent(style.first_line_indent)))
+        let paragraph = |style: &library::ResolvedStyle, family: SharedString, text: String| {
+            let size = PREVIEW_FONT_SIZE * style.font_size as f32;
+            let family = if style.embed_font {
+                family
+            } else {
+                reader_family.clone()
             };
-        let mut blocks = Vec::new();
-        if target.is_title() {
-            let title = self.styles.resolve(target);
-            let family = self.effective_font(target, cx);
-            blocks.push(paragraph(
-                &title,
-                family,
-                sample_title(target).to_string(),
-                true,
-            ));
-        }
+            div()
+                .w_full()
+                .whitespace_normal()
+                .font_family(family)
+                .text_size(px(size))
+                .font_weight(FontWeight(f32::from(style.font_weight)))
+                .line_height(relative(style.line_height as f32))
+                .pt(px(PREVIEW_FONT_SIZE * style.space_before as f32))
+                .pb(px(PREVIEW_FONT_SIZE * style.space_after as f32))
+                .map(|this| match style.align {
+                    Align::Center => this.text_center(),
+                    Align::Right => this.text_right(),
+                    Align::Left | Align::Justify => this.text_left(),
+                })
+                .child(format!("{}{text}", indent(style.first_line_indent)))
+        };
+        let body = self.styles.resolve(StyleTarget::Body);
         let body_family = self.effective_font(StyleTarget::Body, cx);
-        for text in SAMPLE_BODY {
-            blocks.push(paragraph(
-                &body,
-                body_family.clone(),
-                text.to_string(),
-                false,
-            ));
+        let body_text = |text: &str| paragraph(&body, body_family.clone(), text.to_string());
+        let page_break = || {
+            div()
+                .my_5()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .text_color(pal.muted)
+                .child(div().h(px(1.0)).flex_1().bg(pal.panel_border))
+                .child("여기서 페이지가 나뉩니다")
+                .child(div().h(px(1.0)).flex_1().bg(pal.panel_border))
+        };
+
+        let mut blocks: Vec<AnyElement> = Vec::new();
+        let title = target
+            .is_title()
+            .then(|| self.styles.resolve(target))
+            .filter(|title| title.placement != Placement::Hidden);
+        let Some(title) = title else {
+            blocks.extend(SAMPLE_BODY.map(|text| body_text(text).into_any_element()));
+            return div().flex().flex_col().children(blocks);
+        };
+        let heading = paragraph(
+            &title,
+            self.effective_font(target, cx),
+            title.title_text(1, sample_title(target)),
+        );
+        match title.placement {
+            Placement::Page => {
+                // 쪽 위·아래 여백 없이 세로 위치만 따른다.
+                let heading = heading.pt_0().pb_0();
+                blocks.push(
+                    div()
+                        .h(px(PREVIEW_TITLE_PAGE_HEIGHT))
+                        .flex()
+                        .flex_col()
+                        .map(|this| match title.vertical_align {
+                            VerticalAlign::Top => this.justify_start(),
+                            VerticalAlign::Center => this.justify_center(),
+                            VerticalAlign::Bottom => this.justify_end(),
+                        })
+                        .child(heading)
+                        .into_any_element(),
+                );
+                blocks.push(page_break().into_any_element());
+                blocks.push(body_text(SAMPLE_BODY[0]).into_any_element());
+            }
+            _ if title.page_break => {
+                // 새 페이지 첫머리라 위 여백은 없다.
+                blocks.push(page_break().into_any_element());
+                blocks.push(heading.pt_0().into_any_element());
+                blocks.push(body_text(SAMPLE_BODY[0]).into_any_element());
+            }
+            _ => {
+                blocks.push(body_text(SAMPLE_BODY[1]).into_any_element());
+                blocks.push(heading.into_any_element());
+                blocks.push(body_text(SAMPLE_BODY[0]).into_any_element());
+            }
         }
         div().flex().flex_col().children(blocks)
     }
+}
+
+/// 값 하나를 고르는 드롭다운 버튼. 고르면 `pick`을 부른다.
+fn choice<T: Copy + PartialEq + 'static>(
+    id: &'static str,
+    view: &WeakEntity<BookStyleView>,
+    current: T,
+    options: impl IntoIterator<Item = (T, SharedString)>,
+    menu_width: f32,
+    pick: impl Fn(&mut BookStyleView, T, &mut Window, &mut Context<BookStyleView>) + 'static,
+) -> impl IntoElement {
+    let options: Vec<_> = options.into_iter().collect();
+    let label = options
+        .iter()
+        .find(|(value, _)| *value == current)
+        .map(|(_, title)| title.clone())
+        .unwrap_or_default();
+    let (view, pick) = (view.clone(), Rc::new(pick));
+    Button::new(id)
+        .label(label)
+        .dropdown_caret(true)
+        .w_full()
+        .dropdown_menu(move |menu, _, _| {
+            options
+                .iter()
+                .fold(menu.min_w(px(menu_width)), |menu, (value, title)| {
+                    let (view, pick, value) = (view.clone(), pick.clone(), *value);
+                    menu.item(
+                        PopupMenuItem::new(title.clone())
+                            .checked(value == current)
+                            .on_click(move |_, window, cx| {
+                                view.update(cx, |view, cx| pick(view, value, window, cx))
+                                    .ok();
+                            }),
+                    )
+                })
+        })
 }
 
 /// 첫 줄 들여쓰기(em)를 공백 문자로: 전각 공백(1em) + 반각 공백(0.5em).

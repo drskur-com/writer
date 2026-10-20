@@ -266,6 +266,24 @@ pub fn heading_level(line: &str) -> Option<u8> {
     }
 }
 
+/// ATX 제목 줄의 여는 기호(들여쓰기 + `#`들 + 뒤 공백) 길이. 제목이 아니면 0.
+pub fn heading_marker_len(line: &str) -> usize {
+    let Some(level) = heading_level(line) else {
+        return 0;
+    };
+    let open = line.len() - line.trim_start_matches(' ').len() + usize::from(level);
+    line.len() - line[open..].trim_start_matches([' ', '\t']).len()
+}
+
+/// 줄의 제목 레벨을 바꾼다. `None`이면 제목 기호를 떼어 문단으로 만든다.
+pub fn set_heading_level(line: &str, level: Option<u8>) -> String {
+    let body = &line[heading_marker_len(line)..];
+    match level {
+        Some(level) => format!("{} {body}", "#".repeat(usize::from(level))),
+        None => body.to_string(),
+    }
+}
+
 /// ATX 제목 줄의 스팬(제목 전체 + 여는·닫는 `#`). 줄 텍스트만 보는 `heading_level`과 같은
 /// 판정이라, 에디터가 줄 크기를 바꾸는 시점과 똑같이 키 입력마다 즉시 계산할 수 있다.
 pub fn heading_spans(text: &str) -> Vec<Span> {
@@ -283,9 +301,7 @@ pub fn heading_spans(text: &str) -> Vec<Span> {
             range: start..start + line.len(),
             kind: SpanKind::Heading(level),
         });
-        // 여는 기호: 들여쓰기 + `#`들 + 뒤 공백.
-        let open = line.len() - line.trim_start_matches(' ').len() + usize::from(level);
-        let open = line.len() - line[open..].trim_start_matches([' ', '\t']).len();
+        let open = heading_marker_len(line);
         out.push(Span {
             range: start..start + open,
             kind: SpanKind::Marker,
@@ -600,6 +616,17 @@ mod tests {
         assert!(pieces("# 제목", SpanKind::Heading(1)).is_empty());
         assert_eq!(pieces("제목\n===\n", SpanKind::Heading(1)), ["제목\n==="]);
         assert_eq!(pieces("제목\n===\n", SpanKind::Marker), ["\n==="]);
+    }
+
+    #[test]
+    fn set_heading_level_replaces_the_marker() {
+        assert_eq!(set_heading_level("문단", Some(2)), "## 문단");
+        assert_eq!(set_heading_level("# 부 제목", Some(3)), "### 부 제목");
+        assert_eq!(set_heading_level("  ##\t장", None), "장");
+        assert_eq!(set_heading_level("#해시태그", Some(1)), "# #해시태그");
+        assert_eq!(set_heading_level("", Some(1)), "# ");
+        assert_eq!(heading_marker_len("## 장"), 3);
+        assert_eq!(heading_marker_len("문단"), 0);
     }
 
     #[test]

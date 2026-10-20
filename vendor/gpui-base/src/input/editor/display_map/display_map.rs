@@ -34,6 +34,8 @@ pub struct DisplayMap {
     tall_rows: Vec<(usize, TallRow)>,
     /// `tall_rows_prefix[i]` = sum of `tall_rows[..i]`.
     tall_rows_prefix: Vec<TallRow>,
+    /// Space above the first row: the first line's [`LineStyle::block_before`].
+    top_inset: Pixels,
 }
 
 /// Height of a display row beyond one line height.
@@ -58,6 +60,7 @@ impl DisplayMap {
             fold_map: FoldMap::new(),
             tall_rows: Vec::new(),
             tall_rows_prefix: Vec::new(),
+            top_inset: px(0.),
         }
     }
 
@@ -325,7 +328,14 @@ impl DisplayMap {
     /// Top of a display row in content space. `display_row` may equal the row count, giving
     /// the total content height.
     pub fn display_row_top(&self, display_row: usize, line_height: Pixels) -> Pixels {
-        line_height * display_row as f32 + self.extra_before(display_row).height(line_height)
+        self.top_inset
+            + line_height * display_row as f32
+            + self.extra_before(display_row).height(line_height)
+    }
+
+    /// Space above the first row (see [`LineStyle::block_before`]).
+    pub fn top_inset(&self) -> Pixels {
+        self.top_inset
     }
 
     /// Height of a display row, including a line block below it.
@@ -350,7 +360,7 @@ impl DisplayMap {
             return 0;
         }
         if self.tall_rows.is_empty() {
-            return ((y / line_height).max(0.) as usize).min(count - 1);
+            return (((y - self.top_inset) / line_height).max(0.) as usize).min(count - 1);
         }
         // Last row whose top is at or above `y`.
         let (mut low, mut high) = (0, count);
@@ -369,6 +379,7 @@ impl DisplayMap {
     fn rebuild_tall_rows(&mut self) {
         self.tall_rows.clear();
         self.tall_rows_prefix.clear();
+        self.top_inset = self.line_style(0).block_before.max(px(0.));
         if !self.wrap_map.wrapper().has_styled_lines() {
             return;
         }

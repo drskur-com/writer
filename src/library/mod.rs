@@ -33,7 +33,8 @@ pub use meta::{
 };
 pub use preview::{Preview, read_preview};
 pub use style::{
-    Align, ResolvedStyle, StyleSpec, StyleTarget, Styles, import_styles, read_styles, write_styles,
+    Align, FONT_WEIGHTS, PREFIX_NUMBER, Placement, ResolvedStyle, StyleSpec, StyleTarget, Styles,
+    VerticalAlign, import_styles, read_styles, write_styles,
 };
 
 use std::io;

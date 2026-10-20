@@ -342,6 +342,9 @@ pub struct LineBlockContext {
     pub text: gpui::SharedString,
     /// Size of the block: the text width and the measured block height.
     pub size: gpui::Size<gpui::Pixels>,
+    /// The block sits above the line (the first line's [`super::LineStyle::block_before`])
+    /// rather than below it.
+    pub above: bool,
 }
 
 /// Draws the block below a line (see [`EditorState::set_line_blocks`]).

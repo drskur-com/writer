@@ -113,13 +113,19 @@ pub struct LineStyle {
     pub text_scale: f32,
     /// Multiplier for the editor line height (each wrapped row of the line).
     pub height_scale: f32,
-    /// Height of a block painted below the line's last row (see [`LineBlockMeasureFn`]).
+    /// Height of a block painted below the line's last row. The measured block
+    /// ([`LineBlockMeasureFn`]) is added to it, so a line style can reserve room below the
+    /// measured block, e.g. for a page break mark the block renderer draws in the rest.
     pub block_height: Pixels,
     /// Hide the line's text (its rows take no height) unless a selection touches the line,
     /// e.g. to show only the block of a Markdown image line until the caret enters it.
     pub collapsed: bool,
     /// Empty space below the line (after its block), e.g. the gap between paragraphs.
     pub space_after: Pixels,
+    /// Height of a block painted above the line. Only the first buffer line's is used: it is
+    /// a header above the document that scrolls with it (the block renderer gets
+    /// [`crate::input::LineBlockContext::above`]), e.g. a page break mark before a title.
+    pub block_before: Pixels,
     /// Extra left offset of the line's first visual row, e.g. a paragraph's first-line indent.
     /// The first row wraps that much narrower.
     pub first_indent: Pixels,
@@ -149,6 +155,7 @@ impl Default for LineStyle {
             block_height: px(0.),
             collapsed: false,
             space_after: px(0.),
+            block_before: px(0.),
             first_indent: px(0.),
             align: LineAlign::Start,
         }
@@ -765,7 +772,7 @@ impl TextWrapper {
                 None => LineStyle::default(),
             };
             if let Some(line_block) = &self.line_block {
-                style.block_height = line_block(&line_str, wrap_width).max(px(0.));
+                style.block_height += line_block(&line_str, wrap_width).max(px(0.));
             }
             let revealed = style.collapsed && self.reveal.iter().any(|r| r.contains(&row));
 

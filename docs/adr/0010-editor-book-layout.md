@@ -2,7 +2,7 @@
 
 - 상태: Proposed
 - 날짜: 2026-10-20
-- 관련: ADR-0006, ADR-0008, ADR-0009, ADR-0011 · `vendor/gpui-base`, `docs/patches/gpui-base-0.8.0-line-layout.patch`, `src/app/editor_layout.rs`, `src/app/editor.rs`
+- 관련: ADR-0006, ADR-0008, ADR-0009, ADR-0011 · `vendor/gpui-base`, `docs/patches/gpui-base-0.8.0-line-layout.patch`, `docs/patches/gpui-base-0.8.0-line-block-style.patch`, `src/app/editor_layout.rs`, `src/app/editor.rs`
 
 ## 배경 (Context)
 
@@ -32,6 +32,12 @@ ADR-0009의 책 스타일(정렬·첫 줄 들여쓰기·문단 간격·제목 �
 - 줄 아래에 다음 블록과의 여백을 둔다. 두 블록 사이 여백 = max(앞 블록 뒤 여백, 뒤 블록 앞 여백)(CSS 여백 겹침과 같음).
   다음 줄이 빈 줄이면 문단 뒤 여백을 두고, 빈 줄은 그 아래 평범한 빈 행으로 남는다(접지 않음, 커서가 갈 수 있음).
 - 목록·인용·코드 펜스·표·4칸 들여쓴 줄에는 들여쓰기와 정렬을 입히지 않고, 이런 줄끼리는 여백 없이 붙인다.
+- 페이지 나눔 표시("여기서 페이지가 나뉩니다", epubly 편집 화면과 같음): 새 페이지에서 시작하는 제목(별도 제목 페이지·`page_break`, 숨긴 제목 포함)의 앞 줄 아래와 별도 제목 페이지인 제목 줄 아래.
+  - 엔진(`line-block-style` 패치): 줄 스타일의 `block_height`에 측정한 블록 높이를 더한다. 줄 스타일이 앞뒤 줄을 보고 측정 블록(이미지) 밑에 몫을 잡는다.
+    `LineStyle::block_before`는 첫 줄 것만 써서 문서 위 머리 블록이 된다(내용과 함께 스크롤). 세로 위치는 모두 `DisplayMap::display_row_top`을 거치므로 그리기·클릭·스크롤이 함께 내려간다. 블록 렌더러는 `LineBlockContext::above`로 구분한다.
+  - 앱: 블록 렌더러는 측정 몫(이미지)을 그리고 남은 몫에 표시를 그린다. 나뉜 뒤에는 다음 제목의 앞 여백을 두지 않는다(새 페이지 첫머리).
+  - 시트 첫 줄이 새 페이지 제목이면(시트마다 장 하나) 첫 줄 위 블록에 표시한다.
+- 툴바 ¶ 버튼은 커서 줄을 본문·부·장·절 제목(`#`~`###`)으로 바꾼다(메모에서는 제목 1~3). 메뉴는 커서 줄의 지금 종류에 체크한다.
 
 ## 결과 (Consequences)
 

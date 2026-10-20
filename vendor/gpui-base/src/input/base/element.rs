@@ -2009,6 +2009,19 @@ impl<M: InputModeKind> TextElement<M> {
         };
         let width = layout.wrap_width.unwrap_or(layout.content_width);
         let mut placements = Vec::new();
+        // The header above the first line, while that line is laid out.
+        let inset = state.display_map.top_inset();
+        if inset > px(0.) && layout.visible_buffer_lines.first() == Some(&0) {
+            placements.push((
+                super::LineBlockContext {
+                    line: 0,
+                    text: state.text.slice_line(0).to_string().into(),
+                    size: size(width, inset),
+                    above: true,
+                },
+                bounds.origin + point(layout.line_number_width, layout.visible_top - inset),
+            ));
+        }
         let mut y = layout.visible_top;
         for (line, &row) in layout.lines.iter().zip(layout.visible_buffer_lines.iter()) {
             let line_size = line.size(layout.line_height);
@@ -2021,6 +2034,7 @@ impl<M: InputModeKind> TextElement<M> {
                         line: row,
                         text: state.text.slice_line(row).to_string().into(),
                         size: size(width, content_height),
+                        above: false,
                     },
                     bounds.origin + point(layout.line_number_width, top),
                 ));
@@ -4558,6 +4572,89 @@ mod tests {
             assert_eq!(rendered[0].0, 1);
             assert_eq!(rendered[0].1.as_ref(), "![img](a.png)");
             assert_eq!(rendered[0].2.height, px(100.));
+        });
+    }
+
+    #[gpui::test]
+    fn line_style_blocks_add_to_measured_blocks(cx: &mut TestAppContext) {
+        let text = "![img](a.png)\nbody";
+        let (editor, window) = decoration_editor(cx, text, false);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let rendered = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|window, cx| {
+            let seen = rendered.clone();
+            editor.update(cx, |state, cx| {
+                state.set_line_style(
+                    Some(|line: crate::input::LineContext<'_>| crate::input::LineStyle {
+                        block_height: px(if line.next.is_some() { 20. } else { 0. }),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                state.set_line_blocks(
+                    |line: &str, _| if line.starts_with("![") { px(100.) } else { px(0.) },
+                    move |block: &crate::input::LineBlockContext, _, _| {
+                        seen.borrow_mut().push((block.line, block.size.height));
+                        gpui::Empty.into_any_element()
+                    },
+                    cx,
+                );
+            });
+            window.draw(cx).clear(cx);
+            let state = editor.read(cx);
+            let lh = state.last_layout.as_ref().unwrap().line_height;
+            assert_eq!(state.display_map.display_row_height(0, lh), lh + px(120.));
+            assert_eq!(state.display_map.display_row_height(1, lh), lh);
+            assert_eq!(*rendered.borrow(), vec![(0, px(120.))]);
+        });
+    }
+
+    #[gpui::test]
+    fn first_line_block_before_insets_the_document(cx: &mut TestAppContext) {
+        let text = "title\nbody";
+        let (editor, window) = decoration_editor(cx, text, false);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let rendered = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|window, cx| {
+            let seen = rendered.clone();
+            editor.update(cx, |state, cx| {
+                // Every line asks for a block above; only the first line's counts.
+                state.set_line_style(
+                    Some(|_: crate::input::LineContext<'_>| crate::input::LineStyle {
+                        block_before: px(40.),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                state.set_line_blocks(
+                    |_: &str, _| px(0.),
+                    move |block: &crate::input::LineBlockContext, _, _| {
+                        seen.borrow_mut().push((block.line, block.above, block.size.height));
+                        gpui::Empty.into_any_element()
+                    },
+                    cx,
+                );
+            });
+            window.draw(cx).clear(cx);
+            let state = editor.read(cx);
+            let layout = state.last_layout.as_ref().unwrap();
+            let lh = layout.line_height;
+            let map = &state.display_map;
+            assert_eq!(map.display_row_top(0, lh), px(40.));
+            assert_eq!(map.display_row_top(1, lh), px(40.) + lh);
+            assert_eq!(map.content_height(lh), px(40.) + lh * 2.);
+            assert_eq!(map.display_row_at_y(px(40.) + lh * 1.5, lh), 1);
+            assert_eq!(layout.visible_top, px(40.));
+
+            // A click in the header lands on the first line; one on the second line stays there.
+            let origin = state.last_bounds.unwrap().origin;
+            let (ix, _) = state.index_for_mouse_position(origin + point(px(1.), px(10.)));
+            assert!((0..=5).contains(&ix), "{ix}");
+            let (ix, _) =
+                state.index_for_mouse_position(origin + point(px(1.), px(40.) + lh * 1.5));
+            assert!((6..=10).contains(&ix), "{ix}");
+
+            assert_eq!(*rendered.borrow(), vec![(0, true, px(40.))]);
         });
     }
 
