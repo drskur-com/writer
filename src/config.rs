@@ -20,6 +20,8 @@ pub struct Config {
     pub library_root: Option<PathBuf>,
     /// 최근에 연 라이브러리(최신이 앞).
     pub recent_libraries: Vec<PathBuf>,
+    /// 마지막으로 선택한 테마 이름. 없으면 기본 라이트.
+    pub theme: Option<String>,
 }
 
 /// 설정 디렉터리 (`<config_dir>/Writer`).

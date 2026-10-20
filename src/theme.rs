@@ -32,24 +32,29 @@ pub fn register(cx: &mut App) {
     }
 }
 
-/// 등록된 테마 이름 목록. `ThemeRegistry::sorted_themes` 순서를 따른다.
+/// 메뉴에 노출할 테마 이름 목록. `ThemeRegistry::sorted_themes` 순서를 따른다.
+///
+/// gpui-component 기본 테마(`is_default`)는 앱 레이아웃용 토큰이 맞춰져 있지 않으므로 뺀다.
+/// `themes/writer.json`에 테마를 추가하면 자동으로 포함된다.
 pub fn theme_names(cx: &App) -> Vec<SharedString> {
     ThemeRegistry::global(cx)
         .sorted_themes()
         .into_iter()
+        .filter(|theme| !theme.is_default)
         .map(|theme| theme.name.clone())
         .collect()
 }
 
-/// 이름으로 테마를 적용한다. 등록되지 않은 이름이면 아무 것도 하지 않는다.
+/// 이름으로 테마를 적용하고 성공 여부를 돌려준다. 등록되지 않은 이름이면 아무 것도 하지 않고 `false`.
 ///
 /// 모드(라이트/다크)까지 함께 전환하므로 호출 후 메뉴를 다시 만들면
 /// 체크 표시가 새 테마를 가리킨다.
-pub fn set_theme(name: &str, cx: &mut App) {
+pub fn set_theme(name: &str, cx: &mut App) -> bool {
     let Some(config) = ThemeRegistry::global(cx).themes().get(name).cloned() else {
-        return;
+        return false;
     };
     Theme::update(cx, |theme| theme.apply_config(&config));
+    true
 }
 
 /// 현재 활성 테마 이름.

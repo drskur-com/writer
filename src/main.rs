@@ -11,6 +11,7 @@ use std::path::PathBuf;
 #[cfg(not(target_os = "macos"))]
 use gpui_kit::component::menu::AppMenuBar;
 
+mod assets;
 mod config;
 mod icons;
 mod library;
@@ -145,7 +146,7 @@ struct Palette {
     muted: Hsla,
     border: Hsla,
     danger: Hsla,
-    /// 라이브러리 패널 배경/테두리.
+    /// 라이브러리 패널 배경/테두리. 테두리는 툴바 버튼·목록 구분선 같은 가는 선에도 쓴다.
     panel: Hsla,
     panel_border: Hsla,
     /// 패널의 선택된 줄.
@@ -218,7 +219,7 @@ fn tool_group(pal: Palette) -> Div {
         .rounded_full()
         .bg(pal.background)
         .border_1()
-        .border_color(pal.border.opacity(0.6))
+        .border_color(pal.panel_border)
         .shadow_sm()
 }
 
@@ -432,6 +433,13 @@ impl WriterApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 선택한 테마를 기억해 다음 실행에 복원한다.
+        let mut config = config::Config::load();
+        config.theme = Some(theme::active_name(cx).to_string());
+        if let Err(err) = config.save() {
+            eprintln!("설정 저장 실패: {err}");
+        }
+
         install_menus(cx);
         #[cfg(not(target_os = "macos"))]
         self.menu_bar.update(cx, |menu_bar, cx| menu_bar.reload(cx));
@@ -815,7 +823,7 @@ impl WriterApp {
                         .px_4()
                         .py_3()
                         .border_b_1()
-                        .border_color(pal.border.opacity(0.6))
+                        .border_color(pal.panel_border)
                         .text_sm()
                         .text_color(pal.foreground)
                         .when(selected, |this| this.bg(pal.active))
@@ -854,7 +862,7 @@ impl WriterApp {
                     .px_4()
                     .pb_2()
                     .border_b_1()
-                    .border_color(pal.border)
+                    .border_color(pal.panel_border)
                     .text_lg()
                     .font_semibold()
                     .text_color(pal.foreground)
@@ -1106,13 +1114,20 @@ impl Render for WriterApp {
 
 fn main() {
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::AllAssets)
+        .with_assets(assets::Assets)
         .run(|cx| {
             gpui_kit::init(cx);
 
-            // 테마 등록 후 기본 라이트 테마 적용
+            // 테마 등록 후 저장된 테마(없거나 모르는 이름이면 기본 라이트) 적용
+            let config = config::Config::load();
             theme::register(cx);
-            theme::set_theme(theme::DEFAULT_LIGHT, cx);
+            let restored = config
+                .theme
+                .as_deref()
+                .is_some_and(|name| theme::set_theme(name, cx));
+            if !restored {
+                theme::set_theme(theme::DEFAULT_LIGHT, cx);
+            }
 
             // macOS: 네이티브 메뉴 / Windows·Linux: 인윈도우 AppMenuBar용 메뉴 등록
             install_menus(cx);
@@ -1128,7 +1143,6 @@ fn main() {
             ]);
 
             // 저장된 라이브러리를 열어본다(없거나 실패하면 온보딩).
-            let config = config::Config::load();
             let library = config
                 .library_root
                 .as_deref()
