@@ -99,7 +99,7 @@ pub enum Block {
     List {
         ordered: bool,
         start: u32,
-        items: Vec<Vec<Block>>,
+        items: Vec<ListItem>,
     },
     /// 코드·수식 블록(원문 그대로).
     Code(String),
@@ -109,6 +109,27 @@ pub enum Block {
     Table(Table),
     /// 시트 끝에 모은 각주(번호, 내용).
     Footnotes(Vec<(usize, Vec<Block>)>),
+}
+
+/// 목록 항목 하나.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListItem {
+    /// GFM 할 일 항목(`- [ ]`·`- [x]`)이면 체크 여부. 일반 항목이면 `None`.
+    pub checked: Option<bool>,
+    pub blocks: Vec<Block>,
+}
+
+impl ListItem {
+    /// 항목 앞에 둘 기호. 할 일 항목은 번호·글머리표 대신 체크 상자(☐·☑)를 쓴다.
+    /// `number`는 번호 목록에서 이 항목의 번호다.
+    pub fn marker(&self, ordered: bool, number: usize) -> String {
+        match self.checked {
+            Some(true) => "☑".to_string(),
+            Some(false) => "☐".to_string(),
+            None if ordered => format!("{number}."),
+            None => "•".to_string(),
+        }
+    }
 }
 
 /// 시트 원문을 책 블록으로 바꾼다. 각주는 나온 순서로 번호를 매겨 끝에 모은다.
@@ -401,7 +422,13 @@ impl Walk<'_> {
                 let items = list
                     .children
                     .iter()
-                    .map(|item| self.blocks(children(item)))
+                    .map(|item| ListItem {
+                        checked: match item {
+                            Node::ListItem(item) => item.checked,
+                            _ => None,
+                        },
+                        blocks: self.blocks(children(item)),
+                    })
                     .collect();
                 out.push(Block::List {
                     ordered: list.ordered,
@@ -740,6 +767,25 @@ mod tests {
     }
 
     #[test]
+    fn task_list_items_keep_checked_state() {
+        let blocks = blocks("- [ ] 장보기\n- [x] 일정\n- 그냥 항목\n");
+        let Block::List { ordered, items, .. } = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        let checked: Vec<_> = items.iter().map(|item| item.checked).collect();
+        assert_eq!(checked, [Some(false), Some(true), None]);
+        // 체크 기호는 항목 글에 남지 않는다.
+        assert_eq!(items[1].blocks, [Block::Paragraph(plain("일정"))]);
+        let markers: Vec<_> = items.iter().map(|item| item.marker(*ordered, 1)).collect();
+        assert_eq!(markers, ["☐", "☑", "•"]);
+        // 표준이 아닌 `[v]`는 할 일이 아니다.
+        assert!(matches!(
+            &self::blocks("[v] 일정\n")[0],
+            Block::Paragraph(_)
+        ));
+    }
+
+    #[test]
     fn lists_quotes_code_rules_and_tables() {
         let text = "> 인용\n\n3. 셋\n4. 넷\n\n```\nlet a = 1;\n```\n\n---\n\n| a | b | c |\n|---|:-:|--:|\n| 1 | 2 | 3 |\n";
         let blocks = blocks(text);
@@ -753,8 +799,14 @@ mod tests {
                 ordered: true,
                 start: 3,
                 items: vec![
-                    vec![Block::Paragraph(plain("셋"))],
-                    vec![Block::Paragraph(plain("넷"))],
+                    ListItem {
+                        checked: None,
+                        blocks: vec![Block::Paragraph(plain("셋"))],
+                    },
+                    ListItem {
+                        checked: None,
+                        blocks: vec![Block::Paragraph(plain("넷"))],
+                    },
                 ],
             }
         );

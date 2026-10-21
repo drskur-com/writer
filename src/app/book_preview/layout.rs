@@ -559,12 +559,8 @@ impl<'a> Flow<'a> {
             } => {
                 self.space(self.em(0.5));
                 for (ix, item) in items.iter().enumerate() {
-                    let marker = if *ordered {
-                        format!("{}.", *start as usize + ix)
-                    } else {
-                        "•".to_string()
-                    };
-                    self.list_item(&marker, item, ctx);
+                    let marker = item.marker(*ordered, *start as usize + ix);
+                    self.list_item(&marker, &item.blocks, ctx);
                 }
                 self.space(self.em(0.5));
             }

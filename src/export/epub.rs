@@ -388,9 +388,49 @@ impl<'a> EpubBuilder<'a> {
                     sec.html_body.push_str(&format!("<{tag}>\n"));
                 }
                 for item in items {
+                    let Some(checked) = item.checked else {
+                        let sec = self.ensure_section(&self.project.name);
+                        sec.html_body.push_str("<li>\n");
+                        for b in &item.blocks {
+                            self.render_block(b, sheet_dir);
+                        }
+                        let sec = self.ensure_section(&self.project.name);
+                        sec.html_body.push_str("</li>\n");
+                        continue;
+                    };
+                    // 할 일 항목: 글머리표 대신 체크 상자를 첫 문단 앞에 둔다. 리더마다 폼 요소를
+                    // 다르게 다루므로 `<input>` 대신 글자(☐·☑)를 쓴다.
+                    let (mark, label) = if checked {
+                        ("☑", "완료")
+                    } else {
+                        ("☐", "할 일")
+                    };
+                    let task_box = format!(
+                        "<span class=\"task-box\" role=\"img\" aria-label=\"{label}\">{mark}</span> "
+                    );
                     let sec = self.ensure_section(&self.project.name);
-                    sec.html_body.push_str("<li>\n");
-                    for b in item {
+                    sec.html_body.push_str("<li class=\"task\">\n");
+                    let mut blocks = item.blocks.iter();
+                    match blocks.next() {
+                        Some(Block::Paragraph(rich) | Block::Lines(rich)) => {
+                            let class = if matches!(item.blocks[0], Block::Lines(_)) {
+                                " class=\"lines\""
+                            } else {
+                                ""
+                            };
+                            let html = render_rich(rich, &mut self.notes);
+                            let sec = self.ensure_section(&self.project.name);
+                            sec.html_body
+                                .push_str(&format!("<p{class}>{task_box}{html}</p>\n"));
+                        }
+                        first => {
+                            sec.html_body.push_str(&format!("<p>{task_box}</p>\n"));
+                            if let Some(first) = first {
+                                self.render_block(first, sheet_dir);
+                            }
+                        }
+                    }
+                    for b in blocks {
                         self.render_block(b, sheet_dir);
                     }
                     let sec = self.ensure_section(&self.project.name);
@@ -1038,6 +1078,10 @@ figure.image figcaption {{
   font-size: 0.85em;
   color: #666;
   margin-top: 0.4em;
+}}
+
+li.task {{
+  list-style: none;
 }}
 
 p.missing-image {{
@@ -1707,6 +1751,22 @@ mod image_tests {
             html.contains("[이미지를 찾을 수 없음: ../Extras/Attachments/없는.png]"),
             "{html}"
         );
+    }
+
+    #[test]
+    fn task_items_show_check_boxes() {
+        let mut archive = build_with("- [ ] 장보기\n- [x] 일정\n- 그냥 항목\n");
+        let html = section(&mut archive);
+        assert!(
+            html.contains("<li class=\"task\">\n<p><span class=\"task-box\" role=\"img\" aria-label=\"할 일\">☐</span> 장보기</p>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("aria-label=\"완료\">☑</span> 일정</p>"),
+            "{html}"
+        );
+        assert!(html.contains("<li>\n<p>그냥 항목</p>"), "{html}");
+        assert!(!html.contains("[x]"), "{html}");
     }
 
     #[test]
