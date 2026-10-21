@@ -33,6 +33,7 @@
 | [0018](./0018-unnumbered-heading-attribute.md) | 번호 없는 제목(서장·에필로그 등)은 시트 첫 줄 제목의 `{unnumbered}` 속성으로 표시한다 | Proposed | 2026-11-14 |
 | [0019](./0019-cross-group-sheet-move.md) | 시트를 끌어 다른 그룹으로 옮기면 파일을 옮기고 두 그룹의 순서·접합을 함께 저장한다 | Proposed | 2026-10-22 |
 | [0020](./0020-group-multiselect-move.md) | 그룹을 Shift로 여러 개 골라 다른 그룹의 하위로 끌어 옮긴다 | Proposed | 2026-10-22 |
+| [0021](./0021-image-path-resolution.md) | 이미지 경로는 한 곳에서 찾고, `../`가 어긋난 경로는 위 폴더에서 다시 찾는다 | Proposed | 2026-10-22 |
 
 ## 작성 규칙
 

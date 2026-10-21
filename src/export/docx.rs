@@ -568,7 +568,11 @@ impl<'a> DocBuilder<'a> {
 
     fn image(&mut self, image: &ImageLine, ctx: Context) {
         let caption = image.alt.trim().to_string();
-        let Some(path) = resolve_image(&self.dir, &self.project.dir, &image.destination) else {
+        let Some(path) = crate::library::resolve_image_path(
+            &self.dir,
+            Some(&self.project.dir),
+            &image.destination,
+        ) else {
             self.paragraph(
                 "Caption",
                 "",
@@ -1081,27 +1085,6 @@ fn language(project: &ExportProject) -> &str {
     } else {
         language
     }
-}
-
-/// 이미지 경로 → 파일(시트 폴더 → 프로젝트 폴더 → 첨부파일 순). 웹 주소는 `None`.
-fn resolve_image(sheet_dir: &Path, project_dir: &Path, destination: &str) -> Option<PathBuf> {
-    if destination.starts_with("http://") || destination.starts_with("https://") {
-        return None;
-    }
-    let path = Path::new(destination.strip_prefix("file://").unwrap_or(destination));
-    if path.is_absolute() {
-        return path.is_file().then(|| path.to_path_buf());
-    }
-    [
-        sheet_dir.join(path),
-        project_dir.join(path),
-        project_dir
-            .join(crate::library::EXTRAS_DIR)
-            .join(crate::library::ATTACHMENTS_GROUP)
-            .join(path),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.is_file())
 }
 
 const ROOT_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

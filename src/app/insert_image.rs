@@ -63,10 +63,6 @@ enum ImageSource {
 /// 내려받을 이미지 크기 한도.
 const MAX_DOWNLOAD_BYTES: usize = 50 * 1024 * 1024;
 
-fn is_web_address(destination: &str) -> bool {
-    destination.starts_with("http://") || destination.starts_with("https://")
-}
-
 /// 웹 주소의 이미지를 내려받는다. 이미지가 아니거나 너무 크면 오류.
 async fn download_image(
     client: std::sync::Arc<dyn http_client::HttpClient>,
@@ -355,7 +351,7 @@ impl InsertImageForm {
         // 프로젝트 시트의 웹 이미지는 먼저 내려받는다(이미 넣은 웹 이미지를 고쳐 저장할 때도).
         let in_project = self.tabs.contains(&Source::Attachment);
         let web = match &image {
-            ImageSource::Url(url) | ImageSource::Existing(url) if is_web_address(url) => {
+            ImageSource::Url(url) | ImageSource::Existing(url) if library::is_web_address(url) => {
                 Some(url.clone())
             }
             _ => None,

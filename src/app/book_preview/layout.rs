@@ -1194,21 +1194,16 @@ struct ResolvedImage {
     size: Option<(f32, f32)>,
 }
 
-/// 이미지 경로 → 파일. 상대 경로는 시트 폴더 기준이다. 읽을 수 없으면 `None`.
+/// 이미지 경로 → 파일. 상대 경로는 시트 폴더 기준이고, `../`가 어긋난 경로도 찾는다
+/// (`library::resolve_image_path`). 읽을 수 없으면 `None`.
 fn image_source(dir: &Path, destination: &str) -> Option<ResolvedImage> {
-    if destination.starts_with("http://") || destination.starts_with("https://") {
+    if library::is_web_address(destination) {
         return Some(ResolvedImage {
             source: ImageFile::Url(destination.to_string().into()),
             size: None,
         });
     }
-    let path = destination.strip_prefix("file://").unwrap_or(destination);
-    let path = Path::new(path);
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        dir.join(path)
-    };
+    let path = library::resolve_image_path(dir, None, destination)?;
     image_file(&path)
 }
 

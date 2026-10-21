@@ -16,6 +16,7 @@
 mod book;
 mod document;
 mod files;
+mod images;
 mod layout;
 mod manuscript;
 mod meta;
@@ -28,6 +29,7 @@ pub use book::{
 };
 pub use document::{count_words, read_sheet, write_sheet};
 pub use files::{FileItem, FileKind, GroupKind, format_size, move_file};
+pub use images::{is_web_address, resolve_image_path};
 pub use layout::{FolderKind, initialize, inspect};
 pub use manuscript::{ManuscriptSheet, manuscript_sheets};
 pub use meta::{
@@ -516,7 +518,7 @@ fn is_markdown(path: &Path) -> bool {
 }
 
 #[cfg(test)]
-mod test_util {
+pub(crate) mod test_util {
     use super::*;
 
     pub fn stem(sheet: &Sheet) -> String {

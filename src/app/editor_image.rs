@@ -187,7 +187,7 @@ impl ImageBlocks {
         let image = markdown::image_line(line)?;
         let destination = image.destination;
         let caption = (!image.alt.trim().is_empty()).then(|| image.alt.trim().to_string().into());
-        if destination.starts_with("http://") || destination.starts_with("https://") {
+        if library::is_web_address(&destination) {
             return Some(Placement {
                 size: image_size(None, &image.options, width),
                 source: Source::Url(destination.into()),
@@ -195,8 +195,9 @@ impl ImageBlocks {
                 caption,
             });
         }
-        let path = self.resolve(&destination);
-        let Some(file) = self.file(&path) else {
+        let resolved = library::resolve_image_path(&self.dir, None, &destination)
+            .and_then(|path| self.file(&path).map(|file| (path, file)));
+        let Some((path, file)) = resolved else {
             return Some(Placement {
                 source: Source::Missing(destination),
                 size: size(width, px(MISSING_HEIGHT)),
@@ -214,17 +215,6 @@ impl ImageBlocks {
             align: image.options.align,
             caption,
         })
-    }
-
-    /// 마크다운 경로 → 파일 경로. 상대 경로는 시트 폴더 기준이다.
-    fn resolve(&self, destination: &str) -> PathBuf {
-        let path = destination.strip_prefix("file://").unwrap_or(destination);
-        let path = Path::new(path);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.dir.join(path)
-        }
     }
 
     fn file(&self, path: &Path) -> Option<ImageFile> {

@@ -176,6 +176,34 @@ impl<'a> EpubBuilder<'a> {
         self.current_section.as_mut().unwrap()
     }
 
+    /// 이미지 파일을 ePub에 넣고, 섹션 파일(`text/…`)에서 본 상대 경로를 돌려준다.
+    /// 같은 파일을 두 번 넣지 않는다.
+    fn embed_image(&mut self, path: PathBuf) -> String {
+        let key = path.to_string_lossy().to_string();
+        if let Some(existing) = self.image_dest_map.get(&key) {
+            return format!("../{existing}");
+        }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_ascii_lowercase();
+        let mime = mime_type_for_extension(&ext);
+        self.image_counter += 1;
+        let filename = format!("images/img_{:04}.{ext}", self.image_counter);
+
+        self.images.push(ImageAsset {
+            id: format!("img_{}", self.image_counter),
+            zip_path: filename.clone(),
+            source_path: path,
+            media_type: mime,
+            is_cover: false,
+        });
+
+        self.image_dest_map.insert(key, filename.clone());
+        format!("../{filename}")
+    }
+
     /// 제목 블록을 스타일 설정에 맞춰 렌더링한다.
     fn render_heading(&mut self, level: u8, text: &Rich, unnumbered: bool) {
         self.heading_counter += 1;
@@ -378,8 +406,28 @@ impl<'a> EpubBuilder<'a> {
                 sec.html_body.push_str("</code></pre>\n");
             }
             Block::Image(img) => {
-                let resolved_path =
-                    resolve_image_path(sheet_dir, &self.project.dir, &img.destination);
+                let resolved_path = crate::library::resolve_image_path(
+                    sheet_dir,
+                    Some(&self.project.dir),
+                    &img.destination,
+                );
+                // ePub 안에서 존재하지 않는 경로를 가리키면 검증기(RSC-007)와 리더가 오류로 본다.
+                // 파일을 찾지 못한 이미지는 미리보기·DOCX처럼 안내 문단으로 바꾼다.
+                let src = resolved_path
+                    .map(|path| self.embed_image(path))
+                    .or_else(|| {
+                        crate::library::is_web_address(&img.destination)
+                            .then(|| img.destination.clone())
+                    });
+                let Some(src) = src else {
+                    let sec = self.ensure_section(&self.project.name);
+                    sec.html_body.push_str(&format!(
+                        "<p class=\"missing-image\">[이미지를 찾을 수 없음: {}]</p>\n",
+                        escape_xml(&img.destination)
+                    ));
+                    return;
+                };
+
                 let mut img_class = "image".to_string();
                 match img.options.align {
                     crate::markdown::ImageAlign::Left => img_class.push_str(" align-left"),
@@ -389,36 +437,6 @@ impl<'a> EpubBuilder<'a> {
                 if img.options.full_page {
                     img_class.push_str(" full-page");
                 }
-
-                let src = if let Some(path) = resolved_path {
-                    let key = path.to_string_lossy().to_string();
-                    let zip_img_path = if let Some(existing) = self.image_dest_map.get(&key) {
-                        existing.clone()
-                    } else {
-                        let ext = path
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .unwrap_or("png")
-                            .to_ascii_lowercase();
-                        let mime = mime_type_for_extension(&ext);
-                        self.image_counter += 1;
-                        let filename = format!("images/img_{:04}.{ext}", self.image_counter);
-
-                        self.images.push(ImageAsset {
-                            id: format!("img_{}", self.image_counter),
-                            zip_path: filename.clone(),
-                            source_path: path,
-                            media_type: mime,
-                            is_cover: false,
-                        });
-
-                        self.image_dest_map.insert(key, filename.clone());
-                        filename
-                    };
-                    format!("../{}", zip_img_path)
-                } else {
-                    img.destination.clone()
-                };
 
                 let mut style_attr = String::new();
                 if let Some(w) = img.options.width {
@@ -862,38 +880,6 @@ fn link_notes_across_sections(sections: &mut [Section]) {
     }
 }
 
-/// 이미지 경로를 디스크 상의 실제 절대 경로로 찾는다.
-fn resolve_image_path(sheet_dir: &Path, project_dir: &Path, destination: &str) -> Option<PathBuf> {
-    if destination.starts_with("http://") || destination.starts_with("https://") {
-        return None;
-    }
-    let clean = destination.strip_prefix("file://").unwrap_or(destination);
-    let p = Path::new(clean);
-    if p.is_absolute() && p.is_file() {
-        return Some(p.to_path_buf());
-    }
-
-    // 1. 시트 폴더 기준 상대 경로
-    let cand = sheet_dir.join(p);
-    if cand.is_file() {
-        return Some(cand);
-    }
-
-    // 2. 프로젝트 폴더 기준 상대 경로
-    let cand = project_dir.join(p);
-    if cand.is_file() {
-        return Some(cand);
-    }
-
-    // 3. Extras/Attachments 폴더 기준
-    let cand = project_dir.join("Extras").join("Attachments").join(p);
-    if cand.is_file() {
-        return Some(cand);
-    }
-
-    None
-}
-
 /// 프로젝트 책 스타일(`[styles.*]`)을 반영한 CSS를 생성한다.
 fn generate_css(project: &ExportProject) -> String {
     let body_style = project.styles.resolve(StyleTarget::Body);
@@ -1052,6 +1038,12 @@ figure.image figcaption {{
   font-size: 0.85em;
   color: #666;
   margin-top: 0.4em;
+}}
+
+p.missing-image {{
+  font-size: 0.85em;
+  color: #666;
+  margin: 1em 0;
 }}
 
 figure.align-left {{
@@ -1629,5 +1621,99 @@ mod tests {
             "{}",
             sections[1].1
         );
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use crate::export::ExportSheet;
+    use crate::library::test_util::temp_dir;
+    use crate::library::{ATTACHMENTS_GROUP, BookMeta, EXTRAS_DIR, GROUP_META_FILE, Styles};
+    use std::io::Cursor;
+
+    /// `Projects/책/Extras/Attachments/a.png`가 있는 프로젝트와, `본문/1장`에 둔 시트로
+    /// ePub을 만든다. `chapters`는 `본문/1장/<이름>.md`의 원문이다.
+    fn build_with(chapters: &str) -> zip::ZipArchive<Cursor<Vec<u8>>> {
+        let root = temp_dir("epub-images");
+        let project_dir = root.join("Projects").join("책");
+        let attachments = project_dir.join(EXTRAS_DIR).join(ATTACHMENTS_GROUP);
+        std::fs::create_dir_all(&attachments).unwrap();
+        let sheet_dir = project_dir.join("본문").join("1장");
+        std::fs::create_dir_all(&sheet_dir).unwrap();
+        for group in [&project_dir, &project_dir.join("본문"), &sheet_dir] {
+            std::fs::write(group.join(GROUP_META_FILE), "").unwrap();
+        }
+        std::fs::write(attachments.join("a.png"), b"\x89PNG\r\n\x1a\nimage").unwrap();
+
+        let project = ExportProject {
+            name: "책".to_string(),
+            dir: project_dir.clone(),
+            book: BookMeta {
+                title: "책".to_string(),
+                ..Default::default()
+            },
+            styles: Styles::default(),
+            sheets: vec![ExportSheet {
+                path: sheet_dir.join("01.md"),
+                glued: false,
+                content: chapters.to_string(),
+            }],
+        };
+        let mut buffer = Cursor::new(Vec::new());
+        build(&project, &mut buffer).unwrap();
+        zip::ZipArchive::new(Cursor::new(buffer.into_inner())).unwrap()
+    }
+
+    fn section(archive: &mut zip::ZipArchive<Cursor<Vec<u8>>>) -> String {
+        let mut file = archive.by_name("OEBPS/text/section_0001.xhtml").unwrap();
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut file, &mut text).unwrap();
+        text
+    }
+
+    #[test]
+    fn relative_image_path_is_embedded_once() {
+        // 같은 그림을 두 번 써도 파일은 한 번만 넣고 같은 상대 경로를 가리킨다.
+        let mut archive = build_with(
+            "![사진](../../Extras/Attachments/a.png){width=320px}\n\n![또](../../Extras/Attachments/a.png)\n",
+        );
+        let html = section(&mut archive);
+        assert_eq!(html.matches("../images/img_0001.png").count(), 2, "{html}");
+        assert!(archive.by_name("OEBPS/images/img_0001.png").is_ok());
+        let names: Vec<String> = (0..archive.len())
+            .map(|ix| archive.by_index(ix).unwrap().name().to_string())
+            .filter(|name| name.starts_with("OEBPS/images/"))
+            .collect();
+        assert_eq!(names, ["OEBPS/images/img_0001.png"]);
+    }
+
+    #[test]
+    fn stale_parent_image_path_is_still_embedded() {
+        // 그룹을 옮겨 `../` 깊이가 어긋난 경로도 찾아서 넣는다(ADR-0019·0020).
+        let mut archive = build_with("![사진](../Extras/Attachments/a.png)\n");
+        let html = section(&mut archive);
+        assert!(html.contains("../images/img_0001.png"), "{html}");
+        assert!(archive.by_name("OEBPS/images/img_0001.png").is_ok());
+    }
+
+    #[test]
+    fn missing_image_becomes_notice_instead_of_broken_link() {
+        // 찾지 못한 이미지의 상대 경로를 그대로 쓰면 ePub 안에서 깨진 참조(RSC-007)가 된다.
+        let mut archive = build_with("![사진](../Extras/Attachments/없는.png)\n");
+        let html = section(&mut archive);
+        assert!(!html.contains("src=\""), "{html}");
+        assert!(
+            html.contains("[이미지를 찾을 수 없음: ../Extras/Attachments/없는.png]"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn web_image_keeps_its_address() {
+        // 프로젝트 밖(메모)에서 쓴 주소 이미지는 파일이 없어도 주소를 그대로 쓴다.
+        let mut archive = build_with("![사진](https://x.io/a.png)\n");
+        let html = section(&mut archive);
+        assert!(html.contains("src=\"https://x.io/a.png\""), "{html}");
     }
 }
