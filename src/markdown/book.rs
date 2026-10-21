@@ -50,6 +50,8 @@ pub enum Block {
         text: Rich,
     },
     Paragraph(Rich),
+    /// 원문에 명시한 빈 줄 수(줄바꿈 유지 옵션).
+    BlankLines(usize),
     Quote(Vec<Block>),
     List {
         ordered: bool,
@@ -69,15 +71,37 @@ pub enum Block {
 
 /// 시트 원문을 책 블록으로 바꾼다. 각주는 나온 순서로 번호를 매겨 끝에 모은다.
 pub fn blocks(text: &str) -> Vec<Block> {
+    blocks_with_line_breaks(text, false)
+}
+
+/// 저장된 원고를 읽는다. 줄바꿈 유지 시 블록 사이의 저장용 구분 빈 줄은 세지 않는다.
+pub fn manuscript_blocks(text: &str, preserve_line_breaks: bool) -> Vec<Block> {
+    blocks_with_line_breaks(text, preserve_line_breaks)
+}
+
+/// 일반 개행과 블록 사이 빈 줄을 선택적으로 유지한다.
+pub fn blocks_with_line_breaks(text: &str, preserve_line_breaks: bool) -> Vec<Block> {
     let Ok(root) = markdown::to_mdast(text, &parse_options()) else {
         return Vec::new();
     };
     let mut cx = Walk {
         source: text,
+        preserve_line_breaks,
         footnotes: Vec::new(),
         definitions: Vec::new(),
     };
     let mut out = cx.blocks(children(&root));
+    if preserve_line_breaks {
+        let leading = text.lines().take_while(|line| line.trim().is_empty()).count();
+        let trailing = text.lines().rev().take_while(|line| line.trim().is_empty()).count();
+        if leading > 0 {
+            out.insert(0, Block::BlankLines(leading));
+        }
+        // 빈 줄만 있는 원문은 중복해서 넣지 않는다.
+        if trailing > 0 && !text.trim().is_empty() {
+            out.push(Block::BlankLines(trailing));
+        }
+    }
     // 참조한 순서대로 정의를 붙인다. 참조하지 않은 정의는 뺀다.
     let notes: Vec<(usize, Vec<Block>)> = cx
         .footnotes
@@ -96,6 +120,7 @@ pub fn blocks(text: &str) -> Vec<Block> {
 
 struct Walk<'a> {
     source: &'a str,
+    preserve_line_breaks: bool,
     /// 참조한 각주 식별자(순서 = 번호 - 1).
     footnotes: Vec<String>,
     /// 각주 정의(식별자, 내용).
@@ -109,8 +134,21 @@ fn children(node: &Node) -> &[Node] {
 impl Walk<'_> {
     fn blocks(&mut self, nodes: &[Node]) -> Vec<Block> {
         let mut out = Vec::new();
+        let mut previous_end = None;
         for node in nodes {
+            let start = out.len();
             self.block(node, &mut out);
+            if self.preserve_line_breaks
+                && out.len() > start
+                && let (Some(end), Some(position)) = (previous_end, node.position())
+            {
+                // 블록 사이 첫 빈 줄은 저장 형식의 문단 경계이고, 나머지가 원문의 빈 줄이다.
+                let blank_lines = position.start.line.saturating_sub(end + 2);
+                if blank_lines > 0 {
+                    out.insert(start, Block::BlankLines(blank_lines));
+                }
+            }
+            previous_end = node.position().map(|position| position.end.line);
         }
         out
     }
@@ -207,8 +245,15 @@ impl Walk<'_> {
             }
         };
         match node {
-            // 문단 안 줄바꿈은 공백이다(ADR-0011).
-            Node::Text(text) => push(&text.value.replace('\n', " "), marks),
+            // 기본은 문단 안 줄바꿈을 공백으로 바꾸고, 옵션을 켜면 유지한다.
+            Node::Text(text) => {
+                let normalized = text.value.replace("\r\n", "\n").replace('\r', "\n");
+                if self.preserve_line_breaks {
+                    push(&normalized, marks);
+                } else {
+                    push(&normalized.replace('\n', " "), marks);
+                }
+            }
             Node::Break(_) => push("\n", marks),
             Node::InlineCode(code) => push(
                 &code.value,
@@ -301,6 +346,41 @@ mod tests {
             text: text.into(),
             marks,
         }
+    }
+
+    #[test]
+    fn manuscript_line_breaks_keep_paragraphs_and_blank_lines() {
+        // 에디터의 각 줄은 문단으로 남는다.
+        let saved = crate::text_transform::to_markdown("첫 문장\n둘째 문장");
+        let expected = vec![
+            Block::Paragraph(plain("첫 문장")),
+            Block::Paragraph(plain("둘째 문장")),
+        ];
+        assert_eq!(manuscript_blocks(&saved, true), expected);
+        assert_eq!(manuscript_blocks(&saved, false), expected);
+        // 에디터의 빈 줄은 빈 줄 블록이 된다.
+        for count in 1..=3 {
+            let editor = format!("첫 문장{}둘째 문장", "\n".repeat(count + 1));
+            let saved = crate::text_transform::to_markdown(&editor);
+            assert_eq!(
+                manuscript_blocks(&saved, true),
+                vec![
+                    Block::Paragraph(plain("첫 문장")),
+                    Block::BlankLines(count),
+                    Block::Paragraph(plain("둘째 문장")),
+                ],
+            );
+        }
+        // 이미지 줄은 이미지 블록으로 남는다.
+        let saved = crate::text_transform::to_markdown("앞 문장\n![](a.png)\n뒤 문장");
+        let blocks = manuscript_blocks(&saved, true);
+        assert_eq!(blocks.len(), 3, "{blocks:?}");
+        assert!(matches!(blocks[1], Block::Image(_)), "{blocks:?}");
+        // 다른 앱에서 만든 문단 안 개행은 줄바꿈으로 유지한다.
+        assert_eq!(
+            manuscript_blocks("긴 문단의\n둘째 줄", true),
+            vec![Block::Paragraph(plain("긴 문단의\n둘째 줄"))],
+        );
     }
 
     #[test]

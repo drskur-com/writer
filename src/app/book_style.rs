@@ -53,7 +53,7 @@ const PREVIEW_TITLE_PAGE_HEIGHT: f32 = 220.0;
 
 /// 미리보기 본문.
 const SAMPLE_BODY: [&str; 2] = [
-    "문장은 저마다 고유한 리듬을 가지고 있습니다. 글꼴과 줄 간격은 그 리듬을 읽는 경험으로 바꿉니다.",
+    "문장은 저마다 고유한 리듬을 가지고 있습니다.\n글꼴과 줄 간격은 그 리듬을 읽는 경험으로 바꿉니다.",
     "문단의 들여쓰기와 간격을 조절해 책에 어울리는 호흡을 만들어 보세요.",
 ];
 
@@ -876,6 +876,20 @@ impl BookStyleView {
                 })
         } else {
             fields
+                .child(
+                    Checkbox::new("style-preserve-line-breaks")
+                        .label("원문 줄바꿈 유지")
+                        .checked(resolved.preserve_line_breaks)
+                        .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                            this.update_spec(StyleTarget::Body, window, cx, |spec| {
+                                spec.preserve_line_breaks = Some(*checked);
+                            });
+                        })),
+                )
+                .child(
+                    div().text_xs().text_color(pal.muted)
+                        .child("문단 안의 개행과 문단 사이의 빈 줄을 그대로 반영합니다."),
+                )
                 .child(font)
                 .child(embed)
                 .child(line_height)
@@ -1000,12 +1014,20 @@ impl BookStyleView {
                     } else {
                         String::new()
                     };
-                    div().child(format!("{lead}{line}"))
+                    div().min_h(px(size * style.line_height as f32))
+                        .child(format!("{lead}{line}"))
                 }))
         };
         let body = self.styles.resolve(StyleTarget::Body);
         let body_family = self.effective_font(StyleTarget::Body, cx);
-        let body_text = |text: &str| paragraph(&body, body_family.clone(), text.to_string());
+        let body_text = |text: &str| {
+            let text = if body.preserve_line_breaks {
+                text.to_string()
+            } else {
+                text.replace('\n', " ")
+            };
+            paragraph(&body, body_family.clone(), text)
+        };
         let page_break = || {
             div()
                 .my_5()
@@ -1025,7 +1047,15 @@ impl BookStyleView {
             .then(|| self.styles.resolve(target))
             .filter(|title| title.placement != Placement::Hidden);
         let Some(title) = title else {
-            blocks.extend(SAMPLE_BODY.map(|text| body_text(text).into_any_element()));
+            for (index, text) in SAMPLE_BODY.into_iter().enumerate() {
+                if index > 0 && body.preserve_line_breaks {
+                    blocks.push(
+                        div().h(px(PREVIEW_FONT_SIZE * body.font_size as f32 * body.line_height as f32))
+                            .into_any_element(),
+                    );
+                }
+                blocks.push(body_text(text).into_any_element());
+            }
             return div().flex().flex_col().children(blocks);
         };
         let heading = paragraph(

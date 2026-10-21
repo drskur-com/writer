@@ -80,6 +80,7 @@ impl StyleTarget {
             first_line_indent: 1.0,
             space_before: 0.0,
             space_after: 0.0,
+            preserve_line_breaks: false,
             placement: Placement::Inline,
             page_break: false,
             prefix: String::new(),
@@ -278,6 +279,9 @@ pub struct StyleSpec {
     /// 뒤 여백(em). 본문에서는 문단 사이 간격이다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_after: Option<f64>,
+    /// 본문 원문의 일반 개행과 빈 줄을 유지한다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preserve_line_breaks: Option<bool>,
     /// 제목 배치(제목만).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub placement: Option<Placement>,
@@ -317,6 +321,7 @@ impl StyleSpec {
             first_line_indent: self.first_line_indent.unwrap_or(defaults.first_line_indent),
             space_before: self.space_before.unwrap_or(defaults.space_before),
             space_after: self.space_after.unwrap_or(defaults.space_after),
+            preserve_line_breaks: self.preserve_line_breaks.unwrap_or(defaults.preserve_line_breaks),
             placement: self.placement.unwrap_or(defaults.placement),
             page_break: self.page_break.unwrap_or(defaults.page_break),
             prefix: self.prefix.clone().unwrap_or(defaults.prefix),
@@ -352,6 +357,7 @@ pub struct ResolvedStyle {
     pub first_line_indent: f64,
     pub space_before: f64,
     pub space_after: f64,
+    pub preserve_line_breaks: bool,
     pub placement: Placement,
     pub page_break: bool,
     pub prefix: String,

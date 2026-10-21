@@ -263,6 +263,7 @@ mod tests {
         styles.body.space_after = Some(0.5);
         styles.chapter.space_before = Some(3.0);
         styles.chapter.space_after = Some(1.0);
+        styles.chapter.align = Some(Align::Center);
         // 페이지 나눔은 따로 본다(`page_breaks_before_new_page_titles_and_after_title_pages`).
         styles.chapter.page_break = Some(false);
         styles.part.placement = Some(Placement::Inline);
@@ -304,9 +305,12 @@ mod tests {
 
     #[test]
     fn page_breaks_before_new_page_titles_and_after_title_pages() {
-        // 기본값: 부는 별도 제목 페이지, 장은 새 페이지, 절은 이어서.
+        // 부는 별도 제목 페이지, 장은 새 페이지, 절은 이어서.
         let mut styles = library::Styles::default();
         styles.body.space_after = Some(0.5);
+        styles.part.placement = Some(Placement::Page);
+        styles.part.page_break = Some(true);
+        styles.chapter.page_break = Some(true);
         let layout = BookLayout::new(&styles, 10.0);
         let before_chapter = layout.line_style(context(None, "문단", Some("## 장")));
         assert_eq!(before_chapter.block_height, px(PAGE_BREAK_HEIGHT));

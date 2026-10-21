@@ -270,6 +270,12 @@ impl<'a> EpubBuilder<'a> {
                 sec.html_body.push_str(&render_rich(rich));
                 sec.html_body.push_str("</p>\n");
             }
+            Block::BlankLines(count) => {
+                let sec = self.ensure_section(&self.project.name);
+                for _ in 0..*count {
+                    sec.html_body.push_str("<div class=\"blank-line\" aria-hidden=\"true\">&#160;</div>\n");
+                }
+            }
             Block::Quote(blocks) => {
                 let sec = self.ensure_section(&self.project.name);
                 sec.html_body.push_str("<blockquote>\n");
@@ -503,7 +509,10 @@ pub fn build<W: Write + Seek>(project: &ExportProject, writer: &mut W) -> Result
     // 4. 시트 원고를 순회하며 섹션 구성
     for sheet in &project.sheets {
         let sheet_dir = sheet.path.parent().unwrap_or(&project.dir);
-        let blocks = crate::markdown::blocks(&sheet.content);
+        let blocks = crate::markdown::manuscript_blocks(
+            &sheet.content,
+            project.styles.resolve(StyleTarget::Body).preserve_line_breaks,
+        );
 
         // 앞 시트와 접합되지 않은 새 시트라면 이전 섹션을 마감하여 새 파일에서 시작
         if !sheet.glued {
@@ -760,6 +769,14 @@ p {{
   margin-top: {body_space_before}em;
   margin-bottom: {body_space_after}em;
   text-indent: {body_indent}em;
+}}
+
+.blank-line {{
+  margin: 0;
+  padding: 0;
+  text-indent: 0;
+  height: {body_line_height}em;
+  break-inside: avoid;
 }}
 
 /* 별도 제목 페이지 (도비라) 컨테이너 */
@@ -1136,6 +1153,9 @@ mod tests {
     fn epub_builds_valid_archive() {
         let mut styles = Styles::default();
         styles.chapter.prefix = Some("제{n}장 ".to_string());
+        styles.part.placement = Some(Placement::Page);
+        styles.part.page_break = Some(true);
+        styles.chapter.page_break = Some(true);
 
         let project = ExportProject {
             name: "테스트 프로젝트".to_string(),
@@ -1153,7 +1173,7 @@ mod tests {
                 ExportSheet {
                     path: PathBuf::from("fake/project/01.md"),
                     glued: false,
-                    content: "# 1부 시작\n\n부 제목은 기본이 별도 제목 페이지(도비라)다.\n".to_string(),
+                    content: "# 1부 시작\n\n부 제목을 별도 제목 페이지(도비라)로 둔다.\n".to_string(),
                 },
                 ExportSheet {
                     path: PathBuf::from("fake/project/02.md"),
@@ -1195,7 +1215,7 @@ mod tests {
         // 3. 섹션 파일 구조 검증:
         // - 01.md의 "# 1부 시작"은 Placement::Page 이므로 독립된 title-page 섹션 생성
         // - 그 뒤의 "부 제목은..." 본문은 다음 섹션
-        // - "## 첫 이야기"는 page_break 기본값에 따라 섹션 분할
+        // - "## 첫 이야기"는 page_break에 따라 섹션 분할
         assert!(reader.by_name("OEBPS/text/section_0001.xhtml").is_ok());
         assert!(reader.by_name("OEBPS/text/section_0002.xhtml").is_ok());
 

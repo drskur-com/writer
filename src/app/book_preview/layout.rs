@@ -383,9 +383,9 @@ impl<'a> Flow<'a> {
         self.pages.len()
     }
 
-    /// 지금 페이지에 무엇이 있으면 다음 페이지로 넘긴다.
+    /// 지금 페이지에 내용이나 명시적인 빈 줄이 있으면 다음 페이지로 넘긴다.
     fn page_break(&mut self) {
-        if !self.page.items.is_empty() {
+        if !self.page.items.is_empty() || self.y > px(0.) {
             self.pages.push(std::mem::take(&mut self.page));
         }
         self.y = px(0.);
@@ -522,6 +522,12 @@ impl<'a> Flow<'a> {
                     style.indent = px(0.);
                 }
                 self.paragraph(text, &style, ctx, None);
+            }
+            Block::BlankLines(count) => {
+                let style = self.body_style().scaled(ctx.scale);
+                for _ in 0..*count {
+                    self.reserve(style.line_height, px(0.));
+                }
             }
             Block::Quote(blocks) => {
                 let inset = self.em(1.5);

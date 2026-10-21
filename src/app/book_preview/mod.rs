@@ -75,6 +75,8 @@ fn load_source(project_dir: &Path) -> io::Result<BookSource> {
         .find_project(project_dir)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "프로젝트를 찾을 수 없습니다"))?;
     let book = library::read_book(project_dir);
+    let styles = library::read_styles(project_dir);
+    let preserve_line_breaks = styles.resolve(library::StyleTarget::Body).preserve_line_breaks;
     let chunks = library::manuscript_sheets(project)
         .into_iter()
         .map(|sheet| {
@@ -87,7 +89,7 @@ fn load_source(project_dir: &Path) -> io::Result<BookSource> {
                     .map(Path::to_path_buf)
                     .unwrap_or_default(),
                 glued: sheet.glued,
-                blocks: markdown::blocks(&text),
+                blocks: markdown::manuscript_blocks(&text, preserve_line_breaks),
             }
         })
         .collect();
@@ -99,7 +101,7 @@ fn load_source(project_dir: &Path) -> io::Result<BookSource> {
         },
         authors: book.authors.clone(),
         cover: book.cover_path(project_dir).filter(|path| path.is_file()),
-        styles: library::read_styles(project_dir),
+        styles,
         chunks,
     })
 }
@@ -107,11 +109,12 @@ fn load_source(project_dir: &Path) -> io::Result<BookSource> {
 /// 선택한 그룹 또는 시트의 접합 묶음만 읽는다.
 fn load_selection(root: &Path, selected: &[PathBuf]) -> io::Result<BookSource> {
     let project = crate::export::load_selection(root, selected).map_err(io::Error::other)?;
+    let preserve_line_breaks = project.styles.resolve(library::StyleTarget::Body).preserve_line_breaks;
     let chunks = project.sheets.into_iter().map(|sheet| {
         Chunk {
             dir: sheet.path.parent().map(Path::to_path_buf).unwrap_or_default(),
             glued: sheet.glued,
-            blocks: markdown::blocks(&sheet.content),
+            blocks: markdown::manuscript_blocks(&sheet.content, preserve_line_breaks),
         }
     }).collect();
     Ok(BookSource {
