@@ -6,6 +6,7 @@
 use markdown::mdast::Node;
 
 use super::{ImageLine, image_line, parse_options};
+use crate::text_transform::LineGroup;
 
 /// 글자 꾸밈.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -50,6 +51,8 @@ pub enum Block {
         text: Rich,
     },
     Paragraph(Rich),
+    /// 줄 묶음(ADR-0016): 줄마다 강제 줄바꿈인 문단. 첫 줄 들여쓰기 없이 그린다.
+    Lines(Rich),
     /// 원문에 명시한 빈 줄 수(줄바꿈 유지 옵션).
     BlankLines(usize),
     Quote(Vec<Block>),
@@ -126,25 +129,17 @@ pub fn blocks_with_line_breaks(text: &str, preserve_line_breaks: bool) -> Vec<Bl
 /// 펜스 줄은 빈 줄이 되어 앞뒤 블록과 나뉜다. 안의 줄은 블록 문법으로 읽히지 않게 첫머리를 바꾸고
 /// (들여쓰기는 줄바꿈 없는 공백, 블록 기호는 `\` 이스케이프) 마지막 글줄 앞까지 끝에 `\`를 붙인다.
 /// 안의 빈 줄은 빈 행으로 남는다. 묶음 끝의 빈 줄은 버린다.
-fn ungroup(text: &str, groups: &[std::ops::Range<usize>]) -> String {
+fn ungroup(text: &str, groups: &[LineGroup]) -> String {
     if groups.is_empty() {
         return text.to_string();
     }
     let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
     for group in groups {
-        let fence_end = group.end.min(lines.len());
-        // 닫는 줄(여는 줄 이상의 콜론뿐)이 있으면 마지막 줄도 펜스다.
-        let colons = |line: &str| line.bytes().take_while(|&b| b == b':').count();
-        let last = lines[fence_end - 1].trim_end();
-        let closed = fence_end - group.start >= 2
-            && last.bytes().all(|b| b == b':')
-            && colons(last) >= colons(&lines[group.start]);
-        let body = group.start + 1..if closed { fence_end - 1 } else { fence_end };
-        let last_text = body.clone().rev().find(|&ix| !lines[ix].trim().is_empty());
-        lines[group.start].clear();
-        if closed {
-            lines[fence_end - 1].clear();
+        let body = group.body();
+        for fence in group.lines.clone().filter(|&ix| group.is_fence(ix)) {
+            lines[fence].clear();
         }
+        let last_text = body.clone().rev().find(|&ix| !lines[ix].trim().is_empty());
         for ix in body {
             if last_text.is_none_or(|last| ix > last) {
                 lines[ix].clear();
@@ -222,7 +217,7 @@ struct Walk<'a> {
     source: &'a str,
     preserve_line_breaks: bool,
     /// 줄 묶음의 줄 범위(0부터, 펜스 포함). 빈 줄을 셀 때 묶음 문단을 펜스까지 넓혀 본다.
-    groups: Vec<std::ops::Range<usize>>,
+    groups: Vec<LineGroup>,
     /// 참조한 각주 식별자(순서 = 번호 - 1).
     footnotes: Vec<String>,
     /// 각주 정의(식별자, 내용).
@@ -263,8 +258,8 @@ impl Walk<'_> {
         Some(
             self.groups
                 .iter()
-                .find(|group| group.contains(&(start - 1)))
-                .map_or((start, end), |group| (group.start + 1, group.end.max(end))),
+                .find(|group| group.lines.contains(&(start - 1)))
+                .map_or((start, end), |group| (group.lines.start + 1, group.lines.end.max(end))),
         )
     }
 
@@ -288,9 +283,13 @@ impl Walk<'_> {
                     return;
                 }
                 let text = self.inlines(&paragraph.children);
-                if !rich_text(&text).trim().is_empty() {
-                    out.push(Block::Paragraph(text));
+                if rich_text(&text).trim().is_empty() {
+                    return;
                 }
+                let grouped = paragraph.position.as_ref().is_some_and(|pos| {
+                    self.groups.iter().any(|group| group.lines.contains(&(pos.start.line - 1)))
+                });
+                out.push(if grouped { Block::Lines(text) } else { Block::Paragraph(text) });
             }
             Node::Blockquote(quote) => {
                 let inner = self.blocks(&quote.children);
@@ -472,7 +471,7 @@ mod tests {
         assert_eq!(parsed.len(), 3, "{parsed:?}");
         assert_eq!(parsed[0], Block::Paragraph(plain("앞")));
         assert_eq!(parsed[2], Block::Paragraph(plain("뒤")));
-        let Block::Paragraph(group) = &parsed[1] else {
+        let Block::Lines(group) = &parsed[1] else {
             panic!("{parsed:?}");
         };
         assert_eq!(
@@ -482,8 +481,8 @@ mod tests {
         assert!(group.iter().any(|inline| inline.text == "굵게" && inline.marks.strong));
         // 각주 참조, 묶음 끝의 빈 줄, 닫지 않은 묶음.
         let parsed = blocks(":::\n하나[^1]\n둘\n\n:::\n\n[^1]: 주석\n\n::: 시\n[셋]: 정의 아님");
-        assert_eq!(parsed[0], Block::Paragraph(plain("하나¹\n둘")));
-        assert_eq!(parsed[1], Block::Paragraph(plain("[셋]: 정의 아님")));
+        assert_eq!(parsed[0], Block::Lines(plain("하나¹\n둘")));
+        assert_eq!(parsed[1], Block::Lines(plain("[셋]: 정의 아님")));
         assert!(matches!(parsed[2], Block::Footnotes(_)), "{parsed:?}");
     }
 
@@ -495,7 +494,7 @@ mod tests {
             vec![
                 Block::Paragraph(plain("앞")),
                 Block::BlankLines(1),
-                Block::Paragraph(plain("A\nB")),
+                Block::Lines(plain("A\nB")),
                 Block::Paragraph(plain("뒤")),
             ]
         );

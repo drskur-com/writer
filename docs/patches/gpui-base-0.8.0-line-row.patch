@@ -1,0 +1,99 @@
+diff --git a/vendor/gpui-base/src/input/editor/display_map/display_map.rs b/vendor/gpui-base/src/input/editor/display_map/display_map.rs
+index 2f7055b..7bc3962 100644
+--- a/vendor/gpui-base/src/input/editor/display_map/display_map.rs
++++ b/vendor/gpui-base/src/input/editor/display_map/display_map.rs
+@@ -277,6 +277,12 @@ impl DisplayMap {
+         self.rebuild_fold_projection();
+     }
+ 
++    /// Style the lines in `rows` (buffer rows) again with the current line style.
++    pub fn restyle_rows(&mut self, rows: Range<usize>, cx: &mut App) {
++        self.wrap_map.restyle_rows(rows, cx);
++        self.rebuild_fold_projection();
++    }
++
+     /// Set how tall the block below each line is (see [`LineBlockMeasureFn`]); `None` removes
+     /// every block.
+     pub fn set_line_block(&mut self, line_block: Option<LineBlockMeasureFn>, cx: &mut App) {
+diff --git a/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs b/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
+index e366fcc..7de367d 100644
+--- a/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
++++ b/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
+@@ -176,6 +176,9 @@ impl LineStyle {
+ /// between two paragraphs. When a line changes, its neighbors are styled again too.
+ #[derive(Debug, Clone, Copy)]
+ pub struct LineContext<'a> {
++    /// The buffer row of the line, for styles that depend on document state the host tracks
++    /// (call [`crate::input::EditorState::restyle_lines`] when that state changes).
++    pub row: usize,
+     pub text: &'a str,
+     pub prev: Option<&'a str>,
+     pub next: Option<&'a str>,
+@@ -516,6 +519,25 @@ impl TextWrapper {
+         !changed.is_empty()
+     }
+ 
++    /// Style and re-wrap the lines in `rows` (buffer rows) again, e.g. after host state that the
++    /// line style reads has changed.
++    pub(crate) fn restyle_rows(&mut self, rows: Range<usize>, cx: &mut App) {
++        let count = self.lines_count();
++        let rows = rows.start.min(count)..rows.end.min(count);
++        if self.line_style.is_none() || rows.is_empty() {
++            return;
++        }
++        let text = self.text.clone();
++        let start = text.line_start_offset(rows.start);
++        let end = text.line_end_offset(rows.end - 1);
++        self.update(
++            &text,
++            &(start..end),
++            &Rope::from(text.slice(start..end).to_string()),
++            cx,
++        );
++    }
++
+     /// How tall the block below each line is.
+     pub(crate) fn line_block(&self) -> Option<LineBlockMeasureFn> {
+         self.line_block.clone()
+@@ -764,6 +786,7 @@ impl TextWrapper {
+                     let next: Option<Cow<str>> =
+                         (row + 1 < row_count).then(|| changed_text.slice_line(row + 1).into());
+                     line_style(LineContext {
++                        row,
+                         text: &line_str,
+                         prev: prev.as_deref(),
+                         next: next.as_deref(),
+diff --git a/vendor/gpui-base/src/input/editor/display_map/wrap_map.rs b/vendor/gpui-base/src/input/editor/display_map/wrap_map.rs
+index 52ac975..e6aeca1 100644
+--- a/vendor/gpui-base/src/input/editor/display_map/wrap_map.rs
++++ b/vendor/gpui-base/src/input/editor/display_map/wrap_map.rs
+@@ -136,6 +136,11 @@ impl WrapMap {
+         self.wrapper.set_line_style(line_style, cx);
+     }
+ 
++    /// Style the lines in `rows` again (see [`TextWrapper::restyle_rows`]).
++    pub(super) fn restyle_rows(&mut self, rows: std::ops::Range<usize>, cx: &mut App) {
++        self.wrapper.restyle_rows(rows, cx);
++    }
++
+     /// Set how tall the block below each line is (see [`LineBlockMeasureFn`]).
+     pub(super) fn set_line_block(&mut self, line_block: Option<LineBlockMeasureFn>, cx: &mut App) {
+         self.wrapper.set_line_block(line_block, cx);
+diff --git a/vendor/gpui-base/src/input/editor/mod.rs b/vendor/gpui-base/src/input/editor/mod.rs
+index e632ec6..5363e78 100644
+--- a/vendor/gpui-base/src/input/editor/mod.rs
++++ b/vendor/gpui-base/src/input/editor/mod.rs
+@@ -297,6 +297,13 @@ impl InputBaseState<EditorMode> {
+         cx.notify();
+     }
+ 
++    /// Style the buffer lines in `rows` again with the current line style, e.g. when state the
++    /// style reads (through [`super::LineContext::row`]) changed without an edit on those lines.
++    pub fn restyle_lines(&mut self, rows: std::ops::Range<usize>, cx: &mut gpui::Context<Self>) {
++        self.display_map.restyle_rows(rows, cx);
++        cx.notify();
++    }
++
+     /// Reserve a block below some lines and draw into it, e.g. the image of a Markdown image
+     /// line. The line itself stays ordinary editable text above its block.
+     ///

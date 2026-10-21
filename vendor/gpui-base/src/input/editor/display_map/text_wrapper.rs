@@ -176,6 +176,9 @@ impl LineStyle {
 /// between two paragraphs. When a line changes, its neighbors are styled again too.
 #[derive(Debug, Clone, Copy)]
 pub struct LineContext<'a> {
+    /// The buffer row of the line, for styles that depend on document state the host tracks
+    /// (call [`crate::input::EditorState::restyle_lines`] when that state changes).
+    pub row: usize,
     pub text: &'a str,
     pub prev: Option<&'a str>,
     pub next: Option<&'a str>,
@@ -516,6 +519,25 @@ impl TextWrapper {
         !changed.is_empty()
     }
 
+    /// Style and re-wrap the lines in `rows` (buffer rows) again, e.g. after host state that the
+    /// line style reads has changed.
+    pub(crate) fn restyle_rows(&mut self, rows: Range<usize>, cx: &mut App) {
+        let count = self.lines_count();
+        let rows = rows.start.min(count)..rows.end.min(count);
+        if self.line_style.is_none() || rows.is_empty() {
+            return;
+        }
+        let text = self.text.clone();
+        let start = text.line_start_offset(rows.start);
+        let end = text.line_end_offset(rows.end - 1);
+        self.update(
+            &text,
+            &(start..end),
+            &Rope::from(text.slice(start..end).to_string()),
+            cx,
+        );
+    }
+
     /// How tall the block below each line is.
     pub(crate) fn line_block(&self) -> Option<LineBlockMeasureFn> {
         self.line_block.clone()
@@ -764,6 +786,7 @@ impl TextWrapper {
                     let next: Option<Cow<str>> =
                         (row + 1 < row_count).then(|| changed_text.slice_line(row + 1).into());
                     line_style(LineContext {
+                        row,
                         text: &line_str,
                         prev: prev.as_deref(),
                         next: next.as_deref(),

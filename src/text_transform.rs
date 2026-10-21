@@ -355,10 +355,30 @@ fn group_fence(line: &str) -> Option<(usize, bool)> {
     (colons >= 3).then(|| (colons, line[colons..].trim().is_empty()))
 }
 
-/// 줄 묶음의 줄 범위(0부터 센 줄 번호, 여는·닫는 `:::` 줄 포함). 닫지 않은 묶음은 끝까지다.
-///
-/// 묶음 안에서는 줄바꿈이 문단을 나누지 않는다. 코드 펜스·frontmatter 안의 `:::`는 묶음이 아니다.
-pub fn line_groups(text: &str) -> Vec<Range<usize>> {
+/// 줄 묶음 하나. 줄 번호는 0부터 센다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineGroup {
+    /// 여는·닫는 `:::` 줄을 포함한 줄 범위. 닫지 않은 묶음은 문서 끝까지다.
+    pub lines: Range<usize>,
+    /// 닫는 줄이 있는지(있으면 `lines`의 마지막 줄이다).
+    pub closed: bool,
+}
+
+impl LineGroup {
+    /// 펜스 줄을 뺀 안쪽 줄 범위.
+    pub fn body(&self) -> Range<usize> {
+        self.lines.start + 1..self.lines.end - usize::from(self.closed)
+    }
+
+    /// 여는 줄이나 닫는 줄인지.
+    pub fn is_fence(&self, row: usize) -> bool {
+        self.lines.contains(&row) && !self.body().contains(&row)
+    }
+}
+
+/// 줄 묶음들. 묶음 안에서는 줄바꿈이 문단을 나누지 않는다(ADR-0016).
+/// 코드 펜스·frontmatter 안의 `:::`는 묶음이 아니다.
+pub fn line_groups(text: &str) -> Vec<LineGroup> {
     let lines = split(text);
     let kinds = classify(&lines);
     let mut groups = Vec::new();
@@ -373,14 +393,20 @@ pub fn line_groups(text: &str) -> Vec<Range<usize>> {
             None => open = fence.map(|(colons, _)| (ix, colons)),
             Some((start, len)) => {
                 if fence.is_some_and(|(colons, bare)| bare && colons >= len) {
-                    groups.push(start..ix + 1);
+                    groups.push(LineGroup {
+                        lines: start..ix + 1,
+                        closed: true,
+                    });
                     open = None;
                 }
             }
         }
     }
     if let Some((start, _)) = open {
-        groups.push(start..lines.len());
+        groups.push(LineGroup {
+            lines: start..lines.len(),
+            closed: false,
+        });
     }
     groups
 }
@@ -408,9 +434,9 @@ pub fn toggle_line_group(
         last -= 1;
     }
     let line_end = |ix: usize| starts[ix] + lines[ix].len();
-    let touched: Vec<Range<usize>> = line_groups(text)
+    let touched: Vec<LineGroup> = line_groups(text)
         .into_iter()
-        .filter(|group| group.start <= last && first < group.end)
+        .filter(|group| group.lines.start <= last && first < group.lines.end)
         .collect();
     if touched.is_empty() {
         let range = starts[first]..line_end(last);
@@ -420,22 +446,11 @@ pub fn toggle_line_group(
         return (range, replacement, selected);
     }
     // 묶음의 펜스 줄(여는 줄, 닫혔으면 닫는 줄)을 뺀 나머지 줄을 잇는다.
-    let from = touched[0].start.min(first);
-    let to = touched[touched.len() - 1].end.max(last + 1);
-    let fences: Vec<usize> = touched
-        .iter()
-        .flat_map(|group| {
-            let close = group.end - 1;
-            let closed = close > group.start
-                && group_fence(lines[close]).is_some_and(|(colons, bare)| {
-                    bare && group_fence(lines[group.start]).is_some_and(|(open, _)| colons >= open)
-                });
-            [Some(group.start), closed.then_some(close)]
-        })
-        .flatten()
-        .collect();
+    let from = touched[0].lines.start.min(first);
+    let to = touched[touched.len() - 1].lines.end.max(last + 1);
+    let is_fence = |ix: usize| touched.iter().any(|group| group.is_fence(ix));
     let kept: Vec<&str> = (from..to)
-        .filter(|ix| !fences.contains(ix))
+        .filter(|&ix| !is_fence(ix))
         .map(|ix| lines[ix])
         .collect();
     let range = starts[from]..line_end(to - 1);
@@ -714,9 +729,9 @@ mod tests {
         round_trips(editor);
         // 묶음 안의 줄은 다른 앱 파일처럼 한 줄로 잇지 않는다.
         assert_eq!(to_editor(":::\nA\nB\n:::"), ":::\nA\nB\n:::");
-        assert_eq!(line_groups(editor), vec![1..7]);
+        assert_eq!(line_groups(editor), vec![LineGroup { lines: 1..7, closed: true }]);
         // 닫지 않은 묶음은 끝까지, 코드 펜스 안의 `:::`는 묶음이 아니다.
-        assert_eq!(line_groups("A\n::: 시\nB"), vec![1..3]);
+        assert_eq!(line_groups("A\n::: 시\nB"), vec![LineGroup { lines: 1..3, closed: false }]);
         assert!(line_groups("```\n:::\n```").is_empty());
         // 묶음 안에서도 문장 자동 변환은 한다.
         assert!(!in_literal_context(":::\n가", 7));

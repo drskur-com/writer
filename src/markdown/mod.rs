@@ -69,10 +69,7 @@ fn push_group_fences(text: &str, out: &mut Vec<Span>) {
     for (ix, line) in text.split('\n').enumerate() {
         let range = start..start + line.len();
         start = range.end + 1;
-        let closing = line.trim_end().bytes().all(|b| b == b':');
-        let fence = groups
-            .iter()
-            .any(|group| ix == group.start || (ix + 1 == group.end && closing));
+        let fence = groups.iter().any(|group| group.is_fence(ix));
         if fence && !range.is_empty() {
             out.push(Span {
                 range,

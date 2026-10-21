@@ -20,6 +20,7 @@ use gpui_kit::gpui::{Pixels, px};
 
 use crate::library::{self, Align, Placement, ResolvedStyle, StyleTarget};
 use crate::markdown;
+use crate::text_transform::LineGroup;
 
 /// 제목 레벨(H1~H6)별 글자 크기 배율(본문 대비). 책 스타일이 있으면 H1~H3은 부·장·절 제목 크기를 쓴다.
 const HEADING_SCALES: [f32; 6] = [1.6, 1.4, 1.25, 1.15, 1.05, 1.0];
@@ -172,7 +173,12 @@ impl BookLayout {
     }
 
     /// 줄과 다음 줄을 보고 줄 스타일을 정한다. 줄 하나가 문단이다(ADR-0011).
-    pub(super) fn line_style(&self, line: LineContext<'_>) -> LineStyle {
+    /// 줄 묶음(`groups`, ADR-0016) 안의 줄은 한 문단의 행이다.
+    pub(super) fn line_style(&self, line: LineContext<'_>, groups: &[LineGroup]) -> LineStyle {
+        let grouped = |row: usize| groups.iter().any(|group| group.body().contains(&row));
+        if grouped(line.row) {
+            return self.grouped_style(line, grouped(line.row + 1));
+        }
         let block = Block::of(line.text);
         let next = line.next.map(Block::of);
         let mut style = self.block_style(block, self.gap_after(block, next));
@@ -188,6 +194,23 @@ impl BookLayout {
             style.block_before = px(PAGE_BREAK_HEIGHT);
         }
         style
+    }
+
+    /// 줄 묶음 안의 줄: 정렬은 본문을 따르고 첫 줄 들여쓰기와 행 사이 여백은 없다. 블록 문법(제목 등)은
+    /// 글자 그대로 읽으므로 크기를 바꾸지 않는다. 묶음의 마지막 줄 아래에는 문단 뒤 여백을 둔다.
+    fn grouped_style(&self, line: LineContext<'_>, next_grouped: bool) -> LineStyle {
+        match Block::of(line.text) {
+            block @ (Block::Blank | Block::Image) => self.block_style(block, px(0.)),
+            _ => LineStyle {
+                align: align(self.body.align),
+                space_after: if next_grouped {
+                    px(0.)
+                } else {
+                    self.gap_after(Block::Text, line.next.map(Block::of))
+                },
+                ..Default::default()
+            },
+        }
     }
 
     /// 블록 모양(정렬·들여쓰기·제목 크기)과 줄 아래 여백.
@@ -255,7 +278,12 @@ mod tests {
     use super::*;
 
     fn context<'a>(prev: Option<&'a str>, text: &'a str, next: Option<&'a str>) -> LineContext<'a> {
-        LineContext { text, prev, next }
+        LineContext {
+            row: 0,
+            text,
+            prev,
+            next,
+        }
     }
 
     fn layout() -> BookLayout {
@@ -276,7 +304,7 @@ mod tests {
     fn every_line_is_an_indented_justified_paragraph() {
         let layout = layout();
         for prev in [None, Some(""), Some("앞 문단")] {
-            let style = layout.line_style(context(prev, "문단", Some("다음 문단")));
+            let style = layout.line_style(context(prev, "문단", Some("다음 문단")), &[]);
             assert_eq!(style.first_indent, px(10.));
             assert_eq!(style.align, LineAlign::Justify);
             assert_eq!(style.space_after, px(5.));
@@ -286,22 +314,49 @@ mod tests {
     #[test]
     fn blank_lines_are_plain_rows_after_the_paragraph_gap() {
         let layout = layout();
-        let blank = layout.line_style(context(Some("문단"), "", Some("## 장")));
+        let blank = layout.line_style(context(Some("문단"), "", Some("## 장")), &[]);
         assert_eq!(blank, LineStyle::default());
-        let before_blank = layout.line_style(context(None, "문단", Some("")));
+        let before_blank = layout.line_style(context(None, "문단", Some("")), &[]);
         assert_eq!(before_blank.space_after, px(5.));
     }
 
     #[test]
     fn gaps_take_the_larger_side() {
         let layout = layout();
-        let heading = layout.line_style(context(Some(""), "## 장", Some("문단")));
+        let heading = layout.line_style(context(Some(""), "## 장", Some("문단")), &[]);
         assert_eq!(heading.space_after, px(10.));
         assert_eq!(heading.align, LineAlign::Center);
-        let text = layout.line_style(context(Some(""), "문단", Some("## 장")));
+        let text = layout.line_style(context(Some(""), "문단", Some("## 장")), &[]);
         assert_eq!(text.space_after, px(30.));
-        let item = layout.line_style(context(None, "- 항목", Some("- 다음 항목")));
+        let item = layout.line_style(context(None, "- 항목", Some("- 다음 항목")), &[]);
         assert_eq!(item.space_after, px(0.));
+    }
+
+    #[test]
+    fn line_group_rows_have_no_indent_or_paragraph_gaps() {
+        let layout = layout();
+        let groups = crate::text_transform::line_groups("앞\n:::\n# 첫 행\n둘째 행\n:::\n뒤");
+        let row = |row, prev, text, next| {
+            layout.line_style(
+                LineContext {
+                    row,
+                    text,
+                    prev: Some(prev),
+                    next: Some(next),
+                },
+                &groups,
+            )
+        };
+        let first = row(2, ":::", "# 첫 행", "둘째 행");
+        assert_eq!(first.first_indent, px(0.));
+        assert_eq!(first.space_after, px(0.));
+        assert_eq!(first.text_scale, 1.0);
+        let last = row(3, "# 첫 행", "둘째 행", ":::");
+        assert_eq!(last.first_indent, px(0.));
+        assert!(last.space_after > px(0.));
+        // 묶음 밖의 같은 글은 문단이다.
+        let outside = layout.line_style(context(None, "둘째 행", Some("뒤")), &groups);
+        assert!(outside.first_indent > px(0.));
     }
 
     #[test]
@@ -313,24 +368,24 @@ mod tests {
         styles.part.page_break = Some(true);
         styles.chapter.page_break = Some(true);
         let layout = BookLayout::new(&styles, 10.0);
-        let before_chapter = layout.line_style(context(None, "문단", Some("## 장")));
+        let before_chapter = layout.line_style(context(None, "문단", Some("## 장")), &[]);
         assert_eq!(before_chapter.block_height, px(PAGE_BREAK_HEIGHT));
         // 장의 앞 여백(3em) 대신 문단 뒤 여백만 둔다.
         assert_eq!(before_chapter.space_after, px(5.));
-        let blank = layout.line_style(context(Some("문단"), "", Some("# 부")));
+        let blank = layout.line_style(context(Some("문단"), "", Some("# 부")), &[]);
         assert_eq!(blank.block_height, px(PAGE_BREAK_HEIGHT));
-        let part = layout.line_style(context(Some(""), "# 부", Some("문단")));
+        let part = layout.line_style(context(Some(""), "# 부", Some("문단")), &[]);
         assert_eq!(part.block_height, px(PAGE_BREAK_HEIGHT));
         assert_eq!(part.space_after, px(0.));
-        let before_section = layout.line_style(context(None, "문단", Some("### 절")));
+        let before_section = layout.line_style(context(None, "문단", Some("### 절")), &[]);
         assert_eq!(before_section.block_height, px(0.));
-        let chapter = layout.line_style(context(None, "## 장", Some("문단")));
+        let chapter = layout.line_style(context(None, "## 장", Some("문단")), &[]);
         assert_eq!(chapter.block_height, px(0.));
         // 시트 첫 줄 제목은 문서 위에 표시한다.
         assert_eq!(chapter.block_before, px(PAGE_BREAK_HEIGHT));
-        let later = layout.line_style(context(Some(""), "## 장", Some("문단")));
+        let later = layout.line_style(context(Some(""), "## 장", Some("문단")), &[]);
         assert_eq!(later.block_before, px(0.));
-        let section = layout.line_style(context(None, "### 절", Some("문단")));
+        let section = layout.line_style(context(None, "### 절", Some("문단")), &[]);
         assert_eq!(section.block_before, px(0.));
 
         let mut styles = library::Styles::default();
@@ -338,25 +393,25 @@ mod tests {
         styles.section.placement = Some(Placement::Hidden);
         styles.section.page_break = Some(true);
         let layout = BookLayout::new(&styles, 10.0);
-        let before_chapter = layout.line_style(context(None, "문단", Some("## 장")));
+        let before_chapter = layout.line_style(context(None, "문단", Some("## 장")), &[]);
         assert_eq!(before_chapter.block_height, px(0.));
         // 숨긴 제목도 새 페이지는 연다.
-        let before_section = layout.line_style(context(None, "문단", Some("### 절")));
+        let before_section = layout.line_style(context(None, "문단", Some("### 절")), &[]);
         assert_eq!(before_section.block_height, px(PAGE_BREAK_HEIGHT));
     }
 
     #[test]
     fn notes_ignore_book_styles() {
         let layout = BookLayout::plain(10.0);
-        let text = layout.line_style(context(Some(""), "문단", Some("## 장")));
+        let text = layout.line_style(context(Some(""), "문단", Some("## 장")), &[]);
         assert_eq!(text.first_indent, px(0.));
         assert_eq!(text.align, LineAlign::Start);
         assert_eq!(text.space_after, px(0.));
-        let heading = layout.line_style(context(None, "## 장", Some("문단")));
+        let heading = layout.line_style(context(None, "## 장", Some("문단")), &[]);
         assert_eq!(heading.text_scale, HEADING_SCALES[1]);
         assert_eq!(heading.align, LineAlign::Start);
         assert_eq!(heading.space_after, px(0.));
-        let before_part = layout.line_style(context(None, "문단", Some("# 부")));
+        let before_part = layout.line_style(context(None, "문단", Some("# 부")), &[]);
         assert_eq!(before_part.block_height, px(0.));
     }
 
@@ -364,7 +419,7 @@ mod tests {
     fn lists_quotes_and_code_keep_plain_layout() {
         let layout = layout();
         for line in ["- 항목", "1. 항목", "> 인용", "```rust", "    코드"] {
-            let style = layout.line_style(context(Some(""), line, None));
+            let style = layout.line_style(context(Some(""), line, None), &[]);
             assert_eq!(style.first_indent, px(0.), "{line}");
             assert_eq!(style.align, LineAlign::Start, "{line}");
         }

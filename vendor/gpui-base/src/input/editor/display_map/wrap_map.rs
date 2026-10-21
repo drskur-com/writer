@@ -136,6 +136,11 @@ impl WrapMap {
         self.wrapper.set_line_style(line_style, cx);
     }
 
+    /// Style the lines in `rows` again (see [`TextWrapper::restyle_rows`]).
+    pub(super) fn restyle_rows(&mut self, rows: std::ops::Range<usize>, cx: &mut App) {
+        self.wrapper.restyle_rows(rows, cx);
+    }
+
     /// Set how tall the block below each line is (see [`LineBlockMeasureFn`]).
     pub(super) fn set_line_block(&mut self, line_block: Option<LineBlockMeasureFn>, cx: &mut App) {
         self.wrapper.set_line_block(line_block, cx);

@@ -277,6 +277,12 @@ impl DisplayMap {
         self.rebuild_fold_projection();
     }
 
+    /// Style the lines in `rows` (buffer rows) again with the current line style.
+    pub fn restyle_rows(&mut self, rows: Range<usize>, cx: &mut App) {
+        self.wrap_map.restyle_rows(rows, cx);
+        self.rebuild_fold_projection();
+    }
+
     /// Set how tall the block below each line is (see [`LineBlockMeasureFn`]); `None` removes
     /// every block.
     pub fn set_line_block(&mut self, line_block: Option<LineBlockMeasureFn>, cx: &mut App) {

@@ -9,7 +9,7 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::gpui::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::gpui::*;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -19,6 +19,7 @@ use super::editor_image::ImageBlocks;
 use super::editor_layout::{BookLayout, PAGE_BREAK_HEIGHT};
 use super::style::*;
 use crate::markdown::{self, Span, SpanKind};
+use crate::text_transform::LineGroup;
 use crate::{TogglePreview, icons, library};
 
 /// 마지막 입력 후 자동 저장까지 기다리는 시간.
@@ -85,14 +86,46 @@ pub(super) struct OpenSheet {
     /// 적용한 책 스타일. 서체·줄 간격·제목 크기를 에디터에 반영한다.
     /// 프로젝트 밖(메모)이면 `None`: 책 스타일을 쓰지 않는다.
     styles: Option<library::Styles>,
+    /// 줄 묶음(ADR-0016). 줄 스타일이 읽으므로 본문이 바뀔 때마다 맞춘다([`sync_line_groups`]).
+    line_groups: Rc<RefCell<Vec<LineGroup>>>,
+    /// `line_groups`를 맞춘 때의 줄 수.
+    line_count: usize,
     _subscription: Subscription,
 }
 
 /// 줄 스타일: 책 스타일대로 문단·제목을 배치한다(ADR-0010). 제목 줄 확대는 gpui-base 패치(ADR-0006),
 /// 이미지 줄은 커서가 들어올 때만 글자를 보인다(ADR-0008). 책 스타일이 없으면 기본 배치다.
-fn line_style(styles: Option<&library::Styles>) -> impl Fn(LineContext<'_>) -> LineStyle + 'static {
+/// 줄 묶음 안의 줄은 한 문단의 행으로 배치한다(ADR-0016).
+fn line_style(
+    styles: Option<&library::Styles>,
+    groups: Rc<RefCell<Vec<LineGroup>>>,
+) -> impl Fn(LineContext<'_>) -> LineStyle + 'static {
     let layout = book_layout(styles);
-    move |line| layout.line_style(line)
+    move |line| layout.line_style(line, &groups.borrow())
+}
+
+/// 본문에 맞춰 줄 묶음을 다시 구하고, 바뀌었으면 묶음이 닿았던 줄과 닿는 줄을 다시 배치한다.
+///
+/// 편집한 줄은 엔진이 편집 시점(묶음을 맞추기 전)에 배치하므로 옛 묶음 기준일 수 있다. 펜스를
+/// 고치면 편집하지 않은 줄의 소속도 바뀐다. 두 경우 모두 옛 묶음과 새 묶음이 걸친 줄 안이고, 줄이
+/// 밀린 만큼(줄 수 차이) 더 넓혀 본다.
+fn sync_line_groups(editor: &mut OpenSheet, text: &str, cx: &mut App) {
+    let groups = crate::text_transform::line_groups(text);
+    let line_count = text.split('\n').count();
+    let shift = line_count.abs_diff(editor.line_count);
+    editor.line_count = line_count;
+    let old = editor.line_groups.replace(groups);
+    let new = editor.line_groups.borrow();
+    if *new == old {
+        return;
+    }
+    let spans = old.iter().chain(new.iter()).map(|group| group.lines.clone());
+    let start = spans.clone().map(|rows| rows.start).min().unwrap_or(0);
+    let end = spans.map(|rows| rows.end).max().unwrap_or(0) + shift;
+    drop(new);
+    editor
+        .state
+        .update(cx, |state, cx| state.restyle_lines(start..end, cx));
 }
 
 fn book_layout(styles: Option<&library::Styles>) -> BookLayout {
@@ -497,6 +530,9 @@ impl WriterApp {
         let words = library::count_words(text.chars());
         let project = self.library.as_ref().and_then(|lib| lib.project_of(&path));
         let styles = project.as_deref().map(library::read_styles);
+        let line_groups = Rc::new(RefCell::new(crate::text_transform::line_groups(&text)));
+        let line_count = text.split('\n').count();
+        let style_groups = line_groups.clone();
         // 마지막 줄 아래 빈 공간(scroll_beyond_last_line)은 코드 에디터 모드에만 있어서
         // EditorState를 쓰고 코드용 기능(줄 번호·들여쓰기 안내선·괄호 자동 닫기·접기)은 끈다.
         // 빈 공간이 없으면 문서 끝에서 커서 여백을 맞추려 끝 너머로 스크롤했다가 되돌아오며 출렁인다.
@@ -516,7 +552,7 @@ impl WriterApp {
                 .cursor_surrounding_lines(Some(CURSOR_MARGIN_LINES))
                 .scroll_beyond_last_line(Some(CURSOR_MARGIN_LINES));
             configure_text_transform(&mut state, styles.as_ref());
-            state.set_line_style(Some(line_style(styles.as_ref())), cx);
+            state.set_line_style(Some(line_style(styles.as_ref(), style_groups)), cx);
             // 이미지 줄 아래에 이미지를 그린다(ADR-0008).
             let images = Rc::new(ImageBlocks::new(&path));
             let measure = images.clone();
@@ -596,6 +632,8 @@ impl WriterApp {
             side_padding: Rc::new(Cell::new(px(-1.0))),
             project,
             styles,
+            line_groups,
+            line_count,
             _subscription: subscription,
         });
     }
@@ -617,6 +655,7 @@ impl WriterApp {
         editor.words = library::count_words(editor.state.read(cx).text().chars());
         // 제목 크기는 엔진이 즉시 바꾸므로 굵기·`#` 흐림도 같은 프레임에 맞춘다.
         let text = editor.state.read(cx).value();
+        sync_line_groups(editor, &text, cx);
         editor.markup.apply_headings(&text, cx);
         editor.markup_refresh = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(MARKUP_DELAY).await;
@@ -694,7 +733,7 @@ impl WriterApp {
         if let Some(project) = &editor.project {
             let styles = Some(library::read_styles(project));
             if styles != editor.styles {
-                let line_style = line_style(styles.as_ref());
+                let line_style = line_style(styles.as_ref(), editor.line_groups.clone());
                 editor.markup.heading_weights = heading_weights(styles.as_ref());
                 editor.styles = styles;
                 editor
@@ -726,6 +765,7 @@ impl WriterApp {
         editor
             .state
             .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
+        sync_line_groups(editor, &text, cx);
         editor.markup.apply_headings(&text, cx);
         editor.markup.apply(markdown::spans(&text), cx);
     }

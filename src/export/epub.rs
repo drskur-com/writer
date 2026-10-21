@@ -270,6 +270,12 @@ impl<'a> EpubBuilder<'a> {
                 sec.html_body.push_str(&render_rich(rich));
                 sec.html_body.push_str("</p>\n");
             }
+            Block::Lines(rich) => {
+                let sec = self.ensure_section(&self.project.name);
+                sec.html_body.push_str("<p class=\"lines\">");
+                sec.html_body.push_str(&render_rich(rich));
+                sec.html_body.push_str("</p>\n");
+            }
             Block::BlankLines(count) => {
                 let sec = self.ensure_section(&self.project.name);
                 for _ in 0..*count {
@@ -769,6 +775,11 @@ p {{
   margin-top: {body_space_before}em;
   margin-bottom: {body_space_after}em;
   text-indent: {body_indent}em;
+}}
+
+/* 줄 묶음(ADR-0016): 첫 줄 들여쓰기 없음 */
+p.lines {{
+  text-indent: 0;
 }}
 
 .blank-line {{

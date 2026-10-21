@@ -383,7 +383,7 @@ impl<'a> DocBuilder<'a> {
         let mut first = true;
         for block in &blocks {
             let runs = match block {
-                Block::Paragraph(rich) => self.runs(rich),
+                Block::Paragraph(rich) | Block::Lines(rich) => self.runs(rich),
                 other => {
                     self.block(
                         other,
@@ -418,11 +418,12 @@ impl<'a> DocBuilder<'a> {
     fn block(&mut self, block: &Block, ctx: Context) {
         match block {
             Block::Heading { level, text } => self.heading(*level, text),
-            Block::Paragraph(rich) => {
+            Block::Paragraph(rich) | Block::Lines(rich) => {
                 let runs = self.runs(rich);
                 let style = if ctx.quote { "Quote" } else { "Normal" };
                 let mut ppr = String::new();
-                if ctx.indent > 0. || ctx.no_first_indent {
+                // 줄 묶음은 첫 줄 들여쓰기가 없다(ADR-0016).
+                if ctx.indent > 0. || ctx.no_first_indent || matches!(block, Block::Lines(_)) {
                     ppr.push_str(&format!(
                         r#"<w:ind w:left="{}" w:firstLine="0"/>"#,
                         twips(self.em(ctx.indent))
@@ -495,7 +496,7 @@ impl<'a> DocBuilder<'a> {
         let mut blocks = blocks.iter();
         let first = blocks.next();
         let first_runs = match first {
-            Some(Block::Paragraph(rich)) => Some(self.runs(rich)),
+            Some(Block::Paragraph(rich) | Block::Lines(rich)) => Some(self.runs(rich)),
             _ => None,
         };
         let ppr = format!(

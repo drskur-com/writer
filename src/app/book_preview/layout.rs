@@ -523,6 +523,11 @@ impl<'a> Flow<'a> {
                 }
                 self.paragraph(text, &style, ctx, None);
             }
+            Block::Lines(text) => {
+                let mut style = self.body_style().scaled(ctx.scale);
+                style.indent = px(0.);
+                self.paragraph(text, &style, ctx, None);
+            }
             Block::BlankLines(count) => {
                 let style = self.body_style().scaled(ctx.scale);
                 for _ in 0..*count {
@@ -661,7 +666,7 @@ impl<'a> Flow<'a> {
         };
         let mut blocks = blocks.iter();
         match blocks.next() {
-            Some(Block::Paragraph(text)) => {
+            Some(Block::Paragraph(text) | Block::Lines(text)) => {
                 let mut style = self.body_style().scaled(ctx.scale);
                 style.indent = px(0.);
                 style.after = px(0.);

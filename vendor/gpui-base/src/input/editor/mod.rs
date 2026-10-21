@@ -297,6 +297,13 @@ impl InputBaseState<EditorMode> {
         cx.notify();
     }
 
+    /// Style the buffer lines in `rows` again with the current line style, e.g. when state the
+    /// style reads (through [`super::LineContext::row`]) changed without an edit on those lines.
+    pub fn restyle_lines(&mut self, rows: std::ops::Range<usize>, cx: &mut gpui::Context<Self>) {
+        self.display_map.restyle_rows(rows, cx);
+        cx.notify();
+    }
+
     /// Reserve a block below some lines and draw into it, e.g. the image of a Markdown image
     /// line. The line itself stays ordinary editable text above its block.
     ///
