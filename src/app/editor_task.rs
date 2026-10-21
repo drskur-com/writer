@@ -18,6 +18,8 @@ use crate::{icons, markdown};
 const BOX_SCALE: f32 = 0.55;
 const BOX_MIN: f32 = 12.;
 const BOX_MAX: f32 = 18.;
+/// 체크 상자와 항목 글 사이 간격(상자 한 변에 대한 비율).
+const GAP_SCALE: f32 = 0.4;
 
 /// 에디터에 할 일 체크 상자를 단다.
 pub(super) fn install(state: &mut EditorState, cx: &mut Context<EditorState>) {
@@ -40,12 +42,15 @@ fn render(overlay: &LineOverlayContext, editor: WeakEntity<EditorState>, cx: &Ap
     let pal = Palette::from_theme(cx.theme());
     let side = px((f32::from(overlay.size.height) * BOX_SCALE).clamp(BOX_MIN, BOX_MAX));
     let (line, check, checked) = (overlay.line, marker.check, marker.checked);
-    // 기호 글자를 가리도록 배경을 칠한다. 누르면 커서를 옮기지 않고 체크만 바꾼다.
+    // 기호 글자를 가리도록 배경을 칠한다. 상자는 덮은 범위의 오른쪽 끝(항목 글 바로 앞)에 둔다.
+    // 누르면 커서를 옮기지 않고 체크만 바꾼다.
     div()
         .size_full()
         .bg(pal.background)
         .flex()
         .items_center()
+        .justify_end()
+        .pr(side * GAP_SCALE)
         .cursor_pointer()
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             window.prevent_default();
