@@ -332,16 +332,24 @@ mod tests {
         let mut room = 0.;
         overscroll.packet(0., TouchPhase::Started, 400., now, text(&mut room));
         overscroll.packet(-50., TouchPhase::Moved, 400., now, text(&mut room));
-        assert!(overscroll.offset() < 0.);
-        // Back the other way: the first 50px return the edge, the next 20px
-        // scroll the text back from its end.
+        let stretch = overscroll.offset();
+        assert!(stretch < 0.);
+        // Back the other way the edge follows the finger: half its offset
+        // brings it halfway in, and the text has not moved yet.
         let mut scrolled = 0.;
-        overscroll.packet(70., TouchPhase::Moved, 400., now, |dy| {
+        overscroll.packet(-stretch / 2., TouchPhase::Moved, 400., now, |dy| {
+            scrolled += dy;
+            dy
+        });
+        assert!((overscroll.offset() - stretch / 2.).abs() < 1e-3);
+        assert_eq!(scrolled, 0.);
+        // The rest of the edge, then the text.
+        overscroll.packet(20., TouchPhase::Moved, 400., now, |dy| {
             scrolled += dy;
             dy
         });
         assert_eq!(overscroll.offset(), 0.);
-        assert_eq!(scrolled, 20.);
+        assert!((scrolled - (20. + stretch / 2.)).abs() < 1e-3, "{scrolled}");
     }
 
     /// A momentum stream of `speed` px/s decaying as AppKit's does, against

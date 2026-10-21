@@ -1,0 +1,156 @@
+diff --git a/vendor/gpui-base/src/overscroll.rs b/vendor/gpui-base/src/overscroll.rs
+index f9c2044..f27cb1a 100644
+--- a/vendor/gpui-base/src/overscroll.rs
++++ b/vendor/gpui-base/src/overscroll.rs
+@@ -332,16 +332,24 @@ mod tests {
+         let mut room = 0.;
+         overscroll.packet(0., TouchPhase::Started, 400., now, text(&mut room));
+         overscroll.packet(-50., TouchPhase::Moved, 400., now, text(&mut room));
+-        assert!(overscroll.offset() < 0.);
+-        // Back the other way: the first 50px return the edge, the next 20px
+-        // scroll the text back from its end.
++        let stretch = overscroll.offset();
++        assert!(stretch < 0.);
++        // Back the other way the edge follows the finger: half its offset
++        // brings it halfway in, and the text has not moved yet.
+         let mut scrolled = 0.;
+-        overscroll.packet(70., TouchPhase::Moved, 400., now, |dy| {
++        overscroll.packet(-stretch / 2., TouchPhase::Moved, 400., now, |dy| {
++            scrolled += dy;
++            dy
++        });
++        assert!((overscroll.offset() - stretch / 2.).abs() < 1e-3);
++        assert_eq!(scrolled, 0.);
++        // The rest of the edge, then the text.
++        overscroll.packet(20., TouchPhase::Moved, 400., now, |dy| {
+             scrolled += dy;
+             dy
+         });
+         assert_eq!(overscroll.offset(), 0.);
+-        assert_eq!(scrolled, 20.);
++        assert!((scrolled - (20. + stretch / 2.)).abs() < 1e-3, "{scrolled}");
+     }
+ 
+     /// A momentum stream of `speed` px/s decaying as AppKit's does, against
+diff --git a/vendor/gpui-base/src/scroll_bounce.rs b/vendor/gpui-base/src/scroll_bounce.rs
+index 77a2184..137fa10 100644
+--- a/vendor/gpui-base/src/scroll_bounce.rs
++++ b/vendor/gpui-base/src/scroll_bounce.rs
+@@ -696,27 +696,42 @@ impl Physics {
+         if offset == 0. || self.extent <= 0. {
+             self.extent = extent.max(1.);
+         }
+-        // Invert the curves so grabbing a returning edge is continuous.
++        self.position = self.travel_for(offset);
++        self.velocity = 0.;
++        self.dragging = true;
++        self.suppress_momentum = false;
++    }
++
++    /// The finger travel that stretches the edge to `offset` (the inverse of
++    /// [`Self::offset`] while dragging).
++    fn travel_for(&self, offset: f32) -> f32 {
+         let stretch = match self.motion.max_stretch {
+             Some(max) => max * (offset / max).clamp(-0.999, 0.999).atanh(),
+             None => offset,
+         };
+         let tracking = self.motion.tracking;
+-        self.position = stretch / (tracking * (1. - stretch.abs() / self.extent).max(0.01));
+-        self.velocity = 0.;
+-        self.dragging = true;
+-        self.suppress_momentum = false;
++        stretch / (tracking * (1. - stretch.abs() / self.extent.max(1.)).max(0.01))
+     }
+ 
+     /// Apply finger displacement. Return the part that crosses back into the list.
++    ///
++    /// Outward the edge follows the rubber-band curve. Back toward the content
++    /// it follows the finger: the edge comes in by the distance moved, and
++    /// what is left scrolls the content. Unwinding the curve instead made the
++    /// finger travel the whole stretch again (over ten times the edge's
++    /// offset on macOS) before the content moved, a dead zone at every edge.
+     pub(crate) fn pull(&mut self, delta: f32) -> f32 {
+         let previous = self.position;
+-        let next = previous + delta;
+-        if previous != 0. && previous.signum() != next.signum() {
++        if previous == 0. || previous.signum() == delta.signum() {
++            self.position = previous + delta;
++            return 0.;
++        }
++        let offset = self.offset() + delta;
++        if offset == 0. || offset.signum() != previous.signum() {
+             self.position = 0.;
+-            next
++            offset
+         } else {
+-            self.position = next;
++            self.position = self.travel_for(offset);
+             0.
+         }
+     }
+@@ -1027,10 +1042,11 @@ mod tests {
+         draw(cx);
+         scroll(cx, 100., TouchPhase::Started);
+         scroll(cx, -140., TouchPhase::Moved);
+-        assert_eq!(handle.offset().y, px(-40.));
++        let crossed = handle.offset().y;
++        assert!(crossed < px(-100.) && crossed > px(-140.), "{crossed:?}");
+         scroll(cx, -10., TouchPhase::Moved);
+         draw(cx);
+-        assert_eq!(handle.offset().y, px(-50.));
++        assert!((handle.offset().y - (crossed - px(10.))).abs() < px(0.01));
+     }
+ 
+     #[gpui::test]
+@@ -1135,10 +1151,18 @@ mod tests {
+         scroll(cx, 100., TouchPhase::Started);
+         draw(cx);
+         assert_eq!(handle.offset().y, px(0.));
+-        assert!(handle.bounds().origin.y > origin);
++        let stretch = handle.bounds().origin.y - origin;
++        assert!(stretch > px(0.));
++        // The edge comes back by the distance moved; the rest scrolls.
+         scroll(cx, -140., TouchPhase::Moved);
+         draw(cx);
+-        assert_eq!(handle.offset().y, px(-40.));
++        // `stretch` is read off the painted origin, snapped to whole pixels.
++        assert!(
++            (handle.offset().y - (stretch - px(140.))).abs() < px(1.),
++            "{:?} vs {:?}",
++            handle.offset().y,
++            stretch - px(140.)
++        );
+         assert_eq!(handle.bounds().origin.y, origin);
+     }
+ 
+@@ -1338,12 +1362,17 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn resistance_and_reverse_preserve_unconsumed_distance() {
++    fn resistance_out_and_the_finger_back_in() {
+         let mut scroll = Physics::default();
+         scroll.begin(600.);
+         assert_eq!(scroll.pull(100.), 0.);
+-        assert!(scroll.offset() > 0. && scroll.offset() < 55.);
+-        assert_eq!(scroll.pull(-130.), -30.);
++        let stretch = scroll.offset();
++        assert!(stretch > 0. && stretch < 55.);
++        // Back in, the edge follows the finger and the rest crosses over.
++        assert_eq!(scroll.pull(-stretch / 2.), 0.);
++        assert!((scroll.offset() - stretch / 2.).abs() < 1e-3);
++        let crossed = scroll.pull(-130.);
++        assert!((crossed - (stretch / 2. - 130.)).abs() < 1e-3, "{crossed}");
+         assert_eq!(scroll.offset(), 0.);
+     }
+ 
+@@ -1367,7 +1396,8 @@ mod tests {
+         // for a packet. Dispatch within one update so the packets stay within
+         // the axis lock's gesture separation.
+         cx.update(|window, cx| {
+-            for delta in [point(px(30.), px(-20.)), point(px(0.), px(-20.))] {
++            // Small enough to stay within the stretch, which follows the finger back.
++            for delta in [point(px(3.), px(-2.)), point(px(0.), px(-2.))] {
+                 window.dispatch_event(
+                     gpui::PlatformInput::ScrollWheel(ScrollWheelEvent {
+                         position: point(px(100.), px(100.)),
