@@ -29,6 +29,9 @@ struct CodeFenceHighlighter {
     inner: SyntaxHighlighter,
     /// 펜스 안쪽 바이트 범위. 시작 순으로 정렬돼 있고 겹치지 않는다.
     fences: Vec<Range<usize>>,
+    /// 지난 파싱에 [`fill_blank_table_rows`] 사본을 넘겼는지. 넘겼으면 편집 위치가 사본과
+    /// 어긋날 수 있어 다음 파싱은 처음부터 한다.
+    filled: bool,
 }
 
 impl CodeFenceHighlighter {
@@ -36,6 +39,7 @@ impl CodeFenceHighlighter {
         Self {
             inner: SyntaxHighlighter::new(LANGUAGE),
             fences: Vec::new(),
+            filled: false,
         }
     }
 
@@ -79,7 +83,13 @@ impl InputHighlighter for CodeFenceHighlighter {
         _cx: &mut Context<EditorState>,
     ) {
         // 원고 한 편은 짧아서 끝까지 바로 파싱한다.
-        self.inner.update(edit.map(to_tree_sitter_edit), text, None);
+        let filled = fill_blank_table_rows(&text.to_string());
+        let edit = edit.filter(|_| !self.filled && filled.is_none());
+        self.filled = filled.is_some();
+        match filled {
+            Some(filled) => self.inner.update(None, &Rope::from(filled.as_str()), None),
+            None => self.inner.update(edit.map(to_tree_sitter_edit), text, None),
+        };
         self.collect_fences();
     }
 
@@ -144,6 +154,38 @@ fn mask_outside(
         push(pos..run.end, HighlightStyle::default());
     }
     out
+}
+
+/// 칸이 모두 빈 표 행(`|   |   |`)의 첫 칸에 글자 하나를 넣은 사본. 바꿀 행이 없으면 `None`.
+///
+/// tree-sitter-md(0.5.3)는 데이터 행 다음에 빈 행이 오면 표를 끝내지 못하고 문서 끝까지
+/// 오류 노드로 덮어서, 그 아래 펜스를 찾지 못한다. 같은 바이트 길이로 바꾸므로 파싱 결과의
+/// 범위를 원문에 그대로 쓸 수 있다. 펜스 안쪽 줄은 건드리지 않는다.
+fn fill_blank_table_rows(text: &str) -> Option<String> {
+    let mut bytes: Option<Vec<u8>> = None;
+    let mut fence: Option<&str> = None;
+    let mut start = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if let Some(open) = fence {
+            if trimmed.starts_with(open) {
+                fence = None;
+            }
+        } else if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fence = Some(&trimmed[..3]);
+        } else if trimmed.len() > 1 && trimmed.bytes().all(|b| b == b'|' || b == b' ' || b == b'\t') {
+            // 첫 `|` 뒤 공백, 없으면(`||`) 첫 `|` 자리에 넣는다.
+            let pipe = start + line.find('|').unwrap_or(0);
+            let at = if text.as_bytes().get(pipe + 1) == Some(&b' ') {
+                pipe + 1
+            } else {
+                pipe
+            };
+            bytes.get_or_insert_with(|| text.as_bytes().to_vec())[at] = b'x';
+        }
+        start += line.len();
+    }
+    bytes.map(|bytes| String::from_utf8(bytes).expect("ASCII만 바꿨다"))
 }
 
 fn to_tree_sitter_edit(edit: InputEdit) -> tree_sitter::InputEdit {
@@ -214,5 +256,27 @@ mod tests {
         assert!(colored.contains(&"\"world\""), "{colored:?}");
         assert!(!colored.iter().any(|s| s.contains("hello")), "{colored:?}");
         assert!(!colored.iter().any(|s| s.contains("제목")), "{colored:?}");
+    }
+
+    #[test]
+    fn finds_fences_below_a_table_with_blank_rows() {
+        let text = "| a | b |\n| --- | --- |\n| 1 |   |\n|   |   |\n\n```js\nconst a = 1;\n```\n";
+        let filled = fill_blank_table_rows(text).unwrap();
+        assert_eq!(filled.len(), text.len());
+        let mut highlighter = CodeFenceHighlighter::new();
+        highlighter.inner.update(None, &Rope::from(filled.as_str()), None);
+        highlighter.collect_fences();
+        let start = text.find("const").unwrap();
+        let end = text.rfind("```").unwrap();
+        assert_eq!(highlighter.fences, vec![start..end]);
+    }
+
+    #[test]
+    fn fills_only_blank_rows_outside_fences() {
+        assert_eq!(
+            fill_blank_table_rows("|   |   |\n||\n| 1 |   |\n```\n| |\n```\n").as_deref(),
+            Some("|x  |   |\nx|\n| 1 |   |\n```\n| |\n```\n")
+        );
+        assert_eq!(fill_blank_table_rows("| a | b |\n|---|---|\n"), None);
     }
 }
