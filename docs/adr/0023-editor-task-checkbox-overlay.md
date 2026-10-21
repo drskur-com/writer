@@ -2,7 +2,7 @@
 
 - 상태: Proposed
 - 날짜: 2026-10-22
-- 관련: ADR-0006, ADR-0008, ADR-0017 · `src/app/editor_task.rs`, `src/markdown/mod.rs`(`task_marker`, `SpanKind::TaskDone`), `vendor/gpui-base/src/input/base/element.rs`(`prepaint_line_overlays`), `vendor/gpui-base/src/input/editor/mod.rs`(`set_line_overlays`, `replace_range_keeping_selections`), `docs/patches/gpui-base-0.8.0-line-overlay.patch`
+- 관련: ADR-0006, ADR-0008, ADR-0017 · `src/app/editor_task.rs`, `src/markdown/mod.rs`(`task_marker`, `SpanKind::TaskDone`), `vendor/gpui-base/src/input/base/element_writer.rs`(`prepaint_line_overlays`), `vendor/gpui-base/src/input/editor/writer.rs`(`set_line_overlays`, `replace_range_keeping_selections`), `docs/patches/gpui-base-0.8.0-line-overlay.patch`
 
 ## 배경 (Context)
 
