@@ -399,6 +399,8 @@ impl ResolvedStyle {
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct Styles {
+    #[serde(skip_serializing_if = "crate::text_transform::Options::is_default")]
+    pub input_transform: crate::text_transform::Options,
     #[serde(skip_serializing_if = "StyleSpec::is_empty")]
     pub body: StyleSpec,
     #[serde(rename = "title:part", skip_serializing_if = "StyleSpec::is_empty")]
@@ -465,6 +467,7 @@ pub fn write_styles(project_dir: &Path, styles: &Styles) -> io::Result<()> {
         part: styles.part.rounded(),
         chapter: styles.chapter.rounded(),
         section: styles.section.rounded(),
+        input_transform: styles.input_transform.clone(),
     };
     let value = if styles.is_empty() {
         None

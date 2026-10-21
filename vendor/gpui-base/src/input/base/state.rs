@@ -490,6 +490,11 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(crate) cursor_line_end_affinity: bool,
     pub(super) pattern: Option<regex::Regex>,
     pub(super) validate: Option<Box<dyn Fn(&str, &mut App) -> bool + 'static>>,
+    /// Identifies text copied from an input using the same representation.
+    clipboard_text_format: Option<SharedString>,
+    paste_transform: Option<Box<dyn Fn(&str, bool) -> String + 'static>>,
+    typing_transform:
+        Option<Box<dyn Fn(&str, Range<usize>, &str) -> (Range<usize>, String) + 'static>>,
     /// The step strategy for [`super::NumberInput`] to increment/decrement.
     /// See [`Self::step`] and [`Self::step_by`].
     pub(crate) number_step: Option<NumberStep>,
@@ -639,6 +644,59 @@ impl InputPresentation {
 impl<M: InputModeKind> EventEmitter<InputEvent> for InputBaseState<M> {}
 
 impl<M: InputModeKind> InputBaseState<M> {
+    /// Configure a transform for committed typing and Enter, before history
+    /// records the edit. Ranges are UTF-8 bytes in the pre-edit document.
+    /// Programmatic edits, paste and undo/redo bypass this transform.
+    pub fn set_typing_transform(
+        &mut self,
+        transform: impl Fn(&str, Range<usize>, &str) -> (Range<usize>, String) + 'static,
+    ) {
+        self.typing_transform = Some(Box::new(transform));
+    }
+
+    pub fn clear_typing_transform(&mut self) {
+        self.typing_transform = None;
+    }
+
+    pub fn set_paste_transform(
+        &mut self,
+        transform: impl Fn(&str, bool) -> String + 'static,
+    ) {
+        self.paste_transform = Some(Box::new(transform));
+    }
+
+    fn transform_typed_edit(&self, range: Range<usize>, text: &str) -> (Range<usize>, String) {
+        match &self.typing_transform {
+            Some(transform) if !self.replaying_history => {
+                let edit = transform(&self.text.to_string(), range.clone(), text);
+                // A suffix replacement must not consume another cursor's
+                // selection. Keep the original edit when that would happen.
+                if self.selections.iter().any(|selection| {
+                    let other = selection.start..selection.end;
+                    other != range && other.start < edit.0.end && other.end >= edit.0.start
+                }) {
+                    (range, text.to_string())
+                } else {
+                    edit
+                }
+            }
+            _ => (range, text.to_string()),
+        }
+    }
+
+    /// Transform clipboard text before insertion. `same_format` is true when
+    /// Copy or Cut tagged the clipboard with this input's format identifier.
+    /// Unconfigured inputs retain their usual clipboard behavior.
+    pub fn clipboard_text_transform(
+        mut self,
+        format: impl Into<SharedString>,
+        transform: impl Fn(&str, bool) -> String + 'static,
+    ) -> Self {
+        self.clipboard_text_format = Some(format.into());
+        self.paste_transform = Some(Box::new(transform));
+        self
+    }
+
     #[doc(hidden)]
     pub fn cursor_layout(&self) -> Option<(Bounds<Pixels>, Pixels)> {
         let layout = self.last_layout.as_ref()?;
@@ -907,6 +965,9 @@ impl<M: InputModeKind> InputBaseState<M> {
             loading: false,
             pattern: None,
             validate: None,
+            clipboard_text_format: None,
+            paste_transform: None,
+            typing_transform: None,
             number_step: Some(NumberStep::Fixed(1.)),
             number_min: None,
             number_max: None,
@@ -2220,7 +2281,9 @@ impl<M: InputModeKind> InputBaseState<M> {
                     } else {
                         String::new()
                     };
-                    edits.push((sel.start..sel.end, format!("\n{}", indent)));
+                    edits.push(
+                        self.transform_typed_edit(sel.start..sel.end, &format!("\n{}", indent)),
+                    );
                 }
                 edits.sort_by_key(|(range, _)| range.start);
                 self.replace_text_in_ranges(&edits, window, cx);
@@ -2292,7 +2355,10 @@ impl<M: InputModeKind> InputBaseState<M> {
 
                     // Add newline and indent
                     let new_line_text = format!("\n{}", indent);
-                    self.replace_text_in_range_silent(None, &new_line_text, window, cx);
+                    let (range, new_line_text) =
+                        self.transform_typed_edit(self.selected_range(), &new_line_text);
+                    let range = self.range_to_utf16(&range);
+                    self.replace_text_in_range_silent(Some(range), &new_line_text, window, cx);
                     self.pause_blink_cursor(cx);
                 }
             }
@@ -3017,7 +3083,7 @@ impl<M: InputModeKind> InputBaseState<M> {
 
         let texts = self.selected_texts();
 
-        cx.write_to_clipboard(ClipboardItem::new_string(texts.join("\n")));
+        cx.write_to_clipboard(self.text_clipboard_item(texts.join("\n")));
     }
 
     pub(super) fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
@@ -3027,7 +3093,7 @@ impl<M: InputModeKind> InputBaseState<M> {
 
         let texts = self.selected_texts();
 
-        cx.write_to_clipboard(ClipboardItem::new_string(texts.join("\n")));
+        cx.write_to_clipboard(self.text_clipboard_item(texts.join("\n")));
 
         self.undo_manager.set_pending_intent(EditIntent::Atomic);
         self.replace_text_in_range_silent(None, "", window, cx);
@@ -3071,6 +3137,13 @@ impl<M: InputModeKind> InputBaseState<M> {
         .detach();
     }
 
+    fn text_clipboard_item(&self, text: String) -> ClipboardItem {
+        match &self.clipboard_text_format {
+            Some(format) => ClipboardItem::new_string_with_metadata(text, format.to_string()),
+            None => ClipboardItem::new_string(text),
+        }
+    }
+
     /// Where a paste would go right now: the document as edited so far and
     /// the selections it would replace. Two equal targets mean an edit made
     /// for one still applies to the other.
@@ -3095,6 +3168,15 @@ impl<M: InputModeKind> InputBaseState<M> {
         let Some(mut new_text) = clipboard.text().filter(|text| !text.is_empty()) else {
             return;
         };
+        if let Some(transform) = &self.paste_transform {
+            let same_format = self.clipboard_text_format.as_ref().is_some_and(|format| {
+                clipboard.metadata().is_some_and(|metadata| metadata.as_str() == format.as_ref())
+            });
+            new_text = transform(&new_text, same_format);
+            if new_text.is_empty() {
+                return;
+            }
+        }
         // A paste is one atomic edit, never part of a typing run.
         self.undo_manager.set_pending_intent(EditIntent::Atomic);
 
@@ -4418,6 +4500,19 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
             .unwrap_or(self.selected_range());
         let range = self.normalize_token_range(range);
 
+        let transformed = if !self.silent_replace_text
+            && self.selections.is_single()
+            && self.typing_transform.is_some()
+        {
+            Some(self.transform_typed_edit(range.clone(), new_text))
+        } else {
+            None
+        };
+        let (range, new_text) = match &transformed {
+            Some((range, text)) => (range.clone(), text.as_str()),
+            None => (range, new_text),
+        };
+
         // Skip-over as a pure cursor move: a typed closer that already follows
         // the cursor moves past it without touching text or history, so Undo
         // never exposes a transient duplicate. Only for interactive single
@@ -4448,7 +4543,14 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
                 let mut edits: Vec<(Range<usize>, String)> = self
                     .selections
                     .iter()
-                    .map(|sel| (sel.start..sel.end, new_text.to_string()))
+                    .map(|sel| {
+                        let range = sel.start..sel.end;
+                        if self.silent_replace_text {
+                            (range, new_text.to_string())
+                        } else {
+                            self.transform_typed_edit(range, new_text)
+                        }
+                    })
                     .collect();
                 edits.sort_by_key(|(range, _)| range.start);
                 // One keystroke across several cursors is one batch, committed

@@ -12,6 +12,7 @@ mod library;
 mod markdown;
 mod menus;
 mod settings;
+mod text_transform;
 mod theme;
 mod thumbnail;
 mod watch;

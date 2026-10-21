@@ -379,7 +379,15 @@ impl WriterApp {
                                 .w(px(GLUE_BAR_WIDTH))
                                 .top(px(if glued_prev { 0.0 } else { GLUE_BAR_INSET }))
                                 .bottom(px(if glued_next { 0.0 } else { GLUE_BAR_INSET }))
-                                .rounded_full()
+                                // 시트 경계는 직선으로 맞닿고 묶음의 양 끝만 둥글게 한다.
+                                .when(!glued_prev, |this| {
+                                    this.rounded_tl(px(GLUE_BAR_WIDTH / 2.0))
+                                        .rounded_tr(px(GLUE_BAR_WIDTH / 2.0))
+                                })
+                                .when(!glued_next, |this| {
+                                    this.rounded_bl(px(GLUE_BAR_WIDTH / 2.0))
+                                        .rounded_br(px(GLUE_BAR_WIDTH / 2.0))
+                                })
                                 .bg(pal.accent),
                         )
                     })
@@ -546,8 +554,7 @@ fn glued_block(glued: &[bool], index: usize) -> std::ops::Range<usize> {
 
 /// 시트 카드 우클릭 메뉴: 시트 접합, 접합 해제.
 ///
-/// 누른 시트가 선택(Shift+클릭) 안에 있으면 선택한 시트 전체에, 아니면 누른 시트에 적용한다.
-/// 접합은 수동 순서 그룹(`group_path`)에서만 할 수 있다.
+/// 수동 순서 그룹에서 여러 시트를 선택하고, 선택 안의 시트를 우클릭했을 때만 표시한다.
 fn sheet_menu(
     menu: PopupMenu,
     app: &WeakEntity<WriterApp>,
@@ -556,6 +563,9 @@ fn sheet_menu(
     group_path: Option<&std::path::Path>,
     cx: &App,
 ) -> PopupMenu {
+    if group_path.is_none() {
+        return menu;
+    }
     let Some(clicked) = paths.iter().position(|p| p == path) else {
         return menu;
     };
@@ -579,6 +589,9 @@ fn sheet_menu(
         }
         None => return menu,
     };
+    if range.len() < 2 {
+        return menu;
+    }
     let glued = |index: usize| index > 0 && sheets.get(index).is_some_and(|sheet| sheet.glued);
     // 접합: 둘 이상 골랐고 아직 다 이어지지 않았을 때. 해제: 범위 안이나 바로 뒤가 이어져 있을 때.
     let can_glue = range.len() > 1 && (range.start + 1..range.end).any(|index| !glued(index));

@@ -47,6 +47,23 @@ const CURSOR_MARGIN_LINES: usize = 3;
 /// 본문 좌우 최소 여백.
 const EDITOR_MIN_SIDE_PADDING: f32 = 24.0;
 
+fn configure_text_transform(state: &mut EditorState, styles: Option<&library::Styles>) {
+    let options = styles
+        .map(|styles| styles.input_transform.clone())
+        .unwrap_or_default();
+    let paste_options = options.clone();
+    if options.is_enabled() {
+        state.set_typing_transform(move |document, range, inserted| {
+            crate::text_transform::on_input(document, range, inserted, &options)
+        });
+    } else {
+        state.clear_typing_transform();
+    }
+    state.set_paste_transform(move |text, same_format| {
+        crate::text_transform::paste(text, same_format, &paste_options)
+    });
+}
+
 /// 에디터에 열린 시트.
 pub(super) struct OpenSheet {
     path: PathBuf,
@@ -474,7 +491,7 @@ impl WriterApp {
     fn open_sheet(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         // 파일은 표준 마크다운, 에디터는 줄 하나가 문단이다(ADR-0011).
         let text = match library::read_sheet(&path) {
-            Ok(text) => markdown::to_editor(&text),
+            Ok(text) => crate::text_transform::to_editor(&text),
             Err(err) => {
                 self.notify(format!("시트를 열 수 없습니다: {err}"), window, cx);
                 return;
@@ -489,6 +506,10 @@ impl WriterApp {
         // 빈 공간이 없으면 문서 끝에서 커서 여백을 맞추려 끝 너머로 스크롤했다가 되돌아오며 출렁인다.
         let state = cx.new(|cx| {
             let mut state = EditorState::new(window, cx)
+                .clipboard_text_transform(
+                    "com.drskur.writer.editor-text.v1",
+                    crate::text_transform::from_clipboard,
+                )
                 .line_number(false)
                 .indent_guides(false)
                 .auto_close(false)
@@ -496,6 +517,7 @@ impl WriterApp {
                 .folding(false)
                 .cursor_surrounding_lines(Some(CURSOR_MARGIN_LINES))
                 .scroll_beyond_last_line(Some(CURSOR_MARGIN_LINES));
+            configure_text_transform(&mut state, styles.as_ref());
             state.set_line_style(Some(line_style(styles.as_ref())), cx);
             // 이미지 줄 아래에 이미지를 그린다(ADR-0008).
             let images = Rc::new(ImageBlocks::new(&path));
@@ -628,7 +650,8 @@ impl WriterApp {
         }
         editor.autosave = None;
         let text = editor.state.read(cx).value();
-        editor.disk_modified = library::write_sheet(&editor.path, &markdown::to_markdown(&text))?;
+        editor.disk_modified =
+            library::write_sheet(&editor.path, &crate::text_transform::to_markdown(&text))?;
         editor.dirty = false;
         Ok(())
     }
@@ -662,7 +685,10 @@ impl WriterApp {
                 editor.styles = styles;
                 editor
                     .state
-                    .update(cx, |state, cx| state.set_line_style(Some(line_style), cx));
+                    .update(cx, |state, cx| {
+                        state.set_line_style(Some(line_style), cx);
+                        configure_text_transform(state, editor.styles.as_ref());
+                    });
                 let text = editor.state.read(cx).value();
                 editor.markup.apply_headings(&text, cx);
             }
@@ -676,7 +702,8 @@ impl WriterApp {
         if editor.dirty || modified == editor.disk_modified {
             return;
         }
-        let Ok(text) = library::read_sheet(&editor.path).map(|text| markdown::to_editor(&text))
+        let Ok(text) =
+            library::read_sheet(&editor.path).map(|text| crate::text_transform::to_editor(&text))
         else {
             return;
         };

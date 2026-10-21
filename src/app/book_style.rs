@@ -167,12 +167,19 @@ struct TargetForm {
     _subscriptions: Vec<Subscription>,
 }
 
+struct TransformForm {
+    before: Entity<InputState>,
+    after: Entity<InputState>,
+    _subscriptions: Vec<Subscription>,
+}
+
 /// 책 스타일 화면.
 pub(super) struct BookStyleView {
     project: PathBuf,
     styles: library::Styles,
     /// 열어 둔 대상. 없으면 대상 목록.
     form: Option<TargetForm>,
+    transform_form: Option<TransformForm>,
     /// 가져오기에서 고른 프로젝트.
     import_source: Option<PathBuf>,
     /// 가져올 프로젝트 목록을 라이브러리에서 읽는다.
@@ -185,6 +192,7 @@ impl BookStyleView {
             styles: library::read_styles(&project),
             project,
             form: None,
+            transform_form: None,
             import_source: None,
             app,
         }
@@ -216,6 +224,134 @@ impl BookStyleView {
     ) {
         change(self.styles.get_mut(target));
         self.save(window, cx);
+    }
+
+    fn open_transform(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let before = cx.new(|cx| InputState::new(window, cx).placeholder("바꿀 텍스트"));
+        let after = cx.new(|cx| InputState::new(window, cx).placeholder("바꾼 후 텍스트 (비우면 삭제)"));
+        let mut subscriptions = Vec::new();
+        for input in [&before, &after] {
+            subscriptions.push(cx.subscribe(input, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }));
+        }
+        self.transform_form = Some(TransformForm {
+            before,
+            after,
+            _subscriptions: subscriptions,
+        });
+        cx.notify();
+    }
+
+    fn add_replacement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = &self.transform_form else { return };
+        let before = form.before.read(cx).value().to_string();
+        let after = form.after.read(cx).value().to_string();
+        if before.is_empty() {
+            return;
+        }
+        if self.styles.input_transform.replacements.iter().any(|rule| rule.before == before) {
+            window.push_notification(Notification::info("같은 텍스트의 치환 규칙이 이미 있습니다."), cx);
+            return;
+        }
+        self.styles.input_transform.replacements.push(crate::text_transform::Replacement {
+            before,
+            after,
+            enabled: true,
+        });
+        form.before.update(cx, |input, cx| input.set_value("", window, cx));
+        form.after.update(cx, |input, cx| input.set_value("", window, cx));
+        self.save(window, cx);
+    }
+
+    fn render_transform(&self, form: &TransformForm, cx: &mut Context<Self>, pal: Palette) -> AnyElement {
+        let options = &self.styles.input_transform;
+        let controls = [
+            ("transform-quotes", "스마트 따옴표", "직선 따옴표를 “곡선 따옴표”로 바꾸고 아포스트로피를 처리합니다.", options.smart_quotes),
+            ("transform-ellipsis", "줄임표 자동 변환", "... → …", options.ellipsis),
+            ("transform-dash", "대시 자동 변환", "-- → —", options.dash),
+        ].into_iter().enumerate().map(|(index, (id, label, description, checked))| {
+            div().flex().flex_col().gap_1()
+                .child(Checkbox::new(id).label(label).checked(checked)
+                    .on_click(cx.listener(move |this, checked: &bool, window, cx| {
+                        let options = &mut this.styles.input_transform;
+                        match index {
+                            0 => options.smart_quotes = *checked,
+                            1 => options.ellipsis = *checked,
+                            _ => options.dash = *checked,
+                        }
+                        this.save(window, cx);
+                    })))
+                .child(div().text_xs().text_color(pal.muted).child(description))
+        });
+        let rules = options.replacements.iter().enumerate().map(|(index, rule)| {
+            div().flex().items_center().gap_3()
+                .child(Checkbox::new(SharedString::from(format!("replacement-enabled-{index}")))
+                    .label("사용")
+                    .checked(rule.enabled)
+                    .on_click(cx.listener(move |this, checked: &bool, window, cx| {
+                        if let Some(rule) = this.styles.input_transform.replacements.get_mut(index) {
+                            rule.enabled = *checked;
+                            this.save(window, cx);
+                        }
+                    })))
+                .child(div().flex_1().whitespace_normal().child(rule.before.clone()))
+                .child(div().text_color(pal.muted).child("→"))
+                .child(div().flex_1().whitespace_normal().child(
+                    if rule.after.is_empty() { "(삭제)".to_string() } else { rule.after.clone() }
+                ))
+                .child(Button::new(SharedString::from(format!("replacement-remove-{index}")))
+                    .ghost().small().label("삭제")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if index < this.styles.input_transform.replacements.len() {
+                            this.styles.input_transform.replacements.remove(index);
+                            this.save(window, cx);
+                        }
+                    })))
+        });
+        let can_add = !form.before.read(cx).value().is_empty();
+        let back = Button::new("transform-back").ghost().small()
+            .icon(Icon::new(icons::leave())).label("스타일 목록")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.transform_form = None;
+                cx.notify();
+            }));
+        div().flex().flex_col().gap_6()
+            .child(Self::header(pal, "입력 자동 변환",
+                "이 책에서 입력하는 텍스트에 적용합니다. 기존 원고는 변경하지 않습니다.",
+                Some(back.into_any_element())))
+            .child(div().p_5().rounded_xl().border_1().border_color(pal.panel_border)
+                .bg(pal.panel).flex().flex_col().gap_4()
+                .child(div().font_semibold().child("스마트 문장부호"))
+                .children(controls))
+            .child(div().p_5().rounded_xl().border_1().border_color(pal.panel_border)
+                .bg(pal.panel).flex().flex_col().gap_4()
+                .child(div().font_semibold().child("사용자 지정 치환"))
+                .child(div().text_xs().text_color(pal.muted)
+                    .child("입력 중에는 공백·Enter로 단어를 마칠 때 치환합니다. 붙여넣기에는 문자열 일치로 적용합니다."))
+                .when(options.replacements.is_empty(), |this| {
+                    this.child(div().text_sm().text_color(pal.muted).child("등록된 규칙이 없습니다."))
+                })
+                .children(rules)
+                .child(div().flex().items_center().gap_3()
+                    .child(div().flex_1().min_w_0().child(Input::new(&form.before).focus_ring(false)))
+                    .child(div().text_color(pal.muted).child("→"))
+                    .child(div().flex_1().min_w_0().child(Input::new(&form.after).focus_ring(false))))
+                .child(Button::new("replacement-add").label("+ 규칙 추가").disabled(!can_add)
+                    .on_click(cx.listener(|this, _, window, cx| this.add_replacement(window, cx)))))
+            .child(div().p_5().rounded_xl().border_1().border_color(pal.panel_border)
+                .bg(pal.panel).flex().flex_col().gap_2()
+                .child(Checkbox::new("transform-on-paste").label("붙여넣기에도 적용")
+                    .checked(options.apply_on_paste)
+                    .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                        this.styles.input_transform.apply_on_paste = *checked;
+                        this.save(window, cx);
+                    })))
+                .child(div().text_xs().text_color(pal.muted)
+                    .child("스마트 문장부호와 활성화된 치환 규칙을 붙여넣기에도 적용합니다. 코드·수식·링크는 제외합니다.")))
+            .into_any_element()
     }
 
     /// 대상 편집을 연다(입력 상태를 지금 값으로 만든다).
@@ -546,6 +682,18 @@ impl BookStyleView {
                 None,
             ))
             .child(div().flex().flex_col().gap_3().children(cards))
+            .child(
+                div().id("style-input-transform").px_5().py_4()
+                    .flex().items_center().gap_4()
+                    .rounded_xl().border_1().border_color(pal.panel_border).bg(pal.panel)
+                    .cursor_pointer().hover(move |style| style.bg(pal.hover))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_transform(window, cx)))
+                    .child(div().flex_1().flex().flex_col().gap_1()
+                        .child(div().font_semibold().child("입력 자동 변환"))
+                        .child(div().text_xs().text_color(pal.muted)
+                            .child("스마트 문장부호와 사용자 지정 치환 규칙")))
+                    .child(Icon::new(icons::enter()).text_color(pal.muted)),
+            )
             .child(import)
             .into_any_element()
     }
@@ -971,9 +1119,10 @@ fn indent(em: f64) -> String {
 impl Render for BookStyleView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = Palette::from_theme(cx.theme());
-        let content = match &self.form {
-            Some(form) => self.render_form(form, cx, pal),
-            None => self.render_list(cx, pal),
+        let content = match (&self.transform_form, &self.form) {
+            (Some(form), _) => self.render_transform(form, cx, pal),
+            (_, Some(form)) => self.render_form(form, cx, pal),
+            _ => self.render_list(cx, pal),
         };
         div()
             .flex_1()

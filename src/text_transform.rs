@@ -1,4 +1,4 @@
-//! 저장되는 마크다운 ↔ 에디터 본문 변환(ADR-0011).
+//! 텍스트 변환: 저장되는 마크다운 ↔ 에디터 본문(ADR-0011).
 //!
 //! 에디터에서는 줄 하나가 문단이다(Enter = 새 문단, Ulysses·iA Writer와 같은 경험). 파일에는 표준
 //! 마크다운으로 저장해 다른 앱에서도 문단이 그대로 보이게 한다.
@@ -11,6 +11,258 @@
 //! - 다른 앱에서 만든 파일의 문단 안 줄바꿈(`A\nB`, 한 문단)은 읽을 때 공백으로 이어 한 줄로 만든다.
 //!
 //! 에디터 본문 → 마크다운 → 에디터 본문은 원래대로 돌아온다(테스트로 지킨다).
+
+use std::ops::Range;
+
+/// 책별 입력 자동 변환 설정. 기본값은 모두 꺼짐이다.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct Options {
+    pub smart_quotes: bool,
+    pub ellipsis: bool,
+    pub dash: bool,
+    pub apply_on_paste: bool,
+    pub replacements: Vec<Replacement>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct Replacement {
+    pub before: String,
+    pub after: String,
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+}
+
+fn enabled_by_default() -> bool {
+    true
+}
+
+impl Options {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.smart_quotes
+            || self.ellipsis
+            || self.dash
+            || self
+                .replacements
+                .iter()
+                .any(|rule| rule.enabled && !rule.before.is_empty())
+    }
+}
+
+/// 코드·수식·마크다운 구문과 링크는 변환하지 않는다.
+fn protected_ranges(text: &str) -> Vec<Range<usize>> {
+    use crate::markdown::SpanKind;
+    crate::markdown::spans(text)
+        .into_iter()
+        .filter(|span| {
+            matches!(
+                span.kind,
+                SpanKind::CodeBlock | SpanKind::InlineCode | SpanKind::Marker | SpanKind::Link
+            )
+        })
+        .map(|span| span.range)
+        .collect()
+}
+
+fn quote(mark: char, previous: Option<char>) -> char {
+    let opening = previous.is_none_or(|c| {
+        c.is_whitespace() || matches!(c, '(' | '[' | '{' | '—' | '“' | '‘')
+    });
+    match (mark, opening) {
+        ('"', true) => '“',
+        ('"', false) => '”',
+        (_, true) => '‘',
+        (_, false) => '’',
+    }
+}
+
+/// 아직 닫지 않은 코드·수식·링크 주소를 입력할 때도 원문을 유지한다.
+fn in_literal_context(document: &str, offset: usize) -> bool {
+    let prefix = &document[..offset];
+    let lines = split(prefix);
+    if classify(&lines)
+        .last()
+        .is_some_and(|kind| matches!(kind, Kind::Verbatim | Kind::Indented))
+    {
+        return true;
+    }
+    let line = lines.last().copied().unwrap_or_default();
+    if line
+        .rsplit_once("](")
+        .is_some_and(|(_, destination)| !destination.contains(')'))
+    {
+        return true;
+    }
+    let mut open: Option<(char, usize)> = None;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            chars.next();
+            continue;
+        }
+        if !matches!(c, '`' | '$') {
+            continue;
+        }
+        let mut count = 1;
+        while chars.peek() == Some(&c) {
+            chars.next();
+            count += 1;
+        }
+        match open {
+            Some((mark, length)) if mark == c && length == count => open = None,
+            None => open = Some((c, count)),
+            _ => {}
+        }
+    }
+    open.is_some()
+}
+
+/// 새로 입력한 텍스트와 바로 앞에서 완성되는 문장부호·단어만 변환한다.
+/// UTF-8 바이트 범위와 치환 텍스트를 한 편집으로 돌려준다.
+pub fn on_input(
+    document: &str,
+    range: Range<usize>,
+    inserted: &str,
+    options: &Options,
+) -> (Range<usize>, String) {
+    if inserted.is_empty()
+        || !options.is_enabled()
+        || in_literal_context(document, range.start)
+    {
+        return (range, inserted.to_string());
+    }
+    let mut candidate = document.to_string();
+    candidate.replace_range(range.clone(), inserted);
+    let protected = protected_ranges(&candidate);
+    let insertion_end = range.start + inserted.len();
+    if protected
+        .iter()
+        .any(|span| span.start < insertion_end && span.end > range.start)
+    {
+        return (range, inserted.to_string());
+    }
+    // 선택을 교체할 때에는 선택 밖의 기존 단어까지 치환하지 않는다.
+    let mut start = range.start;
+    let mut replacement = inserted.to_string();
+    if options.smart_quotes {
+        let mut previous = document[..start].chars().next_back();
+        replacement = inserted
+            .chars()
+            .map(|c| {
+                let c = if matches!(c, '\'' | '"') {
+                    quote(c, previous)
+                } else {
+                    c
+                };
+                previous = Some(c);
+                c
+            })
+            .collect();
+    }
+    if range.is_empty() {
+        let prefix = &document[..start];
+        for (enabled, before, after) in [
+            (options.ellipsis, "...", "…"),
+            (options.dash, "--", "—"),
+        ] {
+            if enabled
+                && prefix.ends_with(&before[..before.len() - 1])
+                && inserted == &before[before.len() - 1..]
+            {
+                start -= before.len() - 1;
+                replacement = after.to_string();
+                break;
+            }
+        }
+        if inserted.chars().next().is_some_and(char::is_whitespace) {
+            for rule in &options.replacements {
+                if !rule.enabled || rule.before.is_empty() || !prefix.ends_with(&rule.before) {
+                    continue;
+                }
+                let rule_start = start - rule.before.len();
+                if document[..rule_start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    || protected
+                        .iter()
+                        .any(|span| span.start < start && span.end > rule_start)
+                {
+                    continue;
+                }
+                start = rule_start;
+                replacement = format!("{}{replacement}", rule.after);
+                break;
+            }
+        }
+    }
+    (start..range.end, replacement)
+}
+
+/// 붙여넣기 변환: 문단 표현을 먼저 맞추고 선택한 자동 변환을 적용한다.
+pub fn paste(text: &str, same_format: bool, options: &Options) -> String {
+    let text = from_clipboard(text, same_format);
+    if !options.apply_on_paste || !options.is_enabled() {
+        return text;
+    }
+    let protected = protected_ranges(&text);
+    let mut out = String::with_capacity(text.len());
+    let mut offset = 0;
+    while offset < text.len() {
+        if let Some(span) = protected
+            .iter()
+            .filter(|span| span.contains(&offset))
+            .max_by_key(|span| span.end)
+        {
+            out.push_str(&text[offset..span.end]);
+            offset = span.end;
+            continue;
+        }
+        let limit = protected
+            .iter()
+            .filter(|span| span.start > offset)
+            .map(|span| span.start)
+            .min()
+            .unwrap_or(text.len());
+        let rest = &text[offset..limit];
+        if let Some(rule) = options.replacements.iter().find(|rule| {
+            rule.enabled && !rule.before.is_empty() && rest.starts_with(&rule.before)
+        }) {
+            out.push_str(&rule.after);
+            offset += rule.before.len();
+        } else if options.ellipsis && rest.starts_with("...") {
+            out.push('…');
+            offset += 3;
+        } else if options.dash && rest.starts_with("--") {
+            out.push('—');
+            offset += 2;
+        } else {
+            let c = rest.chars().next().unwrap();
+            out.push(if options.smart_quotes && matches!(c, '\'' | '"') {
+                quote(c, out.chars().next_back())
+            } else {
+                c
+            });
+            offset += c.len_utf8();
+        }
+    }
+    out
+}
+
+/// 클립보드에서 Writer 에디터 본문으로 변환한다.
+///
+/// Writer에서 복사한 본문은 이미 에디터 표현이므로 문단 구조를 그대로 둔다.
+/// 외부 텍스트는 줄바꿈을 정규화한 뒤 저장용 마크다운과 같은 규칙으로 읽는다.
+pub fn from_clipboard(text: &str, same_format: bool) -> String {
+    if same_format {
+        return text.to_string();
+    }
+    to_editor(&text.replace("\r\n", "\n").replace('\r', "\n"))
+}
 
 /// 줄 하나의 종류. 줄 사이에 무엇을 넣을지 정할 때 쓴다.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -88,7 +340,7 @@ fn kind_of(line: &str) -> Kind {
     if indent >= 4 {
         return Kind::Indented;
     }
-    if super::heading_level(line).is_some() {
+    if crate::markdown::heading_level(line).is_some() {
         return Kind::Heading;
     }
     if trimmed.len() >= 3

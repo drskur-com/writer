@@ -2,7 +2,7 @@
 
 - 상태: Proposed
 - 날짜: 2026-10-20
-- 관련: ADR-0010 · `src/markdown/paragraphs.rs`, `src/app/editor.rs`
+- 관련: ADR-0010 · `src/text_transform.rs`, `src/app/editor.rs`
 
 ## 배경 (Context)
 
