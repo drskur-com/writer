@@ -127,36 +127,15 @@ pub fn add_attachment(project_dir: &Path, source: &Path) -> io::Result<String> {
     ))
 }
 
-/// 시트에 넣을 파일을 프로젝트 첨부파일 그룹에 넣고, 시트 폴더에서 본 상대 경로를 돌려준다.
-///
-/// 마크다운 링크는 시트 파일 기준으로 풀리므로 시트가 깊이 있을수록 `../`가 붙는다.
-pub fn attach_to_sheet(project_dir: &Path, sheet: &Path, source: &Path) -> io::Result<String> {
-    let relative = add_attachment(project_dir, source)?;
-    Ok(sheet_relative(project_dir, sheet, &relative))
-}
-
-/// 내려받은 이미지 바이트를 첨부파일 그룹에 `<ULID>.<확장자>`로 쓰고, 시트 폴더에서 본 상대 경로를
+/// 내려받은 이미지 바이트를 첨부파일 그룹에 `<ULID>.<확장자>`로 쓰고, 프로젝트 기준 상대 경로를
 /// 돌려준다. 웹 주소 이미지도 파일로 두어 미리보기·PDF·ePub이 오프라인에서 같게 한다.
-pub fn attach_bytes_to_sheet(
-    project_dir: &Path,
-    sheet: &Path,
-    bytes: &[u8],
-    extension: &str,
-) -> io::Result<String> {
+pub fn attach_bytes(project_dir: &Path, bytes: &[u8], extension: &str) -> io::Result<String> {
     let dir = ensure_attachments(project_dir)?;
     let target = dir.join(format!("{}.{extension}", ulid::Ulid::generate()));
     std::fs::write(&target, bytes)?;
-    let relative = relative_string(target.strip_prefix(project_dir).unwrap_or(&target));
-    Ok(sheet_relative(project_dir, sheet, &relative))
-}
-
-/// 프로젝트 기준 상대 경로 → 시트 폴더 기준 상대 경로.
-fn sheet_relative(project_dir: &Path, sheet: &Path, relative: &str) -> String {
-    let depth = sheet
-        .parent()
-        .and_then(|dir| dir.strip_prefix(project_dir).ok())
-        .map_or(0, |dir| dir.components().count());
-    format!("{}{relative}", "../".repeat(depth))
+    Ok(relative_string(
+        target.strip_prefix(project_dir).unwrap_or(&target),
+    ))
 }
 
 /// 바이트의 앞부분으로 이미지 형식을 알아내 확장자를 돌려준다. 넣을 수 있는 형식(JPEG·PNG·GIF·
@@ -333,15 +312,10 @@ mod tests {
         initialize(&root).unwrap();
         let projects = root.join(SectionKind::Projects.dir());
         let dir = create_project(&projects, "소설", None, None).unwrap();
-        let sheet = dir.join("1부").join("a.md");
-        std::fs::create_dir_all(sheet.parent().unwrap()).unwrap();
-        let relative = attach_bytes_to_sheet(&dir, &sheet, b"png", "png").unwrap();
-        let name = relative.strip_prefix("../Extras/Attachments/").unwrap();
+        let relative = attach_bytes(&dir, b"png", "png").unwrap();
+        let name = relative.strip_prefix("Extras/Attachments/").unwrap();
         assert!(name.ends_with(".png"), "{relative}");
-        assert_eq!(
-            std::fs::read(sheet.parent().unwrap().join(&relative)).unwrap(),
-            b"png"
-        );
+        assert_eq!(std::fs::read(dir.join(&relative)).unwrap(), b"png");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -363,13 +337,6 @@ mod tests {
         assert!(id.parse::<ulid::Ulid>().is_ok(), "{id}");
         // 프로젝트 안의 파일은 복사하지 않는다.
         assert_eq!(add_attachment(&dir, &dir.join(&first)).unwrap(), first);
-
-        // 시트 폴더에서 본 경로: 프로젝트 바로 아래면 그대로, 하위 그룹이면 `../`가 붙는다.
-        let top = attach_to_sheet(&dir, &dir.join("a.md"), &dir.join(&first)).unwrap();
-        assert_eq!(top, first);
-        let nested = dir.join("제1부").join("1장").join("a.md");
-        let deep = attach_to_sheet(&dir, &nested, &dir.join(&first)).unwrap();
-        assert_eq!(deep, format!("../../{first}"));
 
         std::fs::remove_dir_all(&root).ok();
     }

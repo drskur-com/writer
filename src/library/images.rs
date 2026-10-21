@@ -1,16 +1,19 @@
 //! 마크다운 이미지 경로(`![캡션](경로)`, ADR-0007)를 디스크의 파일로 찾는다.
 //!
 //! 미리보기·PDF·DOCX·ePub과 에디터가 같은 규칙을 써야 같은 그림이 보인다. 상대 경로는
-//! 시트 파일이 든 폴더 기준이고, 그 밖에 프로젝트 폴더와 첨부파일 그룹도 본다.
+//! 시트 폴더 → 프로젝트 폴더 → 첨부파일 그룹 순으로 찾는다.
 //!
-//! 시트나 그룹을 다른 폴더로 옮기면(`../` 깊이가 달라진다) 마크다운에 적힌 상대 경로가
-//! 어긋난다. 그런 경로도 찾을 수 있도록 `../` 뒤의 꼬리를 시트의 위 폴더들(프로젝트 폴더까지)
-//! 에서 한 번 더 찾는다. 그래야 옮긴 뒤에도 ePub이 깨진 이미지 경로를 만들지 않는다.
+//! 프로젝트 시트에 넣는 그림은 프로젝트 폴더 기준 경로(`Extras/Attachments/…`)로 적는다
+//! (ADR-0022). 시트나 그룹을 옮겨도 경로가 바뀌지 않는다.
+//!
+//! 예전에 넣은 시트 기준 경로(`../Extras/…`)는 옮기면 `../` 깊이가 어긋난다(ADR-0021).
+//! 그런 경로도 찾을 수 있도록 `../` 뒤의 꼬리를 시트의 위 폴더들(프로젝트 폴더까지)에서
+//! 한 번 더 찾는다.
 
 use std::path::{Component, Path, PathBuf};
 
 use super::layout::has_marker;
-use super::{ATTACHMENTS_GROUP, EXTRAS_DIR, GROUP_META_FILE, SECTIONS};
+use super::{ATTACHMENTS_GROUP, EXTRAS_DIR, GROUP_META_FILE, SECTIONS, SectionKind};
 
 /// 웹 주소인지. 웹 이미지는 파일이 아니라 주소를 그대로 쓴다.
 pub fn is_web_address(destination: &str) -> bool {
@@ -21,7 +24,7 @@ pub fn is_web_address(destination: &str) -> bool {
 /// 찾은 경로는 `..`를 푼 실제 경로라 같은 파일이면 같은 값이다(내보내기에서 한 번만 넣는다).
 ///
 /// `project_dir`는 프로젝트 폴더(원고·추가자료의 기준)다. 모르면 `None`을 주고,
-/// 그때는 시트 폴더 주변만 본다.
+/// 그때는 시트 폴더가 라이브러리 프로젝트 안이면 그 프로젝트 폴더를 쓴다(`project_dir_of`).
 pub fn resolve_image_path(
     sheet_dir: &Path,
     project_dir: Option<&Path>,
@@ -35,8 +38,11 @@ pub fn resolve_image_path(
         return path.is_file().then(|| path.to_path_buf());
     }
 
+    let project_dir = project_dir.or_else(|| project_dir_of(sheet_dir));
     let mut candidates = vec![sheet_dir.join(path)];
-    if let Some(project_dir) = project_dir {
+    // 프로젝트 기준 경로는 프로젝트 안을 가리킨다. `..`가 있으면 프로젝트 밖으로 나가므로 보지 않는다.
+    let inside = !path.components().any(|part| part == Component::ParentDir);
+    if let Some(project_dir) = project_dir.filter(|_| inside) {
         candidates.push(project_dir.join(path));
         candidates.push(
             project_dir
@@ -60,6 +66,16 @@ pub fn resolve_image_path(
                 .find(|candidate| candidate.is_file())
         })?;
     Some(found.canonicalize().unwrap_or(found))
+}
+
+/// 폴더가 든 라이브러리 프로젝트 폴더(`<라이브러리>/Projects/<프로젝트>`). 프로젝트 밖이면 `None`.
+fn project_dir_of(dir: &Path) -> Option<&Path> {
+    dir.ancestors().find(|dir| {
+        dir.parent().is_some_and(|section| {
+            section.ends_with(SectionKind::Projects.dir())
+                && section.parent().is_some_and(has_marker)
+        })
+    })
 }
 
 /// 어긋난 경로를 다시 찾을 시트 폴더와 그 위 폴더들(프로젝트 폴더까지).
@@ -185,6 +201,25 @@ mod tests {
         let (project, sheet_dir) = project();
         assert_eq!(
             resolve_image_path(&sheet_dir, Some(&project), "Extras/Attachments/a.png"),
+            Some(attachment(&project))
+        );
+    }
+
+    #[test]
+    fn finds_project_relative_path_without_project_dir() {
+        // 에디터·미리보기는 프로젝트 폴더를 넘기지 않는다. 라이브러리 안이면 시트 폴더에서 찾는다.
+        let root = temp_dir("images-project-relative");
+        crate::library::initialize(&root).unwrap();
+        let project = root.join("Projects").join("책");
+        let attachments = project.join(EXTRAS_DIR).join(ATTACHMENTS_GROUP);
+        let sheet_dir = project.join("본문").join("1장");
+        std::fs::create_dir_all(&attachments).unwrap();
+        std::fs::create_dir_all(&sheet_dir).unwrap();
+        std::fs::write(attachments.join("a.png"), "png").unwrap();
+        assert_eq!(project_dir_of(&sheet_dir), Some(project.as_path()));
+        assert_eq!(project_dir_of(&root.join("Notes").join("Inbox")), None);
+        assert_eq!(
+            resolve_image_path(&sheet_dir, None, "Extras/Attachments/a.png"),
             Some(attachment(&project))
         );
     }

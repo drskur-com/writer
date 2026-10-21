@@ -1,7 +1,8 @@
 //! 이미지 삽입 대화상자: 파일·첨부파일·URL에서 이미지를 고르고 크기·정렬·캡션을 정해
 //! 열린 시트의 커서 자리에 `![캡션](경로){속성}`을 넣는다(속성 문법은 ADR-0007).
 //!
-//! 프로젝트 시트에 고른 파일은 첨부파일 그룹에 복사하고 시트 기준 상대 경로로 잇는다.
+//! 프로젝트 시트에 고른 파일은 첨부파일 그룹에 복사하고 프로젝트 폴더 기준 경로
+//! (`Extras/Attachments/…`)로 잇는다. 시트를 옮겨도 경로가 바뀌지 않는다(ADR-0022).
 //! 이미 첨부파일 그룹에 있는 이미지는 "첨부파일" 탭에서 골라 복사 없이 다시 쓴다.
 //! 프로젝트 밖(메모)에는 첨부파일 그룹이 없어서 원본 파일의 절대 경로를 쓴다.
 //! 웹 주소 이미지도 프로젝트 시트에서는 내려받아 첨부파일로 넣는다(미리보기·PDF·ePub이 오프라인에서
@@ -802,25 +803,21 @@ impl WriterApp {
         let Some(image) = markdown::image_line(current) else {
             return;
         };
-        let source = if image.destination.starts_with("http://")
-            || image.destination.starts_with("https://")
-        {
+        let source = if library::is_web_address(&image.destination) {
             Source::Url
         } else {
             Source::File
         };
         let path = (source == Source::File).then(|| {
-            let path = Path::new(
-                image
-                    .destination
-                    .strip_prefix("file://")
-                    .unwrap_or(&image.destination),
-            );
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                sheet.parent().unwrap_or(Path::new("")).join(path)
-            }
+            let dir = sheet.parent().unwrap_or(Path::new(""));
+            library::resolve_image_path(dir, None, &image.destination).unwrap_or_else(|| {
+                dir.join(
+                    image
+                        .destination
+                        .strip_prefix("file://")
+                        .unwrap_or(&image.destination),
+                )
+            })
         });
         let edit = EditImage {
             state: editor.state().clone(),
@@ -978,19 +975,17 @@ impl WriterApp {
             ImageSource::Existing(destination) => destination,
             ImageSource::Url(url) => url,
             ImageSource::Downloaded(bytes, extension) => match self.project_of(sheet) {
-                Some(project) => {
-                    match library::attach_bytes_to_sheet(&project, sheet, &bytes, extension) {
-                        Ok(relative) => relative,
-                        Err(err) => {
-                            self.notify(format!("이미지를 첨부할 수 없습니다: {err}"), window, cx);
-                            return false;
-                        }
+                Some(project) => match library::attach_bytes(&project, &bytes, extension) {
+                    Ok(relative) => relative,
+                    Err(err) => {
+                        self.notify(format!("이미지를 첨부할 수 없습니다: {err}"), window, cx);
+                        return false;
                     }
-                }
+                },
                 None => return false,
             },
             ImageSource::File(path) => match self.project_of(sheet) {
-                Some(project) => match library::attach_to_sheet(&project, sheet, &path) {
+                Some(project) => match library::add_attachment(&project, &path) {
                     // 첨부파일 그룹의 변화는 폴더 감시가 다시 읽어 반영한다.
                     Ok(relative) => relative,
                     Err(err) => {

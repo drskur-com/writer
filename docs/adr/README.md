@@ -34,6 +34,7 @@
 | [0019](./0019-cross-group-sheet-move.md) | 시트를 끌어 다른 그룹으로 옮기면 파일을 옮기고 두 그룹의 순서·접합을 함께 저장한다 | Proposed | 2026-10-22 |
 | [0020](./0020-group-multiselect-move.md) | 그룹을 Shift로 여러 개 골라 다른 그룹의 하위로 끌어 옮긴다 | Proposed | 2026-10-22 |
 | [0021](./0021-image-path-resolution.md) | 이미지 경로는 한 곳에서 찾고, `../`가 어긋난 경로는 위 폴더에서 다시 찾는다 | Proposed | 2026-10-22 |
+| [0022](./0022-project-relative-image-paths.md) | 프로젝트 시트의 이미지 경로는 프로젝트 폴더 기준으로 적는다 | Proposed | 2026-10-22 |
 
 ## 작성 규칙
 
