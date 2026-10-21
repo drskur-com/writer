@@ -1,0 +1,74 @@
+diff --git a/vendor/gpui-base/src/overscroll.rs b/vendor/gpui-base/src/overscroll.rs
+index 9c93899..4e463d3 100644
+--- a/vendor/gpui-base/src/overscroll.rs
++++ b/vendor/gpui-base/src/overscroll.rs
+@@ -39,6 +39,21 @@ const FRAME: f32 = 1. / 60.;
+ /// through a long list, just as it runs into the top.
+ const SPEED_SPAN: Duration = Duration::from_millis(50);
+ 
++/// What a scroll leaves over smaller than this is float error, not the edge.
++///
++/// The text's offset is an `f32` of up to millions of pixels, so moving it by
++/// a fraction of a pixel and reading back how far it moved can come out a
++/// hair short. Read as reaching the edge, that hair stretched the edge in the
++/// middle of the text, and the packets after it went into the stretch
++/// instead of the text: fine scrolling stuck there and sprang back.
++const UNUSED_TOLERANCE: f32 = 0.5;
++
++/// The part of `dy` that `used` left over, with float error dropped.
++fn unused(dy: f32, used: f32) -> f32 {
++    let rest = dy - used;
++    if rest.abs() < UNUSED_TOLERANCE { 0. } else { rest }
++}
++
+ #[derive(Default)]
+ pub(crate) struct Overscroll {
+     physics: Physics,
+@@ -156,7 +171,7 @@ impl Overscroll {
+                 dy
+             };
+             if rest != 0. {
+-                let unused = rest - scroll(rest);
++                let unused = unused(rest, scroll(rest));
+                 if unused != 0. {
+                     self.physics.pull(unused);
+                 }
+@@ -178,7 +193,7 @@ impl Overscroll {
+             // Momentum or phaseless precise scrolling: it scrolls the text,
+             // and when the text runs into the edge it throws the edge as
+             // fast as it arrived, once.
+-            let unused = dy - scroll(dy);
++            let unused = unused(dy, scroll(dy));
+             if unused != 0. {
+                 self.physics.let_go(self.velocity * CARRY);
+                 thrown = true;
+@@ -233,6 +248,29 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn fine_scrolling_deep_in_the_text_never_stretches_the_edge() {
++        // The text is far from both ends; reading back how far an `f32`
++        // offset moved comes out a hair off for some packets.
++        let now = Instant::now();
++        let mut overscroll = Overscroll::default();
++        let start = -123_456.7_f32;
++        let offset = std::cell::Cell::new(start);
++        let scroll = |dy: f32| {
++            let before = offset.get();
++            offset.set(before + dy);
++            offset.get() - before
++        };
++        overscroll.packet(0., TouchPhase::Started, 400., now, scroll);
++        for ix in 0..200 {
++            let at = now + Duration::from_millis(8 * ix);
++            overscroll.packet(-0.37, TouchPhase::Moved, 400., at, scroll);
++            assert_eq!(overscroll.offset(), 0., "packet {ix} stretched the edge");
++        }
++        let moved = start - offset.get();
++        assert!((moved - 74.).abs() < 0.5, "moved {moved}");
++    }
++
+     #[test]
+     fn a_swipe_past_the_end_stretches_and_springs_back() {
+         let now = Instant::now();
