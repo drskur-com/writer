@@ -34,6 +34,9 @@ const MARKER_FADE: f32 = 0.6;
 /// 인용 본문을 흐리게 하는 정도.
 const QUOTE_FADE: f32 = 0.3;
 
+/// 완료한 할 일 항목 글 흐림(취소선과 함께).
+const TASK_DONE_FADE: f32 = 0.5;
+
 /// 본문 최대 폭(가독 폭). 창이 넓으면 가운데에 둔다.
 pub(super) const EDITOR_MAX_WIDTH: f32 = 680.0;
 
@@ -266,6 +269,18 @@ impl Markup {
                 SpanKind::Strikethrough => (
                     &mut inline,
                     HighlightStyle {
+                        strikethrough: Some(StrikethroughStyle {
+                            thickness: px(1.0),
+                            color: None,
+                        }),
+                        ..Default::default()
+                    },
+                ),
+                // 인용 흐림(`blocks`)보다 먼저 만든 묶음이라 인용 안의 할 일도 이 흐림을 쓴다.
+                SpanKind::TaskDone => (
+                    &mut inline,
+                    HighlightStyle {
+                        fade_out: Some(TASK_DONE_FADE),
                         strikethrough: Some(StrikethroughStyle {
                             thickness: px(1.0),
                             color: None,

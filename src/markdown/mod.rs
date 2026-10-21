@@ -33,6 +33,8 @@ pub enum SpanKind {
     Quote,
     /// 코드·수식 블록 전체.
     CodeBlock,
+    /// 완료한 할 일 항목(`- [x]`)의 글. 기호(`- [x] `)와 하위 목록은 빼고 첫 문단만이다.
+    TaskDone,
     /// 구문 기호: `#`, `**`, `_`, `` ` ``, `[`, `](…)`, `>`, `-`, 펜스, 줄 묶음 펜스, 구분선, frontmatter, 이미지,
     /// 각주 `[^`·`]`·정의 머리.
     Marker,
@@ -406,10 +408,15 @@ fn walk(node: &Node, text: &str, in_quote: bool, out: &mut Vec<Span>) {
                 }
                 in_quote = true;
             }
-            Node::ListItem(_) => {
+            Node::ListItem(item) => {
                 // 글머리표·번호·체크박스: 항목 시작 ~ 첫 자식 시작.
                 let end = children_range(node).map_or(range.end, |inner| inner.start);
                 push(range.start..end, SpanKind::Marker);
+                if item.checked == Some(true)
+                    && let Some(first) = item.children.first().and_then(range_of)
+                {
+                    push(first, SpanKind::TaskDone);
+                }
             }
             // 바로 뒤 Pandoc 속성(`{width=320px}`, ADR-0007)도 기호다.
             Node::Image(_) => {
@@ -759,6 +766,12 @@ mod tests {
         assert_eq!(pieces(text, SpanKind::Quote).len(), 2);
         let markers = pieces(text, SpanKind::Marker);
         assert_eq!(markers, [">", "> >", "- ", "1. ", "- [ ] ", "---"]);
+    }
+
+    #[test]
+    fn done_tasks() {
+        let text = "- [x] 일정\n- [ ] 장보기\n- 그냥\n";
+        assert_eq!(pieces(text, SpanKind::TaskDone), ["일정"]);
     }
 
     #[test]
