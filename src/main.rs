@@ -54,6 +54,11 @@ fn main() {
         .with_assets(assets::Assets)
         .run(|cx| {
             gpui_kit::init(cx);
+            // 웹 주소 이미지(`img(url)`, 이미지 삽입의 내려받기)에 쓰는 HTTP 클라이언트.
+            match reqwest_client::ReqwestClient::user_agent(&format!("{APP_NAME}/0.1")) {
+                Ok(client) => cx.set_http_client(std::sync::Arc::new(client)),
+                Err(err) => eprintln!("HTTP 클라이언트를 만들 수 없습니다: {err}"),
+            }
             dock_icon::install();
 
             // 테마 등록 후 저장된 테마(없거나 모르는 이름이면 기본 라이트) 적용

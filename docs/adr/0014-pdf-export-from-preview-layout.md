@@ -17,7 +17,7 @@ PLAN은 typst를 1순위로 두었는데, 그러면 렌더링 기능마다 미�
 - 서체: 런의 서체 이름·굵기·기울임으로 시스템 서체를 찾는다(fontdb, 이름이 같아야 함). 못 찾으면(시스템 UI 서체 등) Apple SD Gothic Neo → Helvetica Neue → Malgun Gothic. krilla가 쓴 글자만 넣는다(subset).
 - 서체에 없는 글자는 대체 서체(Apple SD Gothic Neo, Hiragino Sans, PingFang SC, Noto Sans CJK KR, Malgun Gothic, Arial Unicode MS 순)로 그린다. 조각 시작 x는 배치 그대로, 조각 안은 서체 글자 폭으로 잇는다.
 - 기준선은 gpui와 같이 줄 칸 안에서 ascent + descent를 세로 가운데에 둔다.
-- 이미지: PNG·JPEG·GIF·WebP는 그대로, 나머지는 PNG로 바꿔 넣는다. 표지는 판형을 채우고 넘치는 부분을 자른다. 웹 이미지는 넣지 않는다.
+- 이미지: PNG·JPEG·GIF·WebP는 그대로, 나머지는 PNG로 바꿔 넣는다. 표지는 판형을 채우고 넘치는 부분을 자른다. 웹 주소 이미지는 넣지 않는다 — 프로젝트 시트에 이미지 삽입으로 넣는 웹 이미지는 내려받아 첨부파일로 두므로(이미 넣은 웹 이미지도 "이미지 수정"에서 저장하면 내려받는다) 보통은 생기지 않는다.
 - 내보내는 곳: 미리보기 창 PDF 보기의 내보내기 버튼(보이는 판형·목차 그대로, 선택 범위 포함), 컴파일 대화상자의 PDF(판형·목차 생성 선택).
 
 ## 결과 (Consequences)

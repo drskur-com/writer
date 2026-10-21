@@ -4,6 +4,8 @@
 //! 프로젝트 시트에 고른 파일은 첨부파일 그룹에 복사하고 시트 기준 상대 경로로 잇는다.
 //! 이미 첨부파일 그룹에 있는 이미지는 "첨부파일" 탭에서 골라 복사 없이 다시 쓴다.
 //! 프로젝트 밖(메모)에는 첨부파일 그룹이 없어서 원본 파일의 절대 경로를 쓴다.
+//! 웹 주소 이미지도 프로젝트 시트에서는 내려받아 첨부파일로 넣는다(미리보기·PDF·ePub이 오프라인에서
+//! 같도록). 메모에는 주소를 그대로 쓴다.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -54,6 +56,47 @@ enum ImageSource {
     File(PathBuf),
     Url(String),
     Existing(String),
+    /// 웹에서 내려받은 이미지(바이트, 확장자). 첨부파일 그룹에 쓴다.
+    Downloaded(Vec<u8>, &'static str),
+}
+
+/// 내려받을 이미지 크기 한도.
+const MAX_DOWNLOAD_BYTES: usize = 50 * 1024 * 1024;
+
+fn is_web_address(destination: &str) -> bool {
+    destination.starts_with("http://") || destination.starts_with("https://")
+}
+
+/// 웹 주소의 이미지를 내려받는다. 이미지가 아니거나 너무 크면 오류.
+async fn download_image(
+    client: std::sync::Arc<dyn http_client::HttpClient>,
+    url: String,
+) -> Result<(Vec<u8>, &'static str), String> {
+    use futures::AsyncReadExt as _;
+    let mut response = client
+        .get(&url, http_client::AsyncBody::default(), true)
+        .await
+        .map_err(|err| format!("이미지를 내려받을 수 없습니다: {err}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!(
+            "이미지를 내려받을 수 없습니다 (HTTP {})",
+            status.as_u16()
+        ));
+    }
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .take(MAX_DOWNLOAD_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|err| format!("이미지를 내려받을 수 없습니다: {err}"))?;
+    if bytes.len() > MAX_DOWNLOAD_BYTES {
+        return Err("이미지가 너무 큽니다 (50MB 넘음)".into());
+    }
+    let extension = library::image_extension(&bytes)
+        .ok_or("주소가 이미지가 아닙니다 (JPEG·PNG·GIF·WebP·SVG만 넣을 수 있습니다)")?;
+    Ok((bytes, extension))
 }
 
 struct EditImage {
@@ -88,6 +131,9 @@ struct InsertImageForm {
     align: ImageAlign,
     full_page: bool,
     caption: Entity<InputState>,
+    /// 웹 이미지를 내려받는 중. 끝나면 넣고 대화상자를 닫는다.
+    download: Option<Task<()>>,
+    download_error: Option<SharedString>,
     app: WeakEntity<WriterApp>,
     _subscriptions: Vec<Subscription>,
 }
@@ -168,6 +214,8 @@ impl InsertImageForm {
             align: ImageAlign::default(),
             full_page: false,
             caption,
+            download: None,
+            download_error: None,
             app,
             _subscriptions: subscriptions,
         }
@@ -305,9 +353,28 @@ impl InsertImageForm {
 
     /// 이미지를 넣고 대화상자를 닫는다. 실패하면 알림을 띄우고 열어 둔다.
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.download.is_some() {
+            return;
+        }
         let Some(image) = self.image(cx) else {
             return;
         };
+        // 프로젝트 시트의 웹 이미지는 먼저 내려받는다(이미 넣은 웹 이미지를 고쳐 저장할 때도).
+        let in_project = self.tabs.contains(&Source::Attachment);
+        let web = match &image {
+            ImageSource::Url(url) | ImageSource::Existing(url) if is_web_address(url) => {
+                Some(url.clone())
+            }
+            _ => None,
+        };
+        if in_project && let Some(url) = web {
+            self.start_download(url, window, cx);
+            return;
+        }
+        self.insert(image, window, cx);
+    }
+
+    fn insert(&mut self, image: ImageSource, window: &mut Window, cx: &mut Context<Self>) {
         let caption = self.caption.read(cx).value().to_string();
         let options = self.options(cx);
         let sheet = self.sheet.clone();
@@ -317,6 +384,27 @@ impl InsertImageForm {
         if done.unwrap_or(false) {
             window.close_dialog(cx);
         }
+    }
+
+    /// 웹 이미지를 내려받아 첨부파일로 넣는다. 실패하면 대화상자에 알리고 열어 둔다.
+    fn start_download(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.download_error = None;
+        let client = cx.http_client();
+        self.download = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = download_image(client, url).await;
+            this.update_in(cx, |form, window, cx| {
+                form.download = None;
+                match result {
+                    Ok((bytes, extension)) => {
+                        form.insert(ImageSource::Downloaded(bytes, extension), window, cx)
+                    }
+                    Err(err) => form.download_error = Some(err.into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 }
 
@@ -612,7 +700,25 @@ impl Render for InsertImageForm {
             Source::File => self.render_file(pal, cx),
             Source::Attachment => self.render_attachments(pal, cx),
             Source::Url => {
-                form_row(pal, "주소", Input::new(&self.url).focus_ring(false)).into_any_element()
+                // 프로젝트 시트는 내려받아 첨부파일로 넣는다.
+                let note: Option<(SharedString, Hsla)> = if self.download.is_some() {
+                    Some(("이미지를 내려받는 중…".into(), pal.muted))
+                } else if let Some(error) = &self.download_error {
+                    Some((error.clone(), pal.danger))
+                } else if self.tabs.contains(&Source::Attachment) {
+                    Some(("내려받아 첨부파일에 넣습니다.".into(), pal.muted))
+                } else {
+                    None
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(form_row(pal, "주소", Input::new(&self.url).focus_ring(false)))
+                    .when_some(note, |this, (note, color)| {
+                        this.child(div().text_xs().text_color(color).child(note))
+                    })
+                    .into_any_element()
             }
         };
 
@@ -816,6 +922,18 @@ impl WriterApp {
         let destination = match image {
             ImageSource::Existing(destination) => destination,
             ImageSource::Url(url) => url,
+            ImageSource::Downloaded(bytes, extension) => match self.project_of(sheet) {
+                Some(project) => {
+                    match library::attach_bytes_to_sheet(&project, sheet, &bytes, extension) {
+                        Ok(relative) => relative,
+                        Err(err) => {
+                            self.notify(format!("이미지를 첨부할 수 없습니다: {err}"), window, cx);
+                            return false;
+                        }
+                    }
+                }
+                None => return false,
+            },
             ImageSource::File(path) => match self.project_of(sheet) {
                 Some(project) => match library::attach_to_sheet(&project, sheet, &path) {
                     // 첨부파일 그룹의 변화는 폴더 감시가 다시 읽어 반영한다.

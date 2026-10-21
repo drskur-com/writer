@@ -132,11 +132,55 @@ pub fn add_attachment(project_dir: &Path, source: &Path) -> io::Result<String> {
 /// 마크다운 링크는 시트 파일 기준으로 풀리므로 시트가 깊이 있을수록 `../`가 붙는다.
 pub fn attach_to_sheet(project_dir: &Path, sheet: &Path, source: &Path) -> io::Result<String> {
     let relative = add_attachment(project_dir, source)?;
+    Ok(sheet_relative(project_dir, sheet, &relative))
+}
+
+/// 내려받은 이미지 바이트를 첨부파일 그룹에 `<ULID>.<확장자>`로 쓰고, 시트 폴더에서 본 상대 경로를
+/// 돌려준다. 웹 주소 이미지도 파일로 두어 미리보기·PDF·ePub이 오프라인에서 같게 한다.
+pub fn attach_bytes_to_sheet(
+    project_dir: &Path,
+    sheet: &Path,
+    bytes: &[u8],
+    extension: &str,
+) -> io::Result<String> {
+    let dir = ensure_attachments(project_dir)?;
+    let target = dir.join(format!("{}.{extension}", ulid::Ulid::generate()));
+    std::fs::write(&target, bytes)?;
+    let relative = relative_string(target.strip_prefix(project_dir).unwrap_or(&target));
+    Ok(sheet_relative(project_dir, sheet, &relative))
+}
+
+/// 프로젝트 기준 상대 경로 → 시트 폴더 기준 상대 경로.
+fn sheet_relative(project_dir: &Path, sheet: &Path, relative: &str) -> String {
     let depth = sheet
         .parent()
         .and_then(|dir| dir.strip_prefix(project_dir).ok())
         .map_or(0, |dir| dir.components().count());
-    Ok(format!("{}{relative}", "../".repeat(depth)))
+    format!("{}{relative}", "../".repeat(depth))
+}
+
+/// 바이트의 앞부분으로 이미지 형식을 알아내 확장자를 돌려준다. 넣을 수 있는 형식(JPEG·PNG·GIF·
+/// WebP·SVG)이 아니면 `None`.
+pub fn image_extension(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("png");
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("jpg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("gif");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("webp");
+    }
+    // SVG는 텍스트라 앞부분에 `<svg`가 있는지 본다(XML 선언·주석이 앞설 수 있다).
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]).to_lowercase();
+    let head = head.trim_start_matches('\u{feff}').trim_start();
+    if head.starts_with('<') && head.contains("<svg") {
+        return Some("svg");
+    }
+    None
 }
 
 /// 소문자 확장자(없으면 빈 문자열).
@@ -270,6 +314,31 @@ mod tests {
         let project = library.find_project(&dir).unwrap();
         let extras: Vec<_> = project.extras.iter().map(|g| g.name.as_str()).collect();
         assert_eq!(extras, vec!["템플릿", "첨부파일"]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn downloaded_bytes_become_attachments() {
+        assert_eq!(image_extension(b"\x89PNG\r\n\x1a\nrest"), Some("png"));
+        assert_eq!(image_extension(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("jpg"));
+        assert_eq!(image_extension(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
+        assert_eq!(
+            image_extension(b"<?xml version=\"1.0\"?>\n<svg xmlns=\"\"></svg>"),
+            Some("svg")
+        );
+        assert_eq!(image_extension(b"<!doctype html><html>"), None);
+
+        let root = temp_dir("attach-bytes");
+        initialize(&root).unwrap();
+        let projects = root.join(SectionKind::Projects.dir());
+        let dir = create_project(&projects, "소설", None, None).unwrap();
+        let sheet = dir.join("1부").join("a.md");
+        std::fs::create_dir_all(sheet.parent().unwrap()).unwrap();
+        let relative = attach_bytes_to_sheet(&dir, &sheet, b"png", "png").unwrap();
+        let name = relative.strip_prefix("../Extras/Attachments/").unwrap();
+        assert!(name.ends_with(".png"), "{relative}");
+        assert_eq!(std::fs::read(sheet.parent().unwrap().join(&relative)).unwrap(), b"png");
 
         std::fs::remove_dir_all(&root).ok();
     }

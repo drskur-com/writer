@@ -23,7 +23,8 @@ mod preview;
 mod style;
 
 pub use book::{
-    BookMeta, COVER_EXTENSIONS, COVER_STEM, attach_to_sheet, read_book, set_cover, write_book,
+    BookMeta, COVER_EXTENSIONS, COVER_STEM, attach_bytes_to_sheet, attach_to_sheet,
+    image_extension, read_book, set_cover, write_book,
 };
 pub use document::{count_words, read_sheet, write_sheet};
 pub use files::{FileItem, FileKind, GroupKind, format_size, move_file};
