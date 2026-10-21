@@ -332,6 +332,71 @@ impl InputBaseState<EditorMode> {
         cx.notify();
     }
 
+    /// Draw elements over parts of lines, e.g. a check box over the `- [ ] ` of a Markdown task
+    /// item. The text stays in the document; the overlay only covers it, so it should paint an
+    /// opaque background.
+    ///
+    /// `ranges` gets each visible buffer row and its line without the trailing `\n`, and returns
+    /// the byte ranges (within the line) to cover. It runs on every frame for the visible lines,
+    /// so it should be cheap. A range must sit on one visual row; others are skipped. Lines that
+    /// a selection (or the caret) touches show their text instead, so it can be edited.
+    ///
+    /// `render` draws one overlay at the size of the text it covers. Its mouse-down handler can
+    /// call `window.prevent_default()` to keep the press from placing the caret.
+    pub fn set_line_overlays(
+        &mut self,
+        ranges: impl Fn(usize, &str) -> Vec<std::ops::Range<usize>> + 'static,
+        render: impl Fn(&LineOverlayContext, &mut Window, &mut App) -> gpui::AnyElement + 'static,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.line_overlays = Some((std::rc::Rc::new(ranges), std::rc::Rc::new(render)));
+        cx.notify();
+    }
+
+    /// Remove every line overlay (see [`Self::set_line_overlays`]).
+    pub fn clear_line_overlays(&mut self, cx: &mut gpui::Context<Self>) {
+        self.line_overlays = None;
+        cx.notify();
+    }
+
+    /// Replace the text in `range` (bytes) as one undoable edit and keep the selections where
+    /// they are (shifted past the edit), e.g. to tick a task item's check box without moving
+    /// the caret to it.
+    pub fn replace_range_keeping_selections(
+        &mut self,
+        range: std::ops::Range<usize>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let range = range.start.min(self.text.len())..range.end.min(self.text.len());
+        let delta = text.len() as isize - range.len() as isize;
+        let shift = |offset: usize| {
+            if offset >= range.end {
+                (offset as isize + delta) as usize
+            } else {
+                offset.min(range.start + text.len())
+            }
+        };
+        let kept: Vec<_> = self
+            .selections
+            .iter()
+            .map(|selection| {
+                let mut selection = *selection;
+                selection.start = shift(selection.start);
+                selection.end = shift(selection.end);
+                selection
+            })
+            .collect();
+        self.with_edits_allowed(|this| {
+            this.undo_manager
+                .set_pending_intent(super::undo_manager::EditIntent::Atomic);
+            this.replace_text_in_ranges(&[(range.clone(), text.to_string())], window, cx);
+        });
+        self.selections.replace_all(kept);
+        cx.notify();
+    }
+
     /// Measure the line blocks again, e.g. after what they show finished loading.
     pub fn refresh_line_blocks(&mut self, cx: &mut gpui::Context<Self>) {
         if let Some(measure) = self.display_map.line_block() {
@@ -357,3 +422,22 @@ pub struct LineBlockContext {
 /// Draws the block below a line (see [`EditorState::set_line_blocks`]).
 pub type LineBlockRenderer =
     std::rc::Rc<dyn Fn(&LineBlockContext, &mut Window, &mut App) -> gpui::AnyElement>;
+
+/// An overlay on part of a line, for a [`LineOverlayRenderer`].
+pub struct LineOverlayContext {
+    /// Buffer line the overlay sits on.
+    pub line: usize,
+    /// Text of the line, without the trailing `\n`.
+    pub text: gpui::SharedString,
+    /// Byte range within the line that the overlay covers.
+    pub range: std::ops::Range<usize>,
+    /// Size of the covered text: its width and the height of its visual row.
+    pub size: gpui::Size<gpui::Pixels>,
+}
+
+/// Finds the parts of a line to cover (see [`EditorState::set_line_overlays`]).
+pub type LineOverlayRanges = std::rc::Rc<dyn Fn(usize, &str) -> Vec<std::ops::Range<usize>>>;
+
+/// Draws an overlay on part of a line (see [`EditorState::set_line_overlays`]).
+pub type LineOverlayRenderer =
+    std::rc::Rc<dyn Fn(&LineOverlayContext, &mut Window, &mut App) -> gpui::AnyElement>;

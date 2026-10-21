@@ -258,6 +258,11 @@ pub fn numbered_list() -> IconName {
     IconName::ListOrdered
 }
 
+/// 에디터 할 일 항목: 완료한 체크 상자 안 표시.
+pub fn task_done() -> IconName {
+    IconName::Check
+}
+
 /// 문단 서식: 블록 인용.
 pub fn quote() -> IconName {
     IconName::TextQuote

@@ -1,0 +1,107 @@
+//! 에디터의 할 일 체크 상자(ADR-0023): GFM 할 일 항목(`- [ ] 일정`)의 기호 자리에 ☐·☑를 그리고,
+//! 누르면 원문의 `[ ]`↔`[x]`를 바꾼다.
+//!
+//! 체크 상자는 줄 오버레이(gpui-base 패치)로 기호 위에 덮어 그린다. 원문은 그대로 남고, 커서가
+//! 그 줄에 들어오면 오버레이가 빠져 `- [ ] ` 글자를 고칠 수 있다.
+
+use gpui_base::input::LineOverlayContext;
+use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::input::EditorState;
+use gpui_kit::component::*;
+use gpui_kit::gpui::prelude::FluentBuilder as _;
+use gpui_kit::gpui::*;
+
+use super::style::Palette;
+use crate::{icons, markdown};
+
+/// 체크 상자 한 변의 길이(줄 높이에 대한 비율과 한도).
+const BOX_SCALE: f32 = 0.55;
+const BOX_MIN: f32 = 12.;
+const BOX_MAX: f32 = 18.;
+
+/// 에디터에 할 일 체크 상자를 단다.
+pub(super) fn install(state: &mut EditorState, cx: &mut Context<EditorState>) {
+    let editor = cx.entity().downgrade();
+    state.set_line_overlays(
+        |_, line| {
+            markdown::task_marker(line)
+                .map(|marker| vec![marker.cover])
+                .unwrap_or_default()
+        },
+        move |overlay, _, cx| render(overlay, editor.clone(), cx),
+        cx,
+    );
+}
+
+fn render(overlay: &LineOverlayContext, editor: WeakEntity<EditorState>, cx: &App) -> AnyElement {
+    let Some(marker) = markdown::task_marker(&overlay.text) else {
+        return Empty.into_any_element();
+    };
+    let pal = Palette::from_theme(cx.theme());
+    let side = px((f32::from(overlay.size.height) * BOX_SCALE).clamp(BOX_MIN, BOX_MAX));
+    let (line, check, checked) = (overlay.line, marker.check, marker.checked);
+    // 기호 글자를 가리도록 배경을 칠한다. 누르면 커서를 옮기지 않고 체크만 바꾼다.
+    div()
+        .size_full()
+        .bg(pal.background)
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+            editor
+                .update(cx, |state, cx| toggle(state, line, check, window, cx))
+                .ok();
+        })
+        .child(
+            div()
+                .size(side)
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(3.))
+                .border_1()
+                .map(|this| {
+                    if checked {
+                        this.bg(pal.tint).border_color(pal.tint).child(
+                            Icon::new(icons::task_done())
+                                .size(side * 0.8)
+                                .text_color(pal.tint_foreground),
+                        )
+                    } else {
+                        this.border_color(pal.muted)
+                    }
+                }),
+        )
+        .into_any_element()
+}
+
+/// `line`번 줄의 할 일 체크를 뒤집는다. 그 사이 줄이 바뀌어 같은 자리에 체크 상자가 없으면 그대로 둔다.
+fn toggle(
+    state: &mut EditorState,
+    line: usize,
+    check: usize,
+    window: &mut Window,
+    cx: &mut Context<EditorState>,
+) {
+    let text = state.value();
+    let Some((start, line_text)) = text
+        .split('\n')
+        .scan(0, |offset, line_text| {
+            let start = *offset;
+            *offset += line_text.len() + 1;
+            Some((start, line_text))
+        })
+        .nth(line)
+    else {
+        return;
+    };
+    let Some(marker) = markdown::task_marker(line_text).filter(|marker| marker.check == check)
+    else {
+        return;
+    };
+    let offset = start + marker.check;
+    let mark = if marker.checked { " " } else { "x" };
+    state.replace_range_keeping_selections(offset..offset + 1, mark, window, cx);
+}

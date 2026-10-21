@@ -35,6 +35,7 @@
 | [0020](./0020-group-multiselect-move.md) | 그룹을 Shift로 여러 개 골라 다른 그룹의 하위로 끌어 옮긴다 | Proposed | 2026-10-22 |
 | [0021](./0021-image-path-resolution.md) | 이미지 경로는 한 곳에서 찾고, `../`가 어긋난 경로는 위 폴더에서 다시 찾는다 | Proposed | 2026-10-22 |
 | [0022](./0022-project-relative-image-paths.md) | 프로젝트 시트의 이미지 경로는 프로젝트 폴더 기준으로 적는다 | Proposed | 2026-10-22 |
+| [0023](./0023-editor-task-checkbox-overlay.md) | 에디터의 할 일 항목은 기호 위에 체크 상자를 겹쳐 그리고, 누르면 원문의 `[ ]`·`[x]`만 바꾼다 | Proposed | 2026-10-22 |
 
 ## 작성 규칙
 

@@ -10,6 +10,7 @@ mod editor_format;
 mod editor_image;
 mod editor_layout;
 mod editor_table;
+mod editor_task;
 mod file_view;
 mod insert_footnote;
 mod insert_image;

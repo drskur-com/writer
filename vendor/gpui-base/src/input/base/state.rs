@@ -415,6 +415,12 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) display_map: DisplayMap,
     /// Draws the blocks reserved below lines (see [`crate::input::LineBlockMeasureFn`]).
     pub(crate) line_block_renderer: Option<crate::input::LineBlockRenderer>,
+    /// Finds and draws the overlays on parts of lines (see
+    /// [`crate::input::EditorState::set_line_overlays`]).
+    pub(crate) line_overlays: Option<(
+        crate::input::LineOverlayRanges,
+        crate::input::LineOverlayRenderer,
+    )>,
     /// Text revision and selected rows that collapsed lines were last revealed for.
     revealed_rows: Option<(u64, Vec<std::ops::Range<usize>>)>,
     pub(super) undo_manager: UndoManager,
@@ -934,6 +940,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             blink_cursor,
             undo_manager,
             line_block_renderer: None,
+            line_overlays: None,
             revealed_rows: None,
             inline_tokens: None,
             pending_token: None,

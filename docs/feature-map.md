@@ -35,7 +35,7 @@
 | 다중 커서/선택 | P0 | 엔진 기본 | `add_selection` | M2 | ⬜ |
 | 되돌리기/다시실행 | P0 | 엔진 기본(세션 내), 세션 밖 히스토리는 P2 | `UndoManager` | M2 | ⬜ |
 | 문서 내 찾기/바꾸기 | P0 | `SearchSession` | `input::search` | M2 | ⬜ |
-| 할 일 목록(GFM `- [ ]`·`- [x]`) | P2 | 표준 표기만. 에디터는 기호로 흐리게, 미리보기·PDF·DOCX·ePub은 ☐·☑로 그린다. 에디터에서 눌러 체크하기는 예정 | markdown-rs GFM | M2/M7 | 🔨 |
+| 할 일 목록(GFM `- [ ]`·`- [x]`) | P2 | 표준 표기만. 에디터는 기호 위에 체크 상자를 겹쳐 그리고 눌러 체크, 완료는 취소선(ADR-0023). 미리보기·PDF·DOCX·ePub은 ☐·☑ | markdown-rs GFM, gpui-base 패치 | M2/M7 | ✅ |
 | 이미지 붙여넣기 → 첨부 | P1 | `Editor::on_paste` 훅 | attachment | M2 | ⬜ |
 | 인라인 이미지 미리보기 | P2 | 이미지 줄 아래 줄 블록에 그림, gpui-base 패치(ADR-0008) | display_map / `thumbnail` | M2/M4 | ✅ |
 | 맞춤법/문법 검사 | — | 범위 외(후속 LSP 연동 가능) | `Lsp` 훅 | — | 🚫 |

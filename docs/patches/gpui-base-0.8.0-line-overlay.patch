@@ -1,0 +1,339 @@
+diff --git a/vendor/gpui-base/src/input/base/element.rs b/vendor/gpui-base/src/input/base/element.rs
+index a91d060..ed1da59 100644
+--- a/vendor/gpui-base/src/input/base/element.rs
++++ b/vendor/gpui-base/src/input/base/element.rs
+@@ -2052,6 +2052,74 @@ impl<M: InputModeKind> TextElement<M> {
+             .collect()
+     }
+ 
++    /// Lay out the overlays on parts of the visible lines (see
++    /// [`crate::input::EditorState::set_line_overlays`]). Lines a selection touches get none, so
++    /// their text shows for editing.
++    fn prepaint_line_overlays(
++        &self,
++        layout: &LastLayout,
++        bounds: Bounds<Pixels>,
++        window: &mut Window,
++        cx: &mut App,
++    ) -> Vec<AnyElement> {
++        let state = self.state.read(cx);
++        let Some((ranges, render)) = state.line_overlays.clone() else {
++            return vec![];
++        };
++        let selected_rows: Vec<Range<usize>> = state
++            .selections
++            .iter()
++            .map(|selection| {
++                let start = state.text.offset_to_point(selection.start.min(state.text.len()));
++                let end = state.text.offset_to_point(selection.end.min(state.text.len()));
++                start.row..end.row + 1
++            })
++            .collect();
++        let mut placements = Vec::new();
++        let mut y = layout.visible_top;
++        for (line, &row) in layout.lines.iter().zip(layout.visible_buffer_lines.iter()) {
++            let line_size = line.size(layout.line_height);
++            // A collapsed line (see `LineStyle::collapsed`) has no text rows to cover.
++            let has_text = !line.is_hidden();
++            if has_text && !selected_rows.iter().any(|rows| rows.contains(&row)) {
++                let text: SharedString = state.text.slice_line(row).to_string().into();
++                for range in ranges(row, &text) {
++                    if range.is_empty() || range.end > text.len() {
++                        continue;
++                    }
++                    let (Some(start), Some(end)) = (
++                        line.position_for_index(range.start, layout, false),
++                        line.position_for_index(range.end, layout, true),
++                    ) else {
++                        continue;
++                    };
++                    if start.y != end.y || end.x <= start.x {
++                        continue;
++                    }
++                    placements.push((
++                        super::LineOverlayContext {
++                            line: row,
++                            text: text.clone(),
++                            range,
++                            size: size(end.x - start.x, line.row_height_or(layout.line_height)),
++                        },
++                        bounds.origin + start + point(layout.line_number_width, y),
++                    ));
++                }
++            }
++            y += line_size.height;
++        }
++        placements
++            .into_iter()
++            .map(|(context, origin)| {
++                let mut element = render(&context, window, cx);
++                element.layout_as_root(context.size.map(gpui::AvailableSpace::Definite), window, cx);
++                element.prepaint_at(origin, window, cx);
++                element
++            })
++            .collect()
++    }
++
+     fn prepaint_tokens(
+         &self,
+         layout: &LastLayout,
+@@ -2446,6 +2514,8 @@ pub(super) struct PrepaintState {
+     token_elements: Vec<AnyElement>,
+     /// Blocks drawn below lines (see [`crate::input::EditorState::set_line_blocks`]).
+     line_block_elements: Vec<AnyElement>,
++    /// Overlays on parts of lines (see [`crate::input::EditorState::set_line_overlays`]).
++    line_overlay_elements: Vec<AnyElement>,
+     /// The lines only contains the visible lines in the viewport, based on `visible_range`.
+     ///
+     /// The child is the soft lines.
+@@ -3178,9 +3248,11 @@ impl<M: InputModeKind> Element for TextElement<M> {
+ 
+         let token_elements = self.prepaint_tokens(&last_layout, bounds, token_elements, window, cx);
+         let line_block_elements = self.prepaint_line_blocks(&last_layout, bounds, window, cx);
++        let line_overlay_elements = self.prepaint_line_overlays(&last_layout, bounds, window, cx);
+         PrepaintState {
+             token_elements,
+             line_block_elements,
++            line_overlay_elements,
+             hitbox,
+             bounds,
+             last_layout,
+@@ -3434,6 +3506,9 @@ impl<M: InputModeKind> Element for TextElement<M> {
+         for element in &mut prepaint.token_elements {
+             element.paint(window, cx);
+         }
++        for element in &mut prepaint.line_overlay_elements {
++            element.paint(window, cx);
++        }
+         for element in &mut prepaint.line_block_elements {
+             element.paint(window, cx);
+         }
+@@ -4582,6 +4657,72 @@ mod tests {
+         });
+     }
+ 
++    #[gpui::test]
++    fn line_overlays_cover_ranges_except_on_selected_lines(cx: &mut TestAppContext) {
++        let text = "- [ ] a\n- [x] b\nplain";
++        let (editor, window) = decoration_editor(cx, text, false);
++        let mut cx = VisualTestContext::from_window(window.into(), cx);
++        let rendered = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
++        cx.update(|window, cx| {
++            let seen = rendered.clone();
++            editor.update(cx, |state, cx| {
++                state.set_line_overlays(
++                    |_, line: &str| {
++                        if line.starts_with("- [") {
++                            vec![0..6]
++                        } else {
++                            vec![]
++                        }
++                    },
++                    move |overlay: &crate::input::LineOverlayContext, _, _| {
++                        seen.borrow_mut()
++                            .push((overlay.line, overlay.range.clone(), overlay.size));
++                        gpui::Empty.into_any_element()
++                    },
++                    cx,
++                );
++                state.set_selected_range(0..0, cx);
++            });
++            window.draw(cx).clear(cx);
++            let lh = editor.read(cx).last_layout.as_ref().unwrap().line_height;
++            {
++                // The caret's line shows its text; the other task line is covered.
++                let rendered = rendered.borrow();
++                assert_eq!(rendered.len(), 1, "{rendered:?}");
++                assert_eq!(rendered[0].0, 1);
++                assert_eq!(rendered[0].1, 0..6);
++                assert!(rendered[0].2.width > px(0.));
++                assert_eq!(rendered[0].2.height, lh);
++            }
++
++            rendered.borrow_mut().clear();
++            editor.update(cx, |state, cx| state.set_selected_range(18..18, cx));
++            window.draw(cx).clear(cx);
++            let lines: Vec<usize> = rendered.borrow().iter().map(|overlay| overlay.0).collect();
++            assert_eq!(lines, [0, 1]);
++        });
++    }
++
++    #[gpui::test]
++    fn replace_range_keeping_selections_leaves_the_caret(cx: &mut TestAppContext) {
++        let text = "- [ ] a\nplain";
++        let (editor, window) = decoration_editor(cx, text, false);
++        let mut cx = VisualTestContext::from_window(window.into(), cx);
++        cx.update(|window, cx| {
++            editor.update(cx, |state, cx| {
++                state.set_selected_range(10..12, cx);
++                state.replace_range_keeping_selections(3..4, "x", window, cx);
++                assert_eq!(state.value().as_ref(), "- [x] a\nplain");
++                assert_eq!(state.selected_range(), 10..12);
++                // A longer replacement shifts the selection after it.
++                state.replace_range_keeping_selections(3..4, "xx", window, cx);
++                assert_eq!(state.selected_range(), 11..13);
++                state.undo(&Undo, window, cx);
++                assert_eq!(state.value().as_ref(), "- [x] a\nplain");
++            });
++        });
++    }
++
+     #[gpui::test]
+     fn line_style_blocks_add_to_measured_blocks(cx: &mut TestAppContext) {
+         let text = "![img](a.png)\nbody";
+diff --git a/vendor/gpui-base/src/input/base/state.rs b/vendor/gpui-base/src/input/base/state.rs
+index ab2eeed..5495066 100644
+--- a/vendor/gpui-base/src/input/base/state.rs
++++ b/vendor/gpui-base/src/input/base/state.rs
+@@ -415,6 +415,12 @@ pub struct InputBaseState<M: InputModeKind> {
+     pub(super) display_map: DisplayMap,
+     /// Draws the blocks reserved below lines (see [`crate::input::LineBlockMeasureFn`]).
+     pub(crate) line_block_renderer: Option<crate::input::LineBlockRenderer>,
++    /// Finds and draws the overlays on parts of lines (see
++    /// [`crate::input::EditorState::set_line_overlays`]).
++    pub(crate) line_overlays: Option<(
++        crate::input::LineOverlayRanges,
++        crate::input::LineOverlayRenderer,
++    )>,
+     /// Text revision and selected rows that collapsed lines were last revealed for.
+     revealed_rows: Option<(u64, Vec<std::ops::Range<usize>>)>,
+     pub(super) undo_manager: UndoManager,
+@@ -934,6 +940,7 @@ impl<M: InputModeKind> InputBaseState<M> {
+             blink_cursor,
+             undo_manager,
+             line_block_renderer: None,
++            line_overlays: None,
+             revealed_rows: None,
+             inline_tokens: None,
+             pending_token: None,
+diff --git a/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs b/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
+index ecb366c..c2b7df1 100644
+--- a/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
++++ b/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
+@@ -1097,6 +1097,11 @@ impl LineLayout {
+         self
+     }
+ 
++    /// Whether the text is not painted (a collapsed line).
++    pub(crate) fn is_hidden(&self) -> bool {
++        self.hidden
++    }
++
+     /// Reserve a block of `block_height` below the last visual row.
+     pub(crate) fn block_height(mut self, block_height: Pixels) -> Self {
+         self.block_height = block_height;
+diff --git a/vendor/gpui-base/src/input/editor/mod.rs b/vendor/gpui-base/src/input/editor/mod.rs
+index 9f6523c..940473b 100644
+--- a/vendor/gpui-base/src/input/editor/mod.rs
++++ b/vendor/gpui-base/src/input/editor/mod.rs
+@@ -332,6 +332,71 @@ impl InputBaseState<EditorMode> {
+         cx.notify();
+     }
+ 
++    /// Draw elements over parts of lines, e.g. a check box over the `- [ ] ` of a Markdown task
++    /// item. The text stays in the document; the overlay only covers it, so it should paint an
++    /// opaque background.
++    ///
++    /// `ranges` gets each visible buffer row and its line without the trailing `\n`, and returns
++    /// the byte ranges (within the line) to cover. It runs on every frame for the visible lines,
++    /// so it should be cheap. A range must sit on one visual row; others are skipped. Lines that
++    /// a selection (or the caret) touches show their text instead, so it can be edited.
++    ///
++    /// `render` draws one overlay at the size of the text it covers. Its mouse-down handler can
++    /// call `window.prevent_default()` to keep the press from placing the caret.
++    pub fn set_line_overlays(
++        &mut self,
++        ranges: impl Fn(usize, &str) -> Vec<std::ops::Range<usize>> + 'static,
++        render: impl Fn(&LineOverlayContext, &mut Window, &mut App) -> gpui::AnyElement + 'static,
++        cx: &mut gpui::Context<Self>,
++    ) {
++        self.line_overlays = Some((std::rc::Rc::new(ranges), std::rc::Rc::new(render)));
++        cx.notify();
++    }
++
++    /// Remove every line overlay (see [`Self::set_line_overlays`]).
++    pub fn clear_line_overlays(&mut self, cx: &mut gpui::Context<Self>) {
++        self.line_overlays = None;
++        cx.notify();
++    }
++
++    /// Replace the text in `range` (bytes) as one undoable edit and keep the selections where
++    /// they are (shifted past the edit), e.g. to tick a task item's check box without moving
++    /// the caret to it.
++    pub fn replace_range_keeping_selections(
++        &mut self,
++        range: std::ops::Range<usize>,
++        text: &str,
++        window: &mut Window,
++        cx: &mut gpui::Context<Self>,
++    ) {
++        let range = range.start.min(self.text.len())..range.end.min(self.text.len());
++        let delta = text.len() as isize - range.len() as isize;
++        let shift = |offset: usize| {
++            if offset >= range.end {
++                (offset as isize + delta) as usize
++            } else {
++                offset.min(range.start + text.len())
++            }
++        };
++        let kept: Vec<_> = self
++            .selections
++            .iter()
++            .map(|selection| {
++                let mut selection = *selection;
++                selection.start = shift(selection.start);
++                selection.end = shift(selection.end);
++                selection
++            })
++            .collect();
++        self.with_edits_allowed(|this| {
++            this.undo_manager
++                .set_pending_intent(super::undo_manager::EditIntent::Atomic);
++            this.replace_text_in_ranges(&[(range.clone(), text.to_string())], window, cx);
++        });
++        self.selections.replace_all(kept);
++        cx.notify();
++    }
++
+     /// Measure the line blocks again, e.g. after what they show finished loading.
+     pub fn refresh_line_blocks(&mut self, cx: &mut gpui::Context<Self>) {
+         if let Some(measure) = self.display_map.line_block() {
+@@ -357,3 +422,22 @@ pub struct LineBlockContext {
+ /// Draws the block below a line (see [`EditorState::set_line_blocks`]).
+ pub type LineBlockRenderer =
+     std::rc::Rc<dyn Fn(&LineBlockContext, &mut Window, &mut App) -> gpui::AnyElement>;
++
++/// An overlay on part of a line, for a [`LineOverlayRenderer`].
++pub struct LineOverlayContext {
++    /// Buffer line the overlay sits on.
++    pub line: usize,
++    /// Text of the line, without the trailing `\n`.
++    pub text: gpui::SharedString,
++    /// Byte range within the line that the overlay covers.
++    pub range: std::ops::Range<usize>,
++    /// Size of the covered text: its width and the height of its visual row.
++    pub size: gpui::Size<gpui::Pixels>,
++}
++
++/// Finds the parts of a line to cover (see [`EditorState::set_line_overlays`]).
++pub type LineOverlayRanges = std::rc::Rc<dyn Fn(usize, &str) -> Vec<std::ops::Range<usize>>>;
++
++/// Draws an overlay on part of a line (see [`EditorState::set_line_overlays`]).
++pub type LineOverlayRenderer =
++    std::rc::Rc<dyn Fn(&LineOverlayContext, &mut Window, &mut App) -> gpui::AnyElement>;
+diff --git a/vendor/gpui-base/src/input/mod.rs b/vendor/gpui-base/src/input/mod.rs
+index d84ca09..e859fad 100644
+--- a/vendor/gpui-base/src/input/mod.rs
++++ b/vendor/gpui-base/src/input/mod.rs
+@@ -94,7 +94,10 @@ pub use display_map::{
+     BufferPoint, DisplayMap, DisplayPoint, FoldRange, LineAlign, LineBlockMeasureFn, LineContext,
+     LineStyle, LineStyleFn, WrappingIndent,
+ };
+-pub use editor::{Editor, EditorState, LineBlockContext, LineBlockRenderer};
++pub use editor::{
++    Editor, EditorState, LineBlockContext, LineBlockRenderer, LineOverlayContext,
++    LineOverlayRanges, LineOverlayRenderer,
++};
+ pub use highlighting::{
+     DiagnosticColors, FoldIconRenderer, HighlightStyleResolver, InputEditorStyle, InputHighlighter,
+     InputHighlighterFactory, SharedHighlightStyleResolver, SyntaxContext, SyntaxContextProvider,

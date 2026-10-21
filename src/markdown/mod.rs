@@ -275,6 +275,60 @@ pub fn image_line(line: &str) -> Option<ImageLine> {
     })
 }
 
+/// GFM 할 일 항목 줄(`- [ ] 일정`·`1. [x] 일정`)의 체크 상자.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskMarker {
+    /// 체크 상자로 덮어 그릴 범위(줄 안 바이트). 글머리표 목록은 `- [ ] ` 전체, 번호 목록은
+    /// 번호를 남기고 `[ ] `만이다.
+    pub cover: Range<usize>,
+    /// 대괄호 안 글자(` `·`x`)의 위치(줄 안 바이트).
+    pub check: usize,
+    pub checked: bool,
+}
+
+/// 한 줄이 GFM 할 일 항목이면 체크 상자 자리를 돌려준다. 줄 텍스트만 본다.
+///
+/// 에디터가 줄마다 즉시 판정할 수 있도록 파서를 쓰지 않는다(`heading_level`과 같은 이유). 그래서
+/// 코드 블록 안의 `- [ ] ` 줄도 할 일로 본다. 인용 안의 할 일(`> - [ ]`)은 보지 않는다.
+pub fn task_marker(line: &str) -> Option<TaskMarker> {
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let body = &line[indent..];
+    let bytes = body.as_bytes();
+    // 목록 기호 뒤 첫 공백까지.
+    let marker_len = match bytes.first()? {
+        b'-' | b'*' | b'+' => 1,
+        _ => {
+            let digits = bytes
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            if digits == 0 || digits > 9 || !matches!(bytes.get(digits), Some(b'.' | b')')) {
+                return None;
+            }
+            digits + 1
+        }
+    };
+    let spaces = bytes[marker_len..]
+        .iter()
+        .take_while(|&&byte| byte == b' ')
+        .count();
+    if !(1..=4).contains(&spaces) {
+        return None;
+    }
+    let open = indent + marker_len + spaces;
+    let checked = match line.as_bytes().get(open..open + 4)? {
+        [b'[', b' ', b']', b' ' | b'\t'] => false,
+        [b'[', b'x' | b'X', b']', b' ' | b'\t'] => true,
+        _ => return None,
+    };
+    let bullet = marker_len == 1;
+    Some(TaskMarker {
+        cover: if bullet { indent } else { open }..open + 4,
+        check: open + 1,
+        checked,
+    })
+}
+
 /// 한 줄이 ATX 제목(`#`~`######`)이면 레벨을 돌려준다. 줄 텍스트만 본다.
 ///
 /// 에디터가 줄마다 즉시 판정할 수 있도록 파서를 쓰지 않는다. 그래서 코드 블록 안의
@@ -766,6 +820,49 @@ mod tests {
         assert_eq!(pieces(text, SpanKind::Quote).len(), 2);
         let markers = pieces(text, SpanKind::Marker);
         assert_eq!(markers, [">", "> >", "- ", "1. ", "- [ ] ", "---"]);
+    }
+
+    #[test]
+    fn task_markers() {
+        let marker = task_marker("- [ ] 장보기").unwrap();
+        assert_eq!(
+            marker,
+            TaskMarker {
+                cover: 0..6,
+                check: 3,
+                checked: false
+            }
+        );
+        let marker = task_marker("  * [X] 일정").unwrap();
+        assert_eq!(
+            marker,
+            TaskMarker {
+                cover: 2..8,
+                check: 5,
+                checked: true
+            }
+        );
+        // 번호 목록은 번호를 남긴다.
+        let marker = task_marker("12. [x] 끝").unwrap();
+        assert_eq!(
+            marker,
+            TaskMarker {
+                cover: 4..8,
+                check: 5,
+                checked: true
+            }
+        );
+        for line in [
+            "- [ ]",
+            "-[ ] a",
+            "- [v] a",
+            "[x] a",
+            "- [ ]a",
+            "> - [ ] a",
+            "-      [ ] a",
+        ] {
+            assert_eq!(task_marker(line), None, "{line}");
+        }
     }
 
     #[test]

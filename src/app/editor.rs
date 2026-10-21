@@ -696,6 +696,8 @@ impl WriterApp {
                 },
                 cx,
             );
+            // 할 일 항목의 기호 자리에 체크 상자를 그린다(ADR-0023).
+            super::editor_task::install(&mut state, cx);
             state.set_value(text.clone(), window, cx);
             state
         });

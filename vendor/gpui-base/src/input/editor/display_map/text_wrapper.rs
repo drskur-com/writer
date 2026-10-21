@@ -1097,6 +1097,11 @@ impl LineLayout {
         self
     }
 
+    /// Whether the text is not painted (a collapsed line).
+    pub(crate) fn is_hidden(&self) -> bool {
+        self.hidden
+    }
+
     /// Reserve a block of `block_height` below the last visual row.
     pub(crate) fn block_height(mut self, block_height: Pixels) -> Self {
         self.block_height = block_height;
