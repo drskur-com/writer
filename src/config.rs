@@ -24,6 +24,8 @@ pub struct Config {
     pub theme: Option<String>,
     /// 에디터 서체 이름. 없으면 시스템 서체.
     pub editor_font: Option<String>,
+    /// 에디터 본문 글자 크기(px). 없으면 16.
+    pub editor_font_size: Option<u16>,
 }
 
 /// 설정 디렉터리 (`<config_dir>/Writer`).

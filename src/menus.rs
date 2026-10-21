@@ -6,7 +6,7 @@ use gpui_kit::gpui::*;
 #[cfg(target_os = "macos")]
 use crate::APP_NAME;
 use crate::{
-    CloseLibrary, CompileProject, InsertFootnote, InsertImage, ToggleLineGroup, NewSheet, OpenLibrary, OpenSettings, QuitApp, SaveSheet,
+    CloseLibrary, CompileProject, InsertFootnote, InsertImage, InsertTable, ToggleLineGroup, NewSheet, OpenLibrary, OpenSettings, QuitApp, SaveSheet,
     SetTheme, ShowAbout, TogglePreview, ToggleSidebar, ToggleTheme, theme,
 };
 
@@ -65,6 +65,7 @@ pub(crate) fn build_menus(theme_names: &[SharedString], active_theme: &str) -> V
 
     menus.push(Menu::new("Insert").items([
         MenuItem::action("Image…", InsertImage),
+        MenuItem::action("Table…", InsertTable),
         MenuItem::action("Footnote…", InsertFootnote),
     ]));
 

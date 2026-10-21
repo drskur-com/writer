@@ -7,10 +7,12 @@ mod code_highlight;
 mod compile_dialog;
 mod editor;
 mod editor_image;
+mod editor_format;
 mod editor_layout;
 mod editor_table;
 mod file_view;
 mod insert_footnote;
+mod insert_table;
 mod insert_image;
 mod library_ops;
 mod library_panel;
@@ -109,7 +111,10 @@ impl WriterApp {
             true
         });
         // 설정(서체 등)이 바뀌면 다시 그린다.
-        let prefs_subscription = cx.observe_global::<crate::settings::Prefs>(|_, cx| cx.notify());
+        let prefs_subscription = cx.observe_global::<crate::settings::Prefs>(|this, cx| {
+            this.refresh_editor_preferences(cx);
+            cx.notify();
+        });
         let quit_subscription = cx.on_app_quit(|this, cx| {
             this.close_sheet(cx);
             async {}
@@ -540,6 +545,7 @@ impl Render for WriterApp {
             .on_action(cx.listener(Self::on_compile_project))
             .on_action(cx.listener(Self::on_insert_image))
             .on_action(cx.listener(Self::on_insert_footnote))
+            .on_action(cx.listener(Self::on_insert_table))
             .on_action(cx.listener(Self::on_toggle_line_group))
             .on_action(cx.listener(Self::on_open_library))
             .on_action(cx.listener(Self::on_close_library))

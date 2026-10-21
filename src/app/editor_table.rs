@@ -10,7 +10,7 @@
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -26,8 +26,8 @@ const TEXT_SCALE: f32 = 0.9;
 const LINE_HEIGHT: f32 = 1.5;
 
 /// 칸 좌우·위아래 여백.
-const CELL_PADDING_X: f32 = 8.0;
-const CELL_PADDING_Y: f32 = 4.0;
+const CELL_PADDING_X: f32 = 13.0;
+const CELL_PADDING_Y: f32 = 6.0;
 
 /// 격자 위·아래 여백(이미지 블록과 같다).
 const PADDING_TOP: f32 = 4.0;
@@ -62,7 +62,7 @@ struct GridRow {
 /// 열린 시트의 표 목록과 격자 배치. 줄 스타일·줄 블록의 측정·그리기에서 함께 쓴다.
 pub(super) struct TableBlocks {
     text_system: Arc<TextSystem>,
-    font_size: Pixels,
+    font_size: Cell<Pixels>,
     family: RefCell<SharedString>,
     /// 줄 순서대로.
     tables: RefCell<Vec<Rc<EditorTable>>>,
@@ -77,7 +77,7 @@ impl TableBlocks {
     ) -> Self {
         let blocks = Self {
             text_system,
-            font_size: font_size * TEXT_SCALE,
+            font_size: Cell::new(font_size * TEXT_SCALE),
             family: RefCell::new(family),
             tables: RefCell::default(),
         };
@@ -131,6 +131,15 @@ impl TableBlocks {
         true
     }
 
+    pub(super) fn set_font_size(&self, size: Pixels) {
+        let size = size * TEXT_SCALE;
+        if self.font_size.replace(size) != size {
+            for table in self.tables.borrow().iter() {
+                table.grid.take();
+            }
+        }
+    }
+
     /// 줄이 표 행인지.
     pub(super) fn contains(&self, row: usize) -> bool {
         self.table_at(row).is_some()
@@ -150,26 +159,38 @@ impl TableBlocks {
         let table = self.table_at(row).filter(|table| table.rows.end == row + 1)?;
         let grid = self.grid(&table, size.width);
         let pal = Palette::from_theme(cx.theme());
-        let line_height = self.font_size * LINE_HEIGHT;
-        let rule = |top: Pixels, strong: bool| {
+        let line_height = self.font_size.get() * LINE_HEIGHT;
+        let rule = |top: Pixels| {
             div()
                 .absolute()
                 .left_0()
                 .top(top)
                 .w(size.width)
                 .h(px(1.))
-                .bg(if strong { pal.border } else { pal.panel_border })
+                .bg(pal.border)
         };
         let mut root = div()
             .relative()
             .w(size.width)
             .h(grid.height)
             .font_family(self.family.borrow().clone())
-            .text_size(self.font_size)
+            .text_size(self.font_size.get())
             .line_height(line_height)
             .text_color(pal.foreground);
+        // 행 배경을 먼저 그려 테두리가 배경에 가려지지 않게 한다.
+        for (row_ix, row) in grid.rows.iter().enumerate() {
+            root = root.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(row.top)
+                    .w(size.width)
+                    .h(row.height)
+                    .bg(if row_ix % 2 == 1 { pal.tint } else { pal.background }),
+            );
+        }
         if let Some(first) = grid.rows.first() {
-            root = root.child(rule(first.top, true));
+            root = root.child(rule(first.top));
         }
         for (row_ix, row) in grid.rows.iter().enumerate() {
             let header = row_ix == 0;
@@ -196,7 +217,24 @@ impl TableBlocks {
                     }));
                 root = root.child(cell);
             }
-            root = root.child(rule(row.top + row.height, header));
+            root = root.child(rule(row.top + row.height));
+        }
+        if let (Some(first), Some(last)) = (grid.rows.first(), grid.rows.last()) {
+            let height = last.top + last.height - first.top + px(1.);
+            let vertical_rule = |left: Pixels| {
+                div()
+                    .absolute()
+                    .left(left)
+                    .top(first.top)
+                    .w(px(1.))
+                    .h(height)
+                    .bg(pal.border)
+            };
+            root = root.child(vertical_rule(px(0.)));
+            for &(left, _, _) in grid.columns.iter().skip(1) {
+                root = root.child(vertical_rule(left - px(CELL_PADDING_X)));
+            }
+            root = root.child(vertical_rule((size.width - px(1.)).max(px(0.))));
         }
         Some(root.into_any_element())
     }
@@ -244,7 +282,7 @@ impl TableBlocks {
             text.chars()
                 .map(|c| {
                     self.text_system
-                        .advance(font_id, self.font_size, c)
+                        .advance(font_id, self.font_size.get(), c)
                         .map_or(0., |size| f32::from(size.width))
                 })
                 .sum()
@@ -274,7 +312,7 @@ impl TableBlocks {
                 entry
             })
             .collect();
-        let line_height = self.font_size * LINE_HEIGHT;
+        let line_height = self.font_size.get() * LINE_HEIGHT;
         let mut top = px(PADDING_TOP);
         let rows = texts
             .iter()
@@ -282,7 +320,7 @@ impl TableBlocks {
             .map(|(row_ix, row)| {
                 let mut wrapper = self.text_system.line_wrapper(
                     if row_ix == 0 { bold.clone() } else { regular.clone() },
-                    self.font_size,
+                    self.font_size.get(),
                 );
                 let cells: Vec<Vec<SharedString>> = row
                     .iter()

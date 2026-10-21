@@ -1,12 +1,10 @@
 //! 에디터 영역: 떠 있는 툴바 + 본문, 열린 시트의 편집·자동 저장.
 
 use gpui_base::input::{LineContext, LineStyle};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{
     Editor, EditorState, InputEvent, TextDecoration, TextDecorationCollection,
 };
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Icon};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::gpui::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::gpui::*;
 use std::cell::{Cell, RefCell};
@@ -38,9 +36,6 @@ const QUOTE_FADE: f32 = 0.3;
 
 /// 본문 최대 폭(가독 폭). 창이 넓으면 가운데에 둔다.
 pub(super) const EDITOR_MAX_WIDTH: f32 = 680.0;
-
-/// 본문 글자 크기.
-const EDITOR_FONT_SIZE: f32 = 16.0;
 
 /// 커서를 화면 위·아래 끝에서 떨어뜨려 두는 줄 수. 마지막 줄 아래에도 그만큼 빈 공간을 둬서
 /// 문서 끝에서 입력할 때도 이 여백이 유지된다.
@@ -104,8 +99,9 @@ fn line_style(
     styles: Option<&library::Styles>,
     groups: Rc<RefCell<Vec<LineGroup>>>,
     tables: Rc<TableBlocks>,
+    font_size: f32,
 ) -> impl Fn(LineContext<'_>) -> LineStyle + 'static {
-    let layout = book_layout(styles);
+    let layout = book_layout(styles, font_size);
     move |line| {
         let row = line.row;
         let mut style = layout.line_style(line, &groups.borrow());
@@ -164,10 +160,10 @@ fn sync_line_groups(editor: &mut OpenSheet, text: &str, cx: &mut App) {
         .update(cx, |state, cx| state.restyle_lines(start..end, cx));
 }
 
-fn book_layout(styles: Option<&library::Styles>) -> BookLayout {
+fn book_layout(styles: Option<&library::Styles>, font_size: f32) -> BookLayout {
     styles.map_or_else(
-        || BookLayout::plain(EDITOR_FONT_SIZE),
-        |styles| BookLayout::new(styles, EDITOR_FONT_SIZE),
+        || BookLayout::plain(font_size),
+        |styles| BookLayout::new(styles, font_size),
     )
 }
 
@@ -327,6 +323,26 @@ impl Markup {
 }
 
 impl WriterApp {
+    /// 설정 변경을 열린 에디터의 줄 배치와 표 격자에 즉시 반영한다.
+    pub(super) fn refresh_editor_preferences(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let font_size = crate::settings::Prefs::editor_font_size(cx);
+        editor.tables.set_font_size(px(font_size));
+        editor.tables.set_family(&editor_font(editor.styles.as_ref(), cx));
+        let style = line_style(
+            editor.styles.as_ref(),
+            editor.line_groups.clone(),
+            editor.tables.clone(),
+            font_size,
+        );
+        editor.state.update(cx, |state, cx| {
+            state.set_line_style(Some(style), cx);
+            state.refresh_line_blocks(cx);
+        });
+    }
+
     /// 에디터 영역: 떠 있는 툴바 + 본문(빈 상태 또는 선택한 시트).
     pub(super) fn render_editor_column(
         &self,
@@ -369,11 +385,7 @@ impl WriterApp {
             None if self.book_style.is_some() => this,
             None => this
                 .child(
-                    tool_group(pal)
-                        .child(icon_button("format-bold", icons::bold(), false, pal))
-                        .child(icon_button("format-italic", icons::italic(), false, pal))
-                        .child(icon_button("format-link", icons::link(), false, pal))
-                        .child(self.line_kind_button(cx, pal)),
+                    self.formatting_tools(cx, pal),
                 )
                 .child(
                     tool_group(pal)
@@ -398,7 +410,8 @@ impl WriterApp {
             // 파일 그룹의 파일을 골랐으면 에디터 대신 뷰어를 보여 준다.
             None if let Some(file) = &self.open_file => self.render_file_viewer(file, pal),
             Some(editor) => {
-                let line_height = book_layout(editor.styles.as_ref()).line_height();
+                let font_size = crate::settings::Prefs::editor_font_size(cx);
+                let line_height = book_layout(editor.styles.as_ref(), font_size).line_height();
                 let font = editor_font(editor.styles.as_ref(), cx);
                 div()
                     .flex_1()
@@ -413,7 +426,7 @@ impl WriterApp {
                             .bordered(false)
                             .size_full()
                             .font_family(font.clone())
-                            .text_size(px(EDITOR_FONT_SIZE))
+                            .text_size(px(font_size))
                             .line_height(relative(line_height as f32)),
                     )
                     // 영역 폭을 재서 여백을 맞춘다(사이드바 애니메이션 중에도 따라감).
@@ -495,34 +508,9 @@ impl OpenSheet {
     pub(super) fn state(&self) -> &Entity<EditorState> {
         &self.state
     }
-}
 
-/// 커서가 있는 줄의 바이트 범위(줄바꿈 제외).
-fn cursor_line(text: &str, cursor: usize) -> std::ops::Range<usize> {
-    let cursor = cursor.min(text.len());
-    let start = text[..cursor].rfind('\n').map_or(0, |ix| ix + 1);
-    let end = text[cursor..]
-        .find('\n')
-        .map_or(text.len(), |ix| cursor + ix);
-    start..end
-}
-
-/// 줄 종류 메뉴 항목: (제목 레벨, 이름). 프로젝트에서는 부·장·절(ADR-0009), 메모에서는 제목 1~3.
-fn line_kinds(book: bool) -> [(Option<u8>, &'static str); 4] {
-    if book {
-        [
-            (None, "본문"),
-            (Some(1), "부 제목"),
-            (Some(2), "장 제목"),
-            (Some(3), "절 제목"),
-        ]
-    } else {
-        [
-            (None, "본문"),
-            (Some(1), "제목 1"),
-            (Some(2), "제목 2"),
-            (Some(3), "제목 3"),
-        ]
+    pub(super) fn has_book_styles(&self) -> bool {
+        self.styles.is_some()
     }
 }
 
@@ -578,7 +566,7 @@ impl WriterApp {
         let tables = Rc::new(TableBlocks::new(
             &text,
             editor_font(styles.as_ref(), cx),
-            px(EDITOR_FONT_SIZE),
+            px(crate::settings::Prefs::editor_font_size(cx)),
             cx.text_system().clone(),
         ));
         let (style_tables, measure_tables, render_tables) =
@@ -605,7 +593,12 @@ impl WriterApp {
             state.set_highlighter_factory(super::code_highlight::factory(), cx);
             configure_text_transform(&mut state, styles.as_ref());
             state.set_line_style(
-                Some(line_style(styles.as_ref(), style_groups, style_tables)),
+                Some(line_style(
+                    styles.as_ref(),
+                    style_groups,
+                    style_tables,
+                    crate::settings::Prefs::editor_font_size(cx),
+                )),
                 cx,
             );
             // 이미지 줄 아래에 이미지를 그린다(ADR-0008).
@@ -811,6 +804,7 @@ impl WriterApp {
                     styles.as_ref(),
                     editor.line_groups.clone(),
                     editor.tables.clone(),
+                    crate::settings::Prefs::editor_font_size(cx),
                 );
                 editor.markup.heading_weights = heading_weights(styles.as_ref());
                 editor.styles = styles;
@@ -850,81 +844,3 @@ impl WriterApp {
     }
 }
 
-impl WriterApp {
-    /// 툴바의 줄 종류 버튼: 커서가 있는 줄을 본문 또는 부·장·절 제목으로 바꾼다.
-    fn line_kind_button(&self, cx: &mut Context<Self>, pal: Palette) -> AnyElement {
-        let Some(editor) = &self.editor else {
-            return icon_button("format-paragraph", icons::paragraph(), false, pal)
-                .into_any_element();
-        };
-        let (state, book, app) = (
-            editor.state.clone(),
-            editor.styles.is_some(),
-            cx.entity().downgrade(),
-        );
-        Button::new("format-paragraph")
-            .icon(Icon::new(icons::paragraph()).text_color(pal.foreground.opacity(0.8)))
-            .ghost()
-            .size(px(30.0))
-            .rounded(px(15.0))
-            .tooltip(if book {
-                "본문 · 부 · 장 · 절"
-            } else {
-                "본문 · 제목"
-            })
-            .dropdown_menu(move |menu, _, cx| {
-                // 메뉴를 열 때 커서 줄을 읽는다.
-                let current = {
-                    let state = state.read(cx);
-                    let text = state.value();
-                    let line = &text[cursor_line(&text, state.cursor())];
-                    markdown::heading_level(line)
-                };
-                line_kinds(book)
-                    .into_iter()
-                    .fold(menu.min_w(px(160.0)), |menu, (level, title)| {
-                        let app = app.clone();
-                        menu.item(
-                            PopupMenuItem::new(title)
-                                .checked(current == level)
-                                .on_click(move |_, window, cx| {
-                                    app.update(cx, |app, cx| {
-                                        app.set_line_heading(level, window, cx)
-                                    })
-                                    .ok();
-                                }),
-                        )
-                    })
-            })
-            .into_any_element()
-    }
-
-    /// 커서가 있는 줄의 제목 레벨을 바꾼다(`None`이면 본문). 커서는 같은 글자 앞에 둔다.
-    fn set_line_heading(&mut self, level: Option<u8>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = &self.editor else {
-            return;
-        };
-        let changed = editor.state.update(cx, |state, cx| {
-            let text = state.value();
-            let cursor = state.cursor().min(text.len());
-            let range = cursor_line(&text, cursor);
-            let line = &text[range.clone()];
-            let new_line = markdown::set_heading_level(line, level);
-            if new_line == line {
-                state.focus(window, cx);
-                return false;
-            }
-            let column = (cursor - range.start).saturating_sub(markdown::heading_marker_len(line))
-                + markdown::heading_marker_len(&new_line);
-            let start = range.start;
-            state.set_selected_range(range, cx);
-            state.replace(new_line, window, cx);
-            state.set_selected_range(start + column..start + column, cx);
-            state.focus(window, cx);
-            true
-        });
-        if changed {
-            self.on_editor_changed(window, cx);
-        }
-    }
-}

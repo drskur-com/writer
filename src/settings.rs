@@ -35,6 +35,7 @@ const FORM_MAX_WIDTH: f32 = 400.0;
 pub struct Prefs {
     /// 에디터 서체. 없으면 테마 서체(시스템 서체).
     pub editor_font: Option<SharedString>,
+    pub editor_font_size: Option<u16>,
 }
 
 impl Global for Prefs {}
@@ -44,6 +45,7 @@ impl Prefs {
     pub fn init(config: &Config, cx: &mut App) {
         cx.set_global(Prefs {
             editor_font: config.editor_font.clone().map(SharedString::from),
+            editor_font_size: config.editor_font_size.filter(|size| (12..=32).contains(size)),
         });
     }
 
@@ -53,6 +55,22 @@ impl Prefs {
             .editor_font
             .clone()
             .unwrap_or_else(|| cx.theme().font_family.clone())
+    }
+
+    pub fn editor_font_size(cx: &App) -> f32 {
+        f32::from(cx.global::<Prefs>().editor_font_size.unwrap_or(16))
+    }
+
+    fn set_editor_font_size(size: u16, cx: &mut App) {
+        if Self::editor_font_size(cx) == f32::from(size) {
+            return;
+        }
+        cx.global_mut::<Prefs>().editor_font_size = Some(size);
+        let mut config = Config::load();
+        config.editor_font_size = Some(size);
+        if let Err(err) = config.save() {
+            eprintln!("설정 저장 실패: {err}");
+        }
     }
 
     /// 에디터 서체를 바꾸고 저장한다.
@@ -209,10 +227,30 @@ pub(crate) fn font_items(
     .collect()
 }
 
+#[derive(Clone)]
+struct FontSizeItem(u16);
+
+impl SearchableListItem for FontSizeItem {
+    type Value = u16;
+
+    fn title(&self) -> SharedString {
+        format!("{} px", self.0).into()
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div().child(self.title())
+    }
+
+    fn value(&self) -> &u16 {
+        &self.0
+    }
+}
+
 /// 설정 창 화면.
 struct SettingsWindow {
     page: Page,
     font_picker: Entity<SelectState<SearchableVec<FontItem>>>,
+    font_size_picker: Entity<SelectState<SearchableVec<FontSizeItem>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -235,6 +273,15 @@ impl SettingsWindow {
             .searchable(true)
         });
 
+        let current_size = Prefs::editor_font_size(cx) as usize;
+        let font_size_picker = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new((12..=32).map(FontSizeItem).collect::<Vec<_>>()),
+                Some(IndexPath::new(current_size - 12)),
+                window,
+                cx,
+            )
+        });
         let subscriptions = vec![
             cx.subscribe(
                 &font_picker,
@@ -245,12 +292,22 @@ impl SettingsWindow {
                     }
                 },
             ),
+            cx.subscribe(
+                &font_size_picker,
+                |_, _, event: &SelectEvent<SearchableVec<FontSizeItem>>, cx| {
+                    let SelectEvent::Confirm(value) = event;
+                    if let Some(size) = value {
+                        Prefs::set_editor_font_size(*size, cx);
+                    }
+                },
+            ),
             cx.observe_global::<Prefs>(|_, cx| cx.notify()),
         ];
 
         Self {
             page: Page::General,
             font_picker,
+            font_size_picker,
             _subscriptions: subscriptions,
         }
     }
@@ -309,13 +366,32 @@ impl SettingsWindow {
         )
     }
 
-    /// 일반: 에디터 서체.
+    /// 일반: 에디터 서체와 글자 크기.
     fn render_general(&self) -> impl IntoElement {
-        Select::new(&self.font_picker)
-            .large()
-            .focus_ring(false)
-            .menu_max_h(px(320.0))
-            .search_placeholder("서체 검색")
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                Select::new(&self.font_picker)
+                    .large()
+                    .focus_ring(false)
+                    .menu_max_h(px(320.0))
+                    .search_placeholder("서체 검색"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("에디터 폰트 크기")
+                    .child(
+                        Select::new(&self.font_size_picker)
+                            .large()
+                            .focus_ring(false)
+                            .menu_max_h(px(240.0)),
+                    ),
+            )
     }
 }
 
