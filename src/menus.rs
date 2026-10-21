@@ -7,7 +7,7 @@ use gpui_kit::gpui::*;
 use crate::APP_NAME;
 use crate::{
     CloseLibrary, CompileProject, InsertFootnote, InsertImage, InsertSpecialChar, InsertTable, ToggleLineGroup, NewSheet, OpenLibrary, OpenSettings, QuitApp, SaveSheet,
-    SetTheme, ShowAbout, TogglePreview, ToggleSidebar, ToggleTheme, theme,
+    SetTheme, ShowAbout, ToggleBold, ToggleItalic, TogglePreview, ToggleSidebar, ToggleTheme, theme,
 };
 
 /// 메뉴 트리.
@@ -56,6 +56,9 @@ pub(crate) fn build_menus(theme_names: &[SharedString], active_theme: &str) -> V
 
     #[cfg_attr(target_os = "macos", allow(unused_mut))]
     let mut edit_items = vec![
+        MenuItem::action("Bold", ToggleBold),
+        MenuItem::action("Italic", ToggleItalic),
+        MenuItem::separator(),
         MenuItem::action("Toggle Line Group", ToggleLineGroup),
         MenuItem::separator(),
         MenuItem::action("Emoji & Symbols…", InsertSpecialChar),

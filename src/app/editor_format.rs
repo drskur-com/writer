@@ -4,6 +4,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::input::{EditorState, Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{FocusableExt as _, Icon, Side, WindowExt as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
@@ -22,6 +23,26 @@ enum BlockFormat {
     Bullet,
     Numbered,
     Quote,
+}
+
+#[cfg(target_os = "macos")]
+fn bold_shortcut() -> &'static str {
+    "굵게 (⌘B)"
+}
+
+#[cfg(not(target_os = "macos"))]
+fn bold_shortcut() -> &'static str {
+    "굵게 (Ctrl+B)"
+}
+
+#[cfg(target_os = "macos")]
+fn italic_shortcut() -> &'static str {
+    "기울임 (⌘I)"
+}
+
+#[cfg(not(target_os = "macos"))]
+fn italic_shortcut() -> &'static str {
+    "기울임 (Ctrl+I)"
 }
 
 /// 들여쓰기는 남기고 한 단계의 문단 서식 기호를 읽는다.
@@ -84,6 +105,7 @@ impl WriterApp {
             .child(
                 icon_button("format-bold", icons::bold(), enabled, pal)
                     .when(active(markdown::SpanKind::Strong), |this| this.bg(pal.hover))
+                    .tooltip(|window, cx| Tooltip::new(bold_shortcut()).build(window, cx))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_inline(markdown::SpanKind::Strong, "**", window, cx);
                     })),
@@ -91,6 +113,7 @@ impl WriterApp {
             .child(
                 icon_button("format-italic", icons::italic(), enabled, pal)
                     .when(active(markdown::SpanKind::Emphasis), |this| this.bg(pal.hover))
+                    .tooltip(|window, cx| Tooltip::new(italic_shortcut()).build(window, cx))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_inline(markdown::SpanKind::Emphasis, "_", window, cx);
                     })),
@@ -101,11 +124,18 @@ impl WriterApp {
                         this.open_link_dialog(window, cx);
                     })),
             )
+            .child(
+                icon_button("format-special-char", icons::by_name("smile"), enabled, pal)
+                    .tooltip(|window, cx| Tooltip::new("특수 문자 및 이모지 (Ctrl+Alt+Space)").build(window, cx))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.on_insert_special_char(&crate::InsertSpecialChar, window, cx);
+                    })),
+            )
             .child(self.block_format_button(cx, pal))
             .into_any_element()
     }
 
-    fn toggle_inline(
+    pub(super) fn toggle_inline(
         &mut self,
         kind: markdown::SpanKind,
         marker: &str,

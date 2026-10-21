@@ -38,6 +38,8 @@ actions!(
         OpenLibrary,
         CloseLibrary,
         OpenSettings,
+        ToggleBold,
+        ToggleItalic,
         ToggleSidebar,
         TogglePreview,
         ToggleTheme,
@@ -92,8 +94,16 @@ fn main() {
                 KeyBinding::new("ctrl-,", OpenSettings, None),
                 #[cfg(target_os = "macos")]
                 KeyBinding::new("cmd-,", OpenSettings, None),
-                KeyBinding::new("ctrl-b", ToggleSidebar, None),
+                KeyBinding::new("ctrl-b", ToggleBold, None),
+                KeyBinding::new("ctrl-i", ToggleItalic, None),
+                KeyBinding::new("ctrl-shift-b", ToggleSidebar, None),
                 KeyBinding::new("ctrl-shift-l", ToggleTheme, None),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-b", ToggleBold, None),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-i", ToggleItalic, None),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("ctrl-cmd-s", ToggleSidebar, None),
                 KeyBinding::new("cmd-shift-e", CompileProject, None),
                 KeyBinding::new("ctrl-shift-e", CompileProject, None),
                 #[cfg(target_os = "macos")]

@@ -34,8 +34,9 @@ use gpui_kit::component::menu::AppMenuBar;
 
 use crate::menus::install_menus;
 use crate::{
-    APP_NAME, CloseLibrary, CompileProject, OpenLibrary, QuitApp, SaveSheet, SetTheme, ToggleLineGroup, ShowAbout, TogglePreview,
-    ToggleSidebar, ToggleTheme, config, icons, library, theme,
+    APP_NAME, CloseLibrary, CompileProject, OpenLibrary, QuitApp, SaveSheet, SetTheme, ShowAbout,
+    ToggleBold, ToggleItalic, ToggleLineGroup, TogglePreview, ToggleSidebar, ToggleTheme,
+    config, icons, library, markdown, theme,
 };
 use style::*;
 
@@ -247,6 +248,24 @@ impl WriterApp {
     fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
         cx.notify();
+    }
+
+    /// 선택 영역(또는 커서 위치)의 굵게 표시를 켜고 끈다.
+    fn on_toggle_bold(&mut self, _: &ToggleBold, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor.is_none() {
+            self.notify("먼저 시트를 여세요.", window, cx);
+            return;
+        }
+        self.toggle_inline(markdown::SpanKind::Strong, "**", window, cx);
+    }
+
+    /// 선택 영역(또는 커서 위치)의 기울임 표시를 켜고 끈다.
+    fn on_toggle_italic(&mut self, _: &ToggleItalic, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor.is_none() {
+            self.notify("먼저 시트를 여세요.", window, cx);
+            return;
+        }
+        self.toggle_inline(markdown::SpanKind::Emphasis, "_", window, cx);
     }
 
     /// 최상위 섹션을 접거나 편다.
@@ -553,6 +572,8 @@ impl Render for WriterApp {
             .on_action(cx.listener(Self::on_close_library))
             .on_action(cx.listener(Self::on_show_about))
             .on_action(cx.listener(Self::on_toggle_sidebar))
+            .on_action(cx.listener(Self::on_toggle_bold))
+            .on_action(cx.listener(Self::on_toggle_italic))
             .on_action(cx.listener(Self::on_toggle_preview))
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_set_theme))
