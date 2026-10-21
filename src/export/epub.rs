@@ -460,33 +460,32 @@ impl<'a> EpubBuilder<'a> {
                 html.push_str("</table>\n");
                 self.ensure_section(&self.project.name).html_body.push_str(&html);
             }
+            // 각주마다 `aside`(EPUB 3 footnote). 팝업을 지원하는 리더는 본문 흐름에서 감추고 참조를
+            // 누르면 띄운다. 그 밖의 리더는 시트 끝에 보여 준다. 번호는 본문으로 돌아가는 링크다.
             Block::Footnotes(notes) => {
-                let sec = self.ensure_section(&self.project.name);
-                sec.html_body.push_str("<section class=\"footnotes\" epub:type=\"footnotes\">\n<ol class=\"footnotes-list\">\n");
                 for (num, body) in notes {
                     let (id, back) = (self.notes.note_id(*num), self.notes.ref_id(*num));
                     let sec = self.ensure_section(&self.project.name);
                     sec.html_body.push_str(&format!(
-                        "<li id=\"{id}\" value=\"{num}\" epub:type=\"footnote\">\n"
+                        "<aside id=\"{id}\" class=\"footnote\" epub:type=\"footnote\">\n"
                     ));
+                    let body_start = sec.html_body.len();
                     for b in body {
                         self.render_block(b, sheet_dir);
                     }
-                    // 본문으로 돌아가는 링크는 마지막 문단 끝에 붙인다.
-                    let backlink = format!(
-                        " <a class=\"footnote-back\" role=\"doc-backlink\" href=\"#{back}\">↩&#xFE0E;</a>"
+                    let number = format!(
+                        "<a class=\"footnote-back\" role=\"doc-backlink\" href=\"#{back}\">{num}</a> "
                     );
                     let sec = self.ensure_section(&self.project.name);
-                    if sec.html_body.ends_with("</p>\n") {
-                        let at = sec.html_body.len() - "</p>\n".len();
-                        sec.html_body.insert_str(at, &backlink);
+                    // 번호는 첫 문단 머리에 넣는다. 첫 블록이 문단이 아니면 번호만 한 줄로 둔다.
+                    if sec.html_body[body_start..].starts_with("<p>") {
+                        sec.html_body.insert_str(body_start + "<p>".len(), &number);
                     } else {
-                        sec.html_body.push_str(&format!("<p>{}</p>\n", backlink.trim_start()));
+                        sec.html_body
+                            .insert_str(body_start, &format!("<p>{}</p>\n", number.trim_end()));
                     }
-                    sec.html_body.push_str("</li>\n");
+                    sec.html_body.push_str("</aside>\n");
                 }
-                let sec = self.ensure_section(&self.project.name);
-                sec.html_body.push_str("</ol>\n</section>\n");
             }
         }
     }
@@ -1039,11 +1038,13 @@ th {{
   font-weight: bold;
 }}
 
-section.footnotes {{
-  margin-top: 3em;
-  padding-top: 1em;
-  border-top: 1px solid #eee;
+aside.footnote {{
+  margin-top: 1em;
   font-size: 0.85em;
+}}
+
+aside.footnote p {{
+  text-indent: 0;
 }}
 
 a.noteref, a.footnote-back {{
@@ -1414,9 +1415,11 @@ mod tests {
         // 같은 각주를 다시 참조하면 돌아올 자리(id)는 처음 것에만 있다.
         assert_eq!(html.matches(r#"id="fnref-1-1""#).count(), 1);
         assert_eq!(html.matches(r##"href="#fn-1-1""##).count(), 2);
-        assert!(html.contains(r#"<li id="fn-1-1" value="1" epub:type="footnote">"#));
-        assert!(html.contains(r##"에이 <a class="footnote-back" role="doc-backlink" href="#fnref-1-1">"##));
-        assert!(html.contains(r#"<li id="fn-2-1" value="1""#));
+        assert!(html.contains(
+            r##"<aside id="fn-1-1" class="footnote" epub:type="footnote">
+<p><a class="footnote-back" role="doc-backlink" href="#fnref-1-1">1</a> 에이</p>"##
+        ));
+        assert!(html.contains(r#"<aside id="fn-2-1""#));
         assert!(html.contains(r##"href="#fn-2-1""##));
     }
 
