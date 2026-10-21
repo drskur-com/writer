@@ -7,6 +7,8 @@ use std::path::Path;
 pub struct Preview {
     /// 표시 제목: 본문 첫 줄(헤딩 표시 제거). 빈 시트는 빈 문자열.
     pub title: String,
+    /// 첫 줄의 ATX 헤딩 레벨(1~6). 헤딩이 아니면 0.
+    pub level: u8,
     /// 목록 카드에 보일 발췌: 제목 다음 줄들을 한 줄로 이은 것.
     pub excerpt: String,
 }
@@ -26,8 +28,7 @@ const EXCERPT_CHARS: usize = 200;
 
 /// 시트 파일 앞부분을 읽어 미리보기를 만든다. 읽지 못하면 빈 미리보기.
 pub fn read_preview(path: &Path) -> Preview {
-    let (title, excerpt) = title_and_excerpt(&read_head(path));
-    Preview { title, excerpt }
+    preview_of(&read_head(path))
 }
 
 /// 파일 앞부분(`PREVIEW_BYTES`)을 UTF-8로 읽는다. 끝에서 잘린 글자는 버린다.
@@ -48,11 +49,11 @@ fn read_head(path: &Path) -> String {
     }
 }
 
-/// 본문에서 제목(첫 줄)과 발췌(그다음 줄들)를 뽑는다.
+/// 본문에서 제목(첫 줄)과 그 헤딩 레벨, 발췌(그다음 줄들)를 뽑는다.
 ///
 /// BOM과 앞쪽 YAML frontmatter(`---` … `---`/`...`)는 건너뛰고,
 /// 각 줄의 ATX 헤딩 표시(`# `, 끝의 `#`)는 지운다. 빈 줄은 무시한다.
-fn title_and_excerpt(text: &str) -> (String, String) {
+fn preview_of(text: &str) -> Preview {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.lines().peekable();
 
@@ -65,8 +66,11 @@ fn title_and_excerpt(text: &str) -> (String, String) {
         }
     }
 
-    let mut content = lines.map(strip_heading).filter(|line| !line.is_empty());
-    let title = strip_breaks(content.next().unwrap_or_default());
+    let mut content = lines.filter(|line| !strip_heading(line).is_empty());
+    let first = content.next().unwrap_or_default();
+    let title = strip_breaks(strip_heading(first));
+    let level = heading_level(first);
+    let mut content = content.map(strip_heading);
 
     let mut excerpt = String::new();
     for line in content {
@@ -79,7 +83,11 @@ fn title_and_excerpt(text: &str) -> (String, String) {
         }
     }
     let excerpt: String = excerpt.chars().take(EXCERPT_CHARS).collect();
-    (title, strip_breaks(&excerpt))
+    Preview {
+        title,
+        level,
+        excerpt: strip_breaks(&excerpt),
+    }
 }
 
 /// 인라인 줄바꿈 태그(`<br>`)는 목록 한 줄에 맞게 스페이스로 바꾼다.
@@ -116,22 +124,45 @@ fn is_break_tag(tag: &str) -> bool {
 /// 앞뒤 공백과 ATX 헤딩 표시를 지운다. `#태그`처럼 뒤에 공백이 없으면 헤딩이 아니다.
 fn strip_heading(line: &str) -> &str {
     let line = line.trim();
-    let hashes = line.chars().take_while(|&c| c == '#').count();
-    if (1..=6).contains(&hashes) {
-        let rest = &line[hashes..];
-        if rest.is_empty() {
-            return "";
-        }
-        if rest.starts_with([' ', '\t']) {
-            return rest.trim().trim_end_matches('#').trim_end();
-        }
+    match heading_level(line) {
+        0 => line,
+        level => line[usize::from(level)..]
+            .trim()
+            .trim_end_matches('#')
+            .trim_end(),
     }
-    line
+}
+
+/// 줄의 ATX 헤딩 레벨(1~6). 헤딩이 아니면 0.
+fn heading_level(line: &str) -> u8 {
+    let line = line.trim();
+    let hashes = line.chars().take_while(|&c| c == '#').count();
+    let rest = &line[hashes.min(line.len())..];
+    if (1..=6).contains(&hashes) && (rest.is_empty() || rest.starts_with([' ', '\t'])) {
+        hashes as u8
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn title_and_excerpt(text: &str) -> (String, String) {
+        let preview = preview_of(text);
+        (preview.title, preview.excerpt)
+    }
+
+    #[test]
+    fn title_level_is_first_line_heading() {
+        assert_eq!(preview_of("# 하나\n본문").level, 1);
+        assert_eq!(preview_of("\n### 셋 ###\n").level, 3);
+        // 빈 헤딩 줄은 건너뛰고 다음 줄을 본다.
+        assert_eq!(preview_of("##\n그냥 글").level, 0);
+        assert_eq!(preview_of("#태그").level, 0);
+        assert_eq!(preview_of("####### 일곱").level, 0);
+    }
 
     #[test]
     fn title_and_excerpt_from_content() {

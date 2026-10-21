@@ -265,10 +265,18 @@ impl WriterApp {
                     (glued[index], glued.get(index + 1).copied().unwrap_or(false));
                 let preview = self.previews.get(&path).map(|(_, preview)| preview);
                 let is_empty = preview.is_some_and(|preview| preview.is_empty());
-                let excerpt = preview
-                    .map(|preview| preview.excerpt.clone())
-                    .unwrap_or_default();
                 let label = sheet_label(preview);
+                // 제목 줄은 첫 줄이 H1~H3일 때만 둔다: H1 굵게, H2 보통, H3 회색.
+                // 그 밖(헤딩 아님·H4 이하)은 첫 줄부터 발췌처럼 작은 회색 글로 잇는다.
+                let level = preview.map_or(1, |preview| preview.level);
+                let has_title = is_empty || (1..=3).contains(&level);
+                let excerpt = match preview {
+                    Some(preview) if !has_title => {
+                        format!("{} {}", preview.title, preview.excerpt).trim().to_string()
+                    }
+                    Some(preview) => preview.excerpt.clone(),
+                    None => String::new(),
+                };
                 // 구분선은 카드 양옆을 비워 두고(본문 글자와 같은 들여쓰기) 긋는다.
                 // 선택한 카드는 둥근 배경으로 감싸고 그 카드의 구분선은 숨긴다.
                 let content = div()
@@ -290,22 +298,25 @@ impl WriterApp {
                     // 빈 시트는 흐린 기본 굵기로, 카드 가운데에 가볍게 보인다(Ulysses).
                     .when(is_empty, |this| this.justify_center().items_center())
                     // 아직 안 읽은 시트도 한 줄 높이를 차지하게 한다.
-                    .child(
-                        div()
-                            .h(px(TITLE_LINE_HEIGHT))
-                            .line_height(px(TITLE_LINE_HEIGHT))
-                            .truncate()
-                            .when(is_empty, |this| this.text_color(pal.muted))
-                            .when(!is_empty, |this| this.font_semibold())
-                            .child(label.clone()),
-                    )
+                    .when(has_title, |this| {
+                        this.child(
+                            div()
+                                .h(px(TITLE_LINE_HEIGHT))
+                                .line_height(px(TITLE_LINE_HEIGHT))
+                                .truncate()
+                                .when(is_empty || level == 3, |this| this.text_color(pal.muted))
+                                .when(!is_empty && level == 1, |this| this.font_semibold())
+                                .child(label.clone()),
+                        )
+                    })
                     .when(!excerpt.is_empty(), |this| {
                         this.child(
                             div()
                                 .text_xs()
                                 .line_height(px(EXCERPT_LINE_HEIGHT))
                                 .text_color(pal.muted)
-                                .line_clamp(2)
+                                // 제목 줄이 없으면 그 자리까지 한 줄 더 쓴다.
+                                .line_clamp(if has_title { 2 } else { 3 })
                                 .text_ellipsis()
                                 .child(excerpt),
                         )
