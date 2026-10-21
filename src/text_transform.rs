@@ -469,6 +469,44 @@ pub fn toggle_line_group(
     (range, replacement, selected)
 }
 
+/// `at`에 각주 참조 `[^N]`을 넣고 시트 끝에 정의 `[^N]: 내용`을 더한다(Insert 메뉴의 각주).
+///
+/// N은 시트에 있는 숫자 각주 이름 중 가장 큰 것 + 1이다. 정의는 끝의 정의 줄들 뒤에 잇고, 처음이면
+/// 본문과 빈 줄 하나로 띄운다. 한 번에 되돌릴 수 있게 `at`부터 끝까지 한 편집으로 바꾼다.
+/// (바꿀 범위, 새 글, 바꾼 뒤 커서)를 돌려준다. 커서는 참조 바로 뒤다.
+pub fn insert_footnote(text: &str, at: usize, content: &str) -> (Range<usize>, String, usize) {
+    let number = footnote_numbers(text).max().unwrap_or(0) + 1;
+    let reference = format!("[^{number}]");
+    let content = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut edited = text.to_string();
+    edited.insert_str(at, &reference);
+    // 끝의 빈 줄은 버린다. 끝 줄이 정의면 바로 다음 줄에, 아니면 빈 줄을 하나 두고 쓴다.
+    let body = edited.trim_end_matches('\n');
+    let lead = if is_footnote_definition(body.rsplit('\n').next().unwrap_or("")) {
+        "\n"
+    } else {
+        "\n\n"
+    };
+    let replacement = format!("{}{lead}{reference}: {content}", &body[at..]);
+    (at..text.len(), replacement, at + reference.len())
+}
+
+/// 글에 나오는 숫자 각주 이름(`[^3]`의 3).
+fn footnote_numbers(text: &str) -> impl Iterator<Item = usize> + '_ {
+    text.match_indices("[^").filter_map(|(ix, _)| {
+        let rest = &text[ix + 2..];
+        let end = rest.find(']')?;
+        rest[..end].parse().ok()
+    })
+}
+
+/// `[^이름]:`로 시작하는 각주 정의 줄인지.
+fn is_footnote_definition(line: &str) -> bool {
+    line.strip_prefix("[^")
+        .and_then(|rest| rest.find("]:").map(|end| end > 0 && !rest[..end].contains(']')))
+        .unwrap_or(false)
+}
+
 /// 펜스 밖 줄 하나의 종류.
 fn kind_of(line: &str) -> Kind {
     let trimmed = line.trim();
@@ -768,6 +806,33 @@ mod tests {
         // 여러 묶음에 걸친 선택은 모두 푼다.
         let both = ":::\nA\n:::\nB\n:::\nC\n:::";
         assert_eq!(toggled(both, 0..both.len()).0, "A\nB\nC");
+    }
+
+    /// 각주를 넣은 글과 커서 앞 글.
+    fn with_footnote(text: &str, at: usize, content: &str) -> (String, String) {
+        let (range, replacement, cursor) = insert_footnote(text, at, content);
+        let mut out = text.to_string();
+        out.replace_range(range, &replacement);
+        let before = out[..cursor].to_string();
+        (out, before)
+    }
+
+    #[test]
+    fn insert_footnote_adds_reference_and_definition() {
+        // 처음 넣는 각주는 본문과 빈 줄 하나로 띄운다. 커서는 참조 바로 뒤.
+        let (out, before) = with_footnote("첫 문장. 둘째", "첫 문장.".len(), " 출처\n설명 ");
+        assert_eq!(out, "첫 문장.[^1] 둘째\n\n[^1]: 출처 설명");
+        assert_eq!(before, "첫 문장.[^1]");
+        // 다음 번호는 가장 큰 숫자 + 1, 정의는 끝 정의 줄 바로 다음. 끝 빈 줄은 버린다.
+        let text = "A[^1] B[^note]\n\n[^1]: 하나\n[^note]: 이름\n\n";
+        let (out, _) = with_footnote(text, "A[^1] B".len(), "둘");
+        assert_eq!(out, "A[^1] B[^2][^note]\n\n[^1]: 하나\n[^note]: 이름\n[^2]: 둘");
+        // 빈 시트, 끝 줄(정의 아님)에 넣기.
+        assert_eq!(with_footnote("", 0, "x").0, "[^1]\n\n[^1]: x");
+        assert_eq!(with_footnote("끝", 3, "x").0, "끝[^1]\n\n[^1]: x");
+        // 정의 줄 맨 앞에 넣으면 그 줄은 더는 정의가 아니다.
+        let text = "A\n[^1]: 하나";
+        assert_eq!(with_footnote(text, 2, "x").0, "A\n[^2][^1]: 하나\n\n[^2]: x");
     }
 
     /// 여러 종류의 줄을 네 줄까지 모든 순서로 섞어도 원래대로 돌아온다.

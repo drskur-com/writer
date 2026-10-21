@@ -183,11 +183,6 @@ fn escape(text: &str) -> String {
     out
 }
 
-/// 위 첨자 숫자 → 숫자. 위 첨자 숫자가 아니면 `None`.
-fn superscript_digit(c: char) -> Option<u32> {
-    "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().position(|d| d == c).map(|d| d as u32)
-}
-
 // --- 문서 ---------------------------------------------------------------
 
 /// 넣을 이미지.
@@ -316,7 +311,7 @@ impl<'a> DocBuilder<'a> {
         ));
     }
 
-    /// 글자 조각들 → 런 XML. 위 첨자 숫자가 이 시트 각주 번호면 각주 참조로 바꾼다.
+    /// 글자 조각들 → 런 XML. 각주 참조 조각은 이 시트 각주가 있으면 Word 각주 참조로 바꾼다.
     fn runs(&mut self, rich: &[Inline]) -> String {
         self.runs_with(rich, false)
     }
@@ -342,28 +337,13 @@ impl<'a> DocBuilder<'a> {
             if inline.marks.strike {
                 rpr.push_str("<w:strike/>");
             }
-            let mut text = String::new();
-            let mut chars = inline.text.chars().peekable();
-            while let Some(c) = chars.next() {
-                if let Some(digit) = superscript_digit(c) {
-                    let mut number = digit as usize;
-                    while let Some(next) = chars.peek().copied().and_then(superscript_digit) {
-                        number = number * 10 + next as usize;
-                        chars.next();
-                    }
-                    if let Some(id) = self.footnote(number) {
-                        out.push_str(&text_run(&rpr, &std::mem::take(&mut text)));
-                        out.push_str(&format!(
-                            r#"<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="{id}"/></w:r>"#
-                        ));
-                        continue;
-                    }
-                    text.push_str(&crate::markdown::superscript(number));
-                    continue;
-                }
-                text.push(c);
+            if let Some(id) = inline.footnote.and_then(|number| self.footnote(number)) {
+                out.push_str(&format!(
+                    r#"<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="{id}"/></w:r>"#
+                ));
+                continue;
             }
-            out.push_str(&text_run(&rpr, &text));
+            out.push_str(&text_run(&rpr, &inline.text));
         }
         out
     }

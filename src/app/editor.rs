@@ -257,6 +257,14 @@ impl Markup {
                         ..Default::default()
                     },
                 ),
+                // 각주 번호는 링크 색으로 띄우고 `[^` `]`는 기호로 흐린다(위 첨자 대신).
+                SpanKind::FootnoteRef => (
+                    &mut inline,
+                    HighlightStyle {
+                        color: Some(link),
+                        ..Default::default()
+                    },
+                ),
                 // setext 제목. ATX 제목은 `apply_headings`가 맡는다.
                 SpanKind::Heading(_) => (&mut blocks, FontWeight::BOLD.into()),
                 SpanKind::Quote => (

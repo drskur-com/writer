@@ -5,7 +5,7 @@
 
 mod book;
 
-pub use book::{Block, Inline, Marks, Rich, manuscript_blocks, plain, rich_text, superscript};
+pub use book::{Block, Inline, Marks, Rich, manuscript_blocks, plain, rich_text};
 
 use std::ops::Range;
 
@@ -24,11 +24,14 @@ pub enum SpanKind {
     InlineCode,
     /// 링크 글자 부분(`[` `](…)` 제외).
     Link,
+    /// 각주 참조의 이름(`[^3]`의 `3`). `[^`·`]`는 기호다.
+    FootnoteRef,
     /// 인용 블록 전체.
     Quote,
     /// 코드·수식 블록 전체.
     CodeBlock,
-    /// 구문 기호: `#`, `**`, `_`, `` ` ``, `[`, `](…)`, `>`, `-`, 펜스, 줄 묶음 펜스, 구분선, frontmatter, 이미지.
+    /// 구문 기호: `#`, `**`, `_`, `` ` ``, `[`, `](…)`, `>`, `-`, 펜스, 줄 묶음 펜스, 구분선, frontmatter, 이미지,
+    /// 각주 `[^`·`]`·정의 머리.
     Marker,
 }
 
@@ -416,6 +419,17 @@ fn walk(node: &Node, text: &str, in_quote: bool, out: &mut Vec<Span>) {
                     .map_or(0, |end| end + 1);
                 push(range.start..range.end + attributes, SpanKind::Marker);
             }
+            Node::FootnoteReference(_) if range.len() > 3 => {
+                push(range.start..range.start + 2, SpanKind::Marker);
+                push(range.start + 2..range.end - 1, SpanKind::FootnoteRef);
+                push(range.end - 1..range.end, SpanKind::Marker);
+            }
+            // 정의 머리 `[^3]:`.
+            Node::FootnoteDefinition(_) => {
+                if let Some(end) = text[range.clone()].find("]:") {
+                    push(range.start..range.start + end + 2, SpanKind::Marker);
+                }
+            }
             Node::ThematicBreak(_)
             | Node::ImageReference(_)
             | Node::FootnoteReference(_)
@@ -703,6 +717,17 @@ mod tests {
         assert_eq!(pieces(text, SpanKind::Marker), ["```rust", "```"]);
         // 닫히지 않은 펜스는 여는 줄만
         assert_eq!(pieces("```\n코드", SpanKind::Marker), ["```"]);
+    }
+
+    #[test]
+    fn footnotes() {
+        // 에디터 본문: 줄 하나가 문단이라 정의가 이어진 줄에 있다.
+        let text = "본문[^1] 둘[^note].\n\n[^1]: 하나\n[^note]: 이름";
+        assert_eq!(pieces(text, SpanKind::FootnoteRef), ["1", "note"]);
+        assert_eq!(
+            pieces(text, SpanKind::Marker),
+            ["[^", "]", "[^", "]", "[^1]:", "[^note]:"]
+        );
     }
 
     #[test]

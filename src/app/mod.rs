@@ -9,6 +9,7 @@ mod editor;
 mod editor_image;
 mod editor_layout;
 mod file_view;
+mod insert_footnote;
 mod insert_image;
 mod library_ops;
 mod library_panel;
@@ -537,6 +538,7 @@ impl Render for WriterApp {
             .on_action(cx.listener(Self::on_save_sheet))
             .on_action(cx.listener(Self::on_compile_project))
             .on_action(cx.listener(Self::on_insert_image))
+            .on_action(cx.listener(Self::on_insert_footnote))
             .on_action(cx.listener(Self::on_toggle_line_group))
             .on_action(cx.listener(Self::on_open_library))
             .on_action(cx.listener(Self::on_close_library))

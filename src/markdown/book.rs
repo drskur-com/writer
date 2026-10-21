@@ -24,6 +24,9 @@ pub struct Marks {
 pub struct Inline {
     pub text: String,
     pub marks: Marks,
+    /// 각주 참조면 그 번호. 글자(`text`)는 위 첨자 숫자이고, 다른 조각과 합치지 않는다.
+    /// 미리보기·PDF는 글자를 그대로 그리고, ePub·DOCX는 번호로 각주 링크·참조를 만든다.
+    pub footnote: Option<usize>,
 }
 
 /// 문단 하나의 글자.
@@ -34,6 +37,7 @@ pub fn plain(text: impl Into<String>) -> Rich {
     vec![Inline {
         text: text.into(),
         marks: Marks::default(),
+        footnote: None,
     }]
 }
 
@@ -351,10 +355,13 @@ impl Walk<'_> {
                 return;
             }
             match out.last_mut() {
-                Some(last) if last.marks == marks => last.text.push_str(text),
+                Some(last) if last.marks == marks && last.footnote.is_none() => {
+                    last.text.push_str(text)
+                }
                 _ => out.push(Inline {
                     text: text.to_string(),
                     marks,
+                    footnote: None,
                 }),
             }
         };
@@ -396,7 +403,11 @@ impl Walk<'_> {
                         self.footnotes.len()
                     }
                 };
-                push(&superscript(number), marks);
+                out.push(Inline {
+                    text: superscript(number),
+                    marks,
+                    footnote: Some(number),
+                });
             }
             // `<br>`은 강제 줄바꿈이다(제목에 두 줄을 넣을 때 쓴다). 다른 HTML은 버린다.
             Node::Html(html) => {
@@ -459,6 +470,7 @@ mod tests {
         Inline {
             text: text.into(),
             marks,
+            footnote: None,
         }
     }
 
@@ -481,7 +493,11 @@ mod tests {
         assert!(group.iter().any(|inline| inline.text == "굵게" && inline.marks.strong));
         // 각주 참조, 묶음 끝의 빈 줄, 닫지 않은 묶음.
         let parsed = blocks(":::\n하나[^1]\n둘\n\n:::\n\n[^1]: 주석\n\n::: 시\n[셋]: 정의 아님");
-        assert_eq!(parsed[0], Block::Lines(plain("하나¹\n둘")));
+        let Block::Lines(lines) = &parsed[0] else {
+            panic!("{parsed:?}");
+        };
+        assert_eq!(rich_text(lines), "하나¹\n둘");
+        assert_eq!(lines[1].footnote, Some(1));
         assert_eq!(parsed[1], Block::Lines(plain("[셋]: 정의 아님")));
         assert!(matches!(parsed[2], Block::Footnotes(_)), "{parsed:?}");
     }
@@ -639,7 +655,26 @@ mod tests {
     #[test]
     fn footnotes_are_numbered_and_collected() {
         let blocks = blocks("본문[^b] 그리고[^a].\n\n[^a]: 에이\n[^b]: 비\n");
-        assert_eq!(blocks[0], Block::Paragraph(plain("본문¹ 그리고².")));
+        let note = |text: &str, number| Inline {
+            text: text.into(),
+            marks: Marks::default(),
+            footnote: Some(number),
+        };
+        assert_eq!(
+            blocks[0],
+            Block::Paragraph(vec![
+                inline("본문", Marks::default()),
+                note("¹", 1),
+                inline(" 그리고", Marks::default()),
+                note("²", 2),
+                inline(".", Marks::default()),
+            ])
+        );
+        // 이어 붙은 참조도 따로 남는다(¹²가 12가 되지 않게).
+        let Block::Paragraph(rich) = &super::blocks("가[^a][^b]\n\n[^a]: 에이\n[^b]: 비\n")[0] else {
+            panic!();
+        };
+        assert_eq!(rich.iter().filter_map(|inline| inline.footnote).collect::<Vec<_>>(), [1, 2]);
         assert_eq!(
             blocks[1],
             Block::Footnotes(vec![

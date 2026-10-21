@@ -28,6 +28,7 @@ actions!(
         NewSheet,
         SaveSheet,
         InsertImage,
+        InsertFootnote,
         ToggleLineGroup,
         CompileProject,
         OpenLibrary,
