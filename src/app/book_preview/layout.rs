@@ -1367,7 +1367,7 @@ fn tokens(text: &str) -> Vec<Token> {
 /// 표 열 너비. `natural`은 칸 글자를 한 줄로 놓은 폭의 열별 최댓값이다.
 /// 모두 들어가면 남는 폭을 열마다 똑같이 더한다. 넘치면 몫(남은 폭 ÷ 남은 열)보다 좁은 열은 제 폭을
 /// 쓰고, 나머지 열이 남은 폭을 제 폭에 비례해 나눈다.
-fn column_widths(natural: &[f32], available: f32) -> Vec<f32> {
+pub(in crate::app) fn column_widths(natural: &[f32], available: f32) -> Vec<f32> {
     let count = natural.len();
     if count == 0 {
         return Vec::new();

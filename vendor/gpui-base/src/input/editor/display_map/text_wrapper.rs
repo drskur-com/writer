@@ -120,6 +120,9 @@ pub struct LineStyle {
     /// Hide the line's text (its rows take no height) unless a selection touches the line,
     /// e.g. to show only the block of a Markdown image line until the caret enters it.
     pub collapsed: bool,
+    /// With [`Self::collapsed`]: a selection touching any line of a run of adjacent lines that
+    /// all set this reveals the whole run, e.g. every row of a Markdown table.
+    pub reveal_run: bool,
     /// Empty space below the line (after its block), e.g. the gap between paragraphs.
     pub space_after: Pixels,
     /// Height of a block painted above the line. Only the first buffer line's is used: it is
@@ -154,6 +157,7 @@ impl Default for LineStyle {
             height_scale: 1.,
             block_height: px(0.),
             collapsed: false,
+            reveal_run: false,
             space_after: px(0.),
             block_before: px(0.),
             first_indent: px(0.),
@@ -187,12 +191,15 @@ pub struct LineContext<'a> {
 /// Decides the [`LineStyle`] of a buffer line from its text and neighbors.
 pub type LineStyleFn = Rc<dyn Fn(LineContext<'_>) -> LineStyle>;
 
-/// Decides the height of the block below a buffer line from its text (without the trailing
-/// `\n`) and the wrap width (`None` when not wrapping). Zero means no block.
+/// Decides the height of the block below a buffer line from its row, its text (without the
+/// trailing `\n`) and the wrap width (`None` when not wrapping). Zero means no block.
+///
+/// The row is that of the text being wrapped, so a host can look up state it keeps per line,
+/// e.g. the table a line ends.
 ///
 /// Lets a host show content under a line, e.g. the image of a Markdown image line, while the
 /// line itself stays editable text.
-pub type LineBlockMeasureFn = Rc<dyn Fn(&str, Option<Pixels>) -> Pixels>;
+pub type LineBlockMeasureFn = Rc<dyn Fn(usize, &str, Option<Pixels>) -> Pixels>;
 
 /// A line with soft wrapped lines info.
 #[derive(Debug, Clone)]
@@ -493,7 +500,7 @@ impl TextWrapper {
     /// Show the text of collapsed lines within `rows` (buffer rows touched by a selection) and
     /// hide the others. Returns whether any line changed.
     pub(crate) fn set_reveal(&mut self, rows: Vec<Range<usize>>, cx: &mut App) -> bool {
-        self.reveal = rows;
+        self.reveal = rows.into_iter().map(|rows| self.reveal_runs(rows)).collect();
         let reveal = &self.reveal;
         let changed: Vec<usize> = self
             .lines
@@ -517,6 +524,26 @@ impl TextWrapper {
             );
         }
         !changed.is_empty()
+    }
+
+    /// Widen `rows` over the runs of [`LineStyle::reveal_run`] lines they touch.
+    fn reveal_runs(&self, rows: Range<usize>) -> Range<usize> {
+        let in_run = |row: usize| {
+            self.line(row)
+                .is_some_and(|item| item.style.collapsed && item.style.reveal_run)
+        };
+        let (mut start, mut end) = (rows.start, rows.end);
+        if in_run(start) {
+            while start > 0 && in_run(start - 1) {
+                start -= 1;
+            }
+        }
+        if end > start && in_run(end - 1) {
+            while in_run(end) {
+                end += 1;
+            }
+        }
+        start..end
     }
 
     /// Style and re-wrap the lines in `rows` (buffer rows) again, e.g. after host state that the
@@ -795,7 +822,7 @@ impl TextWrapper {
                 None => LineStyle::default(),
             };
             if let Some(line_block) = &self.line_block {
-                style.block_height += line_block(&line_str, wrap_width).max(px(0.));
+                style.block_height += line_block(row, &line_str, wrap_width).max(px(0.));
             }
             let revealed = style.collapsed && self.reveal.iter().any(|r| r.contains(&row));
 

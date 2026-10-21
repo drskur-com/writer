@@ -4544,7 +4544,7 @@ mod tests {
             let seen = rendered.clone();
             editor.update(cx, |state, cx| {
                 state.set_line_blocks(
-                    |line: &str, _| if line.starts_with("![") { px(100.) } else { px(0.) },
+                    |_, line: &str, _| if line.starts_with("![") { px(100.) } else { px(0.) },
                     move |block: &crate::input::LineBlockContext, _, _| {
                         seen.borrow_mut().push((block.line, block.text.clone(), block.size));
                         gpui::Empty.into_any_element()
@@ -4599,7 +4599,7 @@ mod tests {
                     cx,
                 );
                 state.set_line_blocks(
-                    |line: &str, _| if line.starts_with("![") { px(100.) } else { px(0.) },
+                    |_, line: &str, _| if line.starts_with("![") { px(100.) } else { px(0.) },
                     move |block: &crate::input::LineBlockContext, _, _| {
                         seen.borrow_mut().push((block.line, block.size.height));
                         gpui::Empty.into_any_element()
@@ -4634,7 +4634,7 @@ mod tests {
                     cx,
                 );
                 state.set_line_blocks(
-                    |_: &str, _| px(0.),
+                    |_, _: &str, _| px(0.),
                     move |block: &crate::input::LineBlockContext, _, _| {
                         seen.borrow_mut().push((block.line, block.above, block.size.height));
                         gpui::Empty.into_any_element()
@@ -4680,7 +4680,7 @@ mod tests {
                     cx,
                 );
                 state.set_line_blocks(
-                    |line: &str, _| {
+                    |_, line: &str, _| {
                         if line.starts_with("![") {
                             px(100.)
                         } else {
@@ -4718,6 +4718,49 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_selection_reveals_the_whole_run_of_collapsed_lines(cx: &mut TestAppContext) {
+        let text = "body\n|a|\n|-|\n|1|\nmore";
+        let (editor, window) = decoration_editor(cx, text, false);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            editor.update(cx, |state, cx| {
+                state.set_line_style(
+                    Some(|line: crate::input::LineContext<'_>| crate::input::LineStyle {
+                        collapsed: line.text.starts_with('|'),
+                        reveal_run: true,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                state.set_line_blocks(
+                    |row, _: &str, _| if row == 3 { px(80.) } else { px(0.) },
+                    |_, _, _| gpui::Empty.into_any_element(),
+                    cx,
+                );
+                state.set_selected_range(0..0, cx);
+            });
+            window.draw(cx).clear(cx);
+            let lh = editor.read(cx).last_layout.as_ref().unwrap().line_height;
+
+            // The caret is elsewhere: the run takes only its last line's block.
+            let state = editor.read(cx);
+            assert_eq!(state.display_map.display_row_top(4, lh), lh + px(80.));
+
+            // The caret on the middle line shows all three lines.
+            editor.update(cx, |state, cx| state.set_selected_range(10..10, cx));
+            window.draw(cx).clear(cx);
+            let state = editor.read(cx);
+            assert_eq!(state.display_map.display_row_top(4, lh), lh * 4. + px(80.));
+
+            // And hides them once the caret leaves.
+            editor.update(cx, |state, cx| state.set_selected_range(0..0, cx));
+            window.draw(cx).clear(cx);
+            let state = editor.read(cx);
+            assert_eq!(state.display_map.display_row_top(4, lh), lh + px(80.));
+        });
+    }
+
+    #[gpui::test]
     fn clicking_a_collapsed_block_reveals_its_line(cx: &mut TestAppContext) {
         let text = "body\n![img](a.png)\nmore";
         let (editor, window) = decoration_editor(cx, text, false);
@@ -4732,7 +4775,7 @@ mod tests {
                     cx,
                 );
                 state.set_line_blocks(
-                    |line: &str, _| if line.starts_with("![") { px(60.) } else { px(0.) },
+                    |_, line: &str, _| if line.starts_with("![") { px(60.) } else { px(0.) },
                     |_, _, _| gpui::Empty.into_any_element(),
                     cx,
                 );

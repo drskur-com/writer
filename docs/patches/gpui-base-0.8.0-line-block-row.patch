@@ -1,0 +1,205 @@
+diff --git a/vendor/gpui-base/src/input/base/element.rs b/vendor/gpui-base/src/input/base/element.rs
+index 0150ba5..a91d060 100644
+--- a/vendor/gpui-base/src/input/base/element.rs
++++ b/vendor/gpui-base/src/input/base/element.rs
+@@ -4544,7 +4544,7 @@ mod tests {
+             let seen = rendered.clone();
+             editor.update(cx, |state, cx| {
+                 state.set_line_blocks(
+-                    |line: &str, _| if line.starts_with("![") { px(100.) } else { px(0.) },
++                    |_, line: &str, _| if line.starts_with("![") { px(100.) } else { px(0.) },
+                     move |block: &crate::input::LineBlockContext, _, _| {
+                         seen.borrow_mut().push((block.line, block.text.clone(), block.size));
+                         gpui::Empty.into_any_element()
+@@ -4599,7 +4599,7 @@ mod tests {
+                     cx,
+                 );
+                 state.set_line_blocks(
+-                    |line: &str, _| if line.starts_with("![") { px(100.) } else { px(0.) },
++                    |_, line: &str, _| if line.starts_with("![") { px(100.) } else { px(0.) },
+                     move |block: &crate::input::LineBlockContext, _, _| {
+                         seen.borrow_mut().push((block.line, block.size.height));
+                         gpui::Empty.into_any_element()
+@@ -4634,7 +4634,7 @@ mod tests {
+                     cx,
+                 );
+                 state.set_line_blocks(
+-                    |_: &str, _| px(0.),
++                    |_, _: &str, _| px(0.),
+                     move |block: &crate::input::LineBlockContext, _, _| {
+                         seen.borrow_mut().push((block.line, block.above, block.size.height));
+                         gpui::Empty.into_any_element()
+@@ -4680,7 +4680,7 @@ mod tests {
+                     cx,
+                 );
+                 state.set_line_blocks(
+-                    |line: &str, _| {
++                    |_, line: &str, _| {
+                         if line.starts_with("![") {
+                             px(100.)
+                         } else {
+@@ -4717,6 +4717,49 @@ mod tests {
+         });
+     }
+ 
++    #[gpui::test]
++    fn a_selection_reveals_the_whole_run_of_collapsed_lines(cx: &mut TestAppContext) {
++        let text = "body\n|a|\n|-|\n|1|\nmore";
++        let (editor, window) = decoration_editor(cx, text, false);
++        let mut cx = VisualTestContext::from_window(window.into(), cx);
++        cx.update(|window, cx| {
++            editor.update(cx, |state, cx| {
++                state.set_line_style(
++                    Some(|line: crate::input::LineContext<'_>| crate::input::LineStyle {
++                        collapsed: line.text.starts_with('|'),
++                        reveal_run: true,
++                        ..Default::default()
++                    }),
++                    cx,
++                );
++                state.set_line_blocks(
++                    |row, _: &str, _| if row == 3 { px(80.) } else { px(0.) },
++                    |_, _, _| gpui::Empty.into_any_element(),
++                    cx,
++                );
++                state.set_selected_range(0..0, cx);
++            });
++            window.draw(cx).clear(cx);
++            let lh = editor.read(cx).last_layout.as_ref().unwrap().line_height;
++
++            // The caret is elsewhere: the run takes only its last line's block.
++            let state = editor.read(cx);
++            assert_eq!(state.display_map.display_row_top(4, lh), lh + px(80.));
++
++            // The caret on the middle line shows all three lines.
++            editor.update(cx, |state, cx| state.set_selected_range(10..10, cx));
++            window.draw(cx).clear(cx);
++            let state = editor.read(cx);
++            assert_eq!(state.display_map.display_row_top(4, lh), lh * 4. + px(80.));
++
++            // And hides them once the caret leaves.
++            editor.update(cx, |state, cx| state.set_selected_range(0..0, cx));
++            window.draw(cx).clear(cx);
++            let state = editor.read(cx);
++            assert_eq!(state.display_map.display_row_top(4, lh), lh + px(80.));
++        });
++    }
++
+     #[gpui::test]
+     fn clicking_a_collapsed_block_reveals_its_line(cx: &mut TestAppContext) {
+         let text = "body\n![img](a.png)\nmore";
+@@ -4732,7 +4775,7 @@ mod tests {
+                     cx,
+                 );
+                 state.set_line_blocks(
+-                    |line: &str, _| if line.starts_with("![") { px(60.) } else { px(0.) },
++                    |_, line: &str, _| if line.starts_with("![") { px(60.) } else { px(0.) },
+                     |_, _, _| gpui::Empty.into_any_element(),
+                     cx,
+                 );
+diff --git a/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs b/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
+index 7de367d..ecb366c 100644
+--- a/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
++++ b/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
+@@ -120,6 +120,9 @@ pub struct LineStyle {
+     /// Hide the line's text (its rows take no height) unless a selection touches the line,
+     /// e.g. to show only the block of a Markdown image line until the caret enters it.
+     pub collapsed: bool,
++    /// With [`Self::collapsed`]: a selection touching any line of a run of adjacent lines that
++    /// all set this reveals the whole run, e.g. every row of a Markdown table.
++    pub reveal_run: bool,
+     /// Empty space below the line (after its block), e.g. the gap between paragraphs.
+     pub space_after: Pixels,
+     /// Height of a block painted above the line. Only the first buffer line's is used: it is
+@@ -154,6 +157,7 @@ impl Default for LineStyle {
+             height_scale: 1.,
+             block_height: px(0.),
+             collapsed: false,
++            reveal_run: false,
+             space_after: px(0.),
+             block_before: px(0.),
+             first_indent: px(0.),
+@@ -187,12 +191,15 @@ pub struct LineContext<'a> {
+ /// Decides the [`LineStyle`] of a buffer line from its text and neighbors.
+ pub type LineStyleFn = Rc<dyn Fn(LineContext<'_>) -> LineStyle>;
+ 
+-/// Decides the height of the block below a buffer line from its text (without the trailing
+-/// `\n`) and the wrap width (`None` when not wrapping). Zero means no block.
++/// Decides the height of the block below a buffer line from its row, its text (without the
++/// trailing `\n`) and the wrap width (`None` when not wrapping). Zero means no block.
++///
++/// The row is that of the text being wrapped, so a host can look up state it keeps per line,
++/// e.g. the table a line ends.
+ ///
+ /// Lets a host show content under a line, e.g. the image of a Markdown image line, while the
+ /// line itself stays editable text.
+-pub type LineBlockMeasureFn = Rc<dyn Fn(&str, Option<Pixels>) -> Pixels>;
++pub type LineBlockMeasureFn = Rc<dyn Fn(usize, &str, Option<Pixels>) -> Pixels>;
+ 
+ /// A line with soft wrapped lines info.
+ #[derive(Debug, Clone)]
+@@ -493,7 +500,7 @@ impl TextWrapper {
+     /// Show the text of collapsed lines within `rows` (buffer rows touched by a selection) and
+     /// hide the others. Returns whether any line changed.
+     pub(crate) fn set_reveal(&mut self, rows: Vec<Range<usize>>, cx: &mut App) -> bool {
+-        self.reveal = rows;
++        self.reveal = rows.into_iter().map(|rows| self.reveal_runs(rows)).collect();
+         let reveal = &self.reveal;
+         let changed: Vec<usize> = self
+             .lines
+@@ -519,6 +526,26 @@ impl TextWrapper {
+         !changed.is_empty()
+     }
+ 
++    /// Widen `rows` over the runs of [`LineStyle::reveal_run`] lines they touch.
++    fn reveal_runs(&self, rows: Range<usize>) -> Range<usize> {
++        let in_run = |row: usize| {
++            self.line(row)
++                .is_some_and(|item| item.style.collapsed && item.style.reveal_run)
++        };
++        let (mut start, mut end) = (rows.start, rows.end);
++        if in_run(start) {
++            while start > 0 && in_run(start - 1) {
++                start -= 1;
++            }
++        }
++        if end > start && in_run(end - 1) {
++            while in_run(end) {
++                end += 1;
++            }
++        }
++        start..end
++    }
++
+     /// Style and re-wrap the lines in `rows` (buffer rows) again, e.g. after host state that the
+     /// line style reads has changed.
+     pub(crate) fn restyle_rows(&mut self, rows: Range<usize>, cx: &mut App) {
+@@ -795,7 +822,7 @@ impl TextWrapper {
+                 None => LineStyle::default(),
+             };
+             if let Some(line_block) = &self.line_block {
+-                style.block_height += line_block(&line_str, wrap_width).max(px(0.));
++                style.block_height += line_block(row, &line_str, wrap_width).max(px(0.));
+             }
+             let revealed = style.collapsed && self.reveal.iter().any(|r| r.contains(&row));
+ 
+diff --git a/vendor/gpui-base/src/input/editor/mod.rs b/vendor/gpui-base/src/input/editor/mod.rs
+index 5363e78..9f6523c 100644
+--- a/vendor/gpui-base/src/input/editor/mod.rs
++++ b/vendor/gpui-base/src/input/editor/mod.rs
+@@ -307,13 +307,13 @@ impl InputBaseState<EditorMode> {
+     /// Reserve a block below some lines and draw into it, e.g. the image of a Markdown image
+     /// line. The line itself stays ordinary editable text above its block.
+     ///
+-    /// `measure` gets each buffer line without its trailing `\n` and the wrap width, and returns
++    /// `measure` gets each buffer row, its line without the trailing `\n` and the wrap width, and returns
+     /// the block height (zero for no block). Like `line_style`, it is called again for every
+     /// edited line and on every re-wrap, so it should be cheap. `render` draws a visible block;
+     /// clicks on it put the caret on its line.
+     pub fn set_line_blocks(
+         &mut self,
+-        measure: impl Fn(&str, Option<gpui::Pixels>) -> gpui::Pixels + 'static,
++        measure: impl Fn(usize, &str, Option<gpui::Pixels>) -> gpui::Pixels + 'static,
+         render: impl Fn(&LineBlockContext, &mut Window, &mut App) -> gpui::AnyElement + 'static,
+         cx: &mut gpui::Context<Self>,
+     ) {

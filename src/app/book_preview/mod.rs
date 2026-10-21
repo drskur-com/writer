@@ -29,6 +29,7 @@ use crate::markdown::Block;
 use crate::settings::Prefs;
 use crate::{icons, library, markdown, watch};
 use layout::{BookLayout, Fonts, PageSetup};
+pub(in crate::app) use layout::column_widths;
 
 /// 창 크기.
 const WINDOW_SIZE: Size<Pixels> = Size {

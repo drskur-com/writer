@@ -307,13 +307,13 @@ impl InputBaseState<EditorMode> {
     /// Reserve a block below some lines and draw into it, e.g. the image of a Markdown image
     /// line. The line itself stays ordinary editable text above its block.
     ///
-    /// `measure` gets each buffer line without its trailing `\n` and the wrap width, and returns
+    /// `measure` gets each buffer row, its line without the trailing `\n` and the wrap width, and returns
     /// the block height (zero for no block). Like `line_style`, it is called again for every
     /// edited line and on every re-wrap, so it should be cheap. `render` draws a visible block;
     /// clicks on it put the caret on its line.
     pub fn set_line_blocks(
         &mut self,
-        measure: impl Fn(&str, Option<gpui::Pixels>) -> gpui::Pixels + 'static,
+        measure: impl Fn(usize, &str, Option<gpui::Pixels>) -> gpui::Pixels + 'static,
         render: impl Fn(&LineBlockContext, &mut Window, &mut App) -> gpui::AnyElement + 'static,
         cx: &mut gpui::Context<Self>,
     ) {

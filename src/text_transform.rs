@@ -411,6 +411,22 @@ pub fn line_groups(text: &str) -> Vec<LineGroup> {
     groups
 }
 
+/// 표 행(`|`로 시작하는 줄)이 이어진 줄 범위. 펜스·줄 묶음 안은 빼고, 표인지는 따지지 않는다.
+pub fn table_runs(text: &str) -> Vec<Range<usize>> {
+    let lines = split(text);
+    let mut runs: Vec<Range<usize>> = Vec::new();
+    for (ix, kind) in classify(&lines).into_iter().enumerate() {
+        if kind != Kind::TableRow {
+            continue;
+        }
+        match runs.last_mut() {
+            Some(run) if run.end == ix => run.end = ix + 1,
+            _ => runs.push(ix..ix + 1),
+        }
+    }
+    runs
+}
+
 /// 선택한 줄을 줄 묶음으로 감싸거나, 선택이 걸친 묶음을 푼다(Edit 메뉴의 토글).
 ///
 /// 선택은 줄 단위로 넓힌다(빈 선택이면 커서 줄). 선택이 묶음(펜스 줄 포함)에 닿아 있으면 그 묶음들의
@@ -755,6 +771,12 @@ mod tests {
         round_trips("문단\n```\n코드\n\n코드");
         // 한 줄 수식은 펜스가 아니다.
         round_trips("$$x$$\n문단");
+    }
+
+    #[test]
+    fn table_runs_skip_fences_and_groups() {
+        let text = "| a |\n|---|\n본문\n```\n| 코드 |\n```\n:::\n| 묶음 |\n:::\n| b |";
+        assert_eq!(table_runs(text), [0..2, 9..10]);
     }
 
     #[test]

@@ -17,6 +17,7 @@ use std::time::Duration;
 use super::WriterApp;
 use super::editor_image::ImageBlocks;
 use super::editor_layout::{BookLayout, PAGE_BREAK_HEIGHT};
+use super::editor_table::TableBlocks;
 use super::style::*;
 use crate::markdown::{self, Span, SpanKind};
 use crate::text_transform::LineGroup;
@@ -90,18 +91,53 @@ pub(super) struct OpenSheet {
     line_groups: Rc<RefCell<Vec<LineGroup>>>,
     /// `line_groups`를 맞춘 때의 줄 수.
     line_count: usize,
+    /// 표(ADR-0017). 줄 스타일·줄 블록이 읽으므로 본문이 바뀔 때마다 맞춘다([`sync_tables`]).
+    tables: Rc<TableBlocks>,
     _subscription: Subscription,
 }
 
 /// 줄 스타일: 책 스타일대로 문단·제목을 배치한다(ADR-0010). 제목 줄 확대는 gpui-base 패치(ADR-0006),
 /// 이미지 줄은 커서가 들어올 때만 글자를 보인다(ADR-0008). 책 스타일이 없으면 기본 배치다.
-/// 줄 묶음 안의 줄은 한 문단의 행으로 배치한다(ADR-0016).
+/// 줄 묶음 안의 줄은 한 문단의 행으로 배치한다(ADR-0016). 표의 줄은 커서가 표에 닿을 때만 글자를
+/// 보이고, 마지막 행 아래에 격자를 그린다(ADR-0017).
 fn line_style(
     styles: Option<&library::Styles>,
     groups: Rc<RefCell<Vec<LineGroup>>>,
+    tables: Rc<TableBlocks>,
 ) -> impl Fn(LineContext<'_>) -> LineStyle + 'static {
     let layout = book_layout(styles);
-    move |line| layout.line_style(line, &groups.borrow())
+    move |line| {
+        let row = line.row;
+        let mut style = layout.line_style(line, &groups.borrow());
+        if tables.contains(row) {
+            style.collapsed = true;
+            style.reveal_run = true;
+        }
+        style
+    }
+}
+
+/// 본문에 맞춰 표를 다시 찾고, 바뀐 표가 닿았던 줄과 닿는 줄을 다시 배치한다.
+fn sync_tables(editor: &OpenSheet, text: &str, cx: &mut App) {
+    let rows = editor.tables.sync(text);
+    if rows.is_empty() {
+        return;
+    }
+    editor.state.update(cx, |state, cx| {
+        for rows in rows {
+            state.restyle_lines(rows, cx);
+        }
+    });
+}
+
+/// 에디터 본문 서체: 책 스타일의 본문 서체, 없으면 환경설정의 에디터 서체.
+fn editor_font(styles: Option<&library::Styles>, cx: &App) -> SharedString {
+    styles
+        .and_then(|styles| styles.resolve(library::StyleTarget::Body).font)
+        .map_or_else(
+            || crate::settings::Prefs::editor_font_family(cx),
+            SharedString::from,
+        )
 }
 
 /// 본문에 맞춰 줄 묶음을 다시 구하고, 바뀌었으면 묶음이 닿았던 줄과 닿는 줄을 다시 배치한다.
@@ -363,14 +399,7 @@ impl WriterApp {
             None if let Some(file) = &self.open_file => self.render_file_viewer(file, pal),
             Some(editor) => {
                 let line_height = book_layout(editor.styles.as_ref()).line_height();
-                let font = editor
-                    .styles
-                    .as_ref()
-                    .and_then(|styles| styles.resolve(library::StyleTarget::Body).font)
-                    .map_or_else(
-                        || crate::settings::Prefs::editor_font_family(cx),
-                        SharedString::from,
-                    );
+                let font = editor_font(editor.styles.as_ref(), cx);
                 div()
                     .flex_1()
                     .min_h_0()
@@ -383,7 +412,7 @@ impl WriterApp {
                             .appearance(false)
                             .bordered(false)
                             .size_full()
-                            .font_family(font)
+                            .font_family(font.clone())
                             .text_size(px(EDITOR_FONT_SIZE))
                             .line_height(relative(line_height as f32)),
                     )
@@ -391,8 +420,13 @@ impl WriterApp {
                     .child({
                         let state = editor.state.clone();
                         let applied = editor.side_padding.clone();
+                        let tables = editor.tables.clone();
                         canvas(
                             move |bounds, _, cx| {
+                                // 서체가 바뀌면 표 격자를 다시 잰다.
+                                if tables.set_family(&font) {
+                                    state.update(cx, |state, cx| state.refresh_line_blocks(cx));
+                                }
                                 let side = ((bounds.size.width - px(EDITOR_MAX_WIDTH)) / 2.0)
                                     .max(px(EDITOR_MIN_SIDE_PADDING));
                                 if applied.get() != side {
@@ -541,6 +575,14 @@ impl WriterApp {
         let line_groups = Rc::new(RefCell::new(crate::text_transform::line_groups(&text)));
         let line_count = text.split('\n').count();
         let style_groups = line_groups.clone();
+        let tables = Rc::new(TableBlocks::new(
+            &text,
+            editor_font(styles.as_ref(), cx),
+            px(EDITOR_FONT_SIZE),
+            cx.text_system().clone(),
+        ));
+        let (style_tables, measure_tables, render_tables) =
+            (tables.clone(), tables.clone(), tables.clone());
         // 마지막 줄 아래 빈 공간(scroll_beyond_last_line)은 코드 에디터 모드에만 있어서
         // EditorState를 쓰고 코드용 기능(줄 번호·들여쓰기 안내선·괄호 자동 닫기·접기)은 끈다.
         // 빈 공간이 없으면 문서 끝에서 커서 여백을 맞추려 끝 너머로 스크롤했다가 되돌아오며 출렁인다.
@@ -562,19 +604,39 @@ impl WriterApp {
                 .language(super::code_highlight::LANGUAGE);
             state.set_highlighter_factory(super::code_highlight::factory(), cx);
             configure_text_transform(&mut state, styles.as_ref());
-            state.set_line_style(Some(line_style(styles.as_ref(), style_groups)), cx);
+            state.set_line_style(
+                Some(line_style(styles.as_ref(), style_groups, style_tables)),
+                cx,
+            );
             // 이미지 줄 아래에 이미지를 그린다(ADR-0008).
             let images = Rc::new(ImageBlocks::new(&path));
             let measure = images.clone();
-            // 줄 블록 = 이미지(측정한 몫) + 줄 스타일이 잡은 나머지(페이지 나눔 표시, ADR-0010).
+            // 줄 블록 = 이미지·표 격자(측정한 몫) + 줄 스타일이 잡은 나머지(페이지 나눔 표시, ADR-0010).
             // 첫 줄 위 블록은 페이지 나눔 표시뿐이다.
             state.set_line_blocks(
-                move |line, wrap_width| measure.measure(line, wrap_width),
+                move |row, line, wrap_width| {
+                    measure.measure(line, wrap_width) + measure_tables.measure(row, wrap_width)
+                },
                 move |block, _, cx| {
                     if block.above {
                         return page_break_mark(block.size, cx);
                     }
-                    let image = images.measure(&block.text, Some(block.size.width));
+                    let width = Some(block.size.width);
+                    let grid = render_tables.measure(block.line, width);
+                    if grid > px(0.) {
+                        let mark = block.size.height - grid;
+                        return div()
+                            .flex()
+                            .flex_col()
+                            .children(
+                                render_tables.render(block.line, size(block.size.width, grid), cx),
+                            )
+                            .when(mark >= px(PAGE_BREAK_HEIGHT), |this| {
+                                this.child(page_break_mark(size(block.size.width, mark), cx))
+                            })
+                            .into_any_element();
+                    }
+                    let image = images.measure(&block.text, width);
                     let mark = block.size.height - image;
                     let render_image = |size| {
                         let app = image_app.clone();
@@ -644,6 +706,7 @@ impl WriterApp {
             styles,
             line_groups,
             line_count,
+            tables,
             _subscription: subscription,
         });
     }
@@ -666,6 +729,7 @@ impl WriterApp {
         // 제목 크기는 엔진이 즉시 바꾸므로 굵기·`#` 흐림도 같은 프레임에 맞춘다.
         let text = editor.state.read(cx).value();
         sync_line_groups(editor, &text, cx);
+        sync_tables(editor, &text, cx);
         editor.markup.apply_headings(&text, cx);
         editor.markup_refresh = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(MARKUP_DELAY).await;
@@ -743,7 +807,11 @@ impl WriterApp {
         if let Some(project) = &editor.project {
             let styles = Some(library::read_styles(project));
             if styles != editor.styles {
-                let line_style = line_style(styles.as_ref(), editor.line_groups.clone());
+                let line_style = line_style(
+                    styles.as_ref(),
+                    editor.line_groups.clone(),
+                    editor.tables.clone(),
+                );
                 editor.markup.heading_weights = heading_weights(styles.as_ref());
                 editor.styles = styles;
                 editor
@@ -776,6 +844,7 @@ impl WriterApp {
             .state
             .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
         sync_line_groups(editor, &text, cx);
+        sync_tables(editor, &text, cx);
         editor.markup.apply_headings(&text, cx);
         editor.markup.apply(markdown::spans(&text), cx);
     }

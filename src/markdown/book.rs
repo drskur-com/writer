@@ -109,6 +109,14 @@ pub fn blocks(text: &str) -> Vec<Block> {
     blocks_with_line_breaks(text, false)
 }
 
+/// 표 행만 있는 원문을 표로 읽는다. 구분 행이 없는 등 표가 아니면 `None`이다.
+pub fn table(source: &str) -> Option<Table> {
+    match blocks(source).into_iter().next() {
+        Some(Block::Table(table)) => Some(table),
+        _ => None,
+    }
+}
+
 /// 저장된 원고를 읽는다. 줄바꿈 유지 시 블록 사이의 저장용 구분 빈 줄은 세지 않는다.
 pub fn manuscript_blocks(text: &str, preserve_line_breaks: bool) -> Vec<Block> {
     blocks_with_line_breaks(text, preserve_line_breaks)
