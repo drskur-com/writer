@@ -177,7 +177,7 @@ impl<'a> EpubBuilder<'a> {
     }
 
     /// 제목 블록을 스타일 설정에 맞춰 렌더링한다.
-    fn render_heading(&mut self, level: u8, text: &Rich) {
+    fn render_heading(&mut self, level: u8, text: &Rich, unnumbered: bool) {
         self.heading_counter += 1;
         let anchor_id = format!("h-{}", self.heading_counter);
         let raw_title = crate::markdown::rich_text(text).trim().to_string();
@@ -193,7 +193,9 @@ impl<'a> EpubBuilder<'a> {
 
             // 번호와 접두사는 목차 포함 여부와 무관하게 붙인다. 다만 아예 그리지도 않고
             // 목차에도 넣지 않는 제목(숨김 + 목차 제외)은 번호를 쓰지 않는다.
-            let numbered = resolved.placement != Placement::Hidden || resolved.in_toc;
+            // `{unnumbered}` 제목(시트 첫 줄만)은 번호를 소비하지 않고 접두사도 붙지 않는다(ADR-0018).
+            let numbered =
+                !unnumbered && (resolved.placement != Placement::Hidden || resolved.in_toc);
             // 본문 제목과 목차 제목을 따로 만든다. 목차에서는 접두사의 개행을 스페이스로 바꾼다.
             let (display_title, toc_title) = if numbered {
                 self.numbers[depth] += 1;
@@ -240,8 +242,16 @@ impl<'a> EpubBuilder<'a> {
                         VerticalAlign::Bottom => "vertical-bottom",
                     };
 
-                    let heading_html =
-                        render_rich_with_prefix(text, &resolved, self.numbers[depth], &mut self.notes);
+                    let heading_html = if numbered {
+                        render_rich_with_prefix(
+                            text,
+                            &resolved,
+                            self.numbers[depth],
+                            &mut self.notes,
+                        )
+                    } else {
+                        render_rich(text, &mut self.notes)
+                    };
                     let page_sec = Section {
                         id,
                         filename: filename.clone(),
@@ -269,8 +279,16 @@ impl<'a> EpubBuilder<'a> {
                         self.finish_section();
                     }
 
-                    let heading_html =
-                        render_rich_with_prefix(text, &resolved, self.numbers[depth], &mut self.notes);
+                    let heading_html = if numbered {
+                        render_rich_with_prefix(
+                            text,
+                            &resolved,
+                            self.numbers[depth],
+                            &mut self.notes,
+                        )
+                    } else {
+                        render_rich(text, &mut self.notes)
+                    };
                     let filename = self.ensure_section(&display_title).filename.clone();
                     if resolved.in_toc {
                         let href = format!("{}#{}", filename, anchor_id);
@@ -304,8 +322,12 @@ impl<'a> EpubBuilder<'a> {
     /// 일반 블록 렌더링.
     fn render_block(&mut self, block: &Block, sheet_dir: &Path) {
         match block {
-            Block::Heading { level, text } => {
-                self.render_heading(*level, text);
+            Block::Heading {
+                level,
+                text,
+                unnumbered,
+            } => {
+                self.render_heading(*level, text, *unnumbered);
             }
             Block::Paragraph(rich) => {
                 let html = render_rich(rich, &mut self.notes);
@@ -1513,5 +1535,26 @@ mod tests {
         let style = styles.resolve(StyleTarget::Chapter);
         let html = render_rich_with_prefix(&Rich::new(), &style, 4, &mut Notes::default());
         assert_eq!(html, "제IV장 ");
+    }
+
+    #[test]
+    fn unnumbered_heading_skips_prefix_and_number() {
+        let mut styles = Styles::default();
+        styles.chapter.prefix = Some("제{n}장 ".to_string());
+        let sections = sections_of(
+            &[
+                ("## 서장 {unnumbered}\n\n본문.\n", false),
+                ("## 첫 이야기\n\n본문.\n", false),
+            ],
+            styles,
+        );
+        // 서장: 접두사 없이 제목만. 다음 장이 1번을 쓴다.
+        assert!(sections[0].1.contains(">서장</h2>"), "{}", sections[0].1);
+        assert!(!sections[0].1.contains("제"), "{}", sections[0].1);
+        assert!(
+            sections[1].1.contains("제1장 첫 이야기"),
+            "{}",
+            sections[1].1
+        );
     }
 }

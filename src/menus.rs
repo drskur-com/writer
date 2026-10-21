@@ -6,7 +6,7 @@ use gpui_kit::gpui::*;
 #[cfg(target_os = "macos")]
 use crate::APP_NAME;
 use crate::{
-    CloseLibrary, CompileProject, InsertFootnote, InsertImage, InsertTable, ToggleLineGroup, NewSheet, OpenLibrary, OpenSettings, QuitApp, SaveSheet,
+    CloseLibrary, CompileProject, InsertFootnote, InsertImage, InsertSpecialChar, InsertTable, ToggleLineGroup, NewSheet, OpenLibrary, OpenSettings, QuitApp, SaveSheet,
     SetTheme, ShowAbout, TogglePreview, ToggleSidebar, ToggleTheme, theme,
 };
 
@@ -55,7 +55,11 @@ pub(crate) fn build_menus(theme_names: &[SharedString], active_theme: &str) -> V
     menus.push(Menu::new("File").items(file_items));
 
     #[cfg_attr(target_os = "macos", allow(unused_mut))]
-    let mut edit_items = vec![MenuItem::action("Toggle Line Group", ToggleLineGroup)];
+    let mut edit_items = vec![
+        MenuItem::action("Toggle Line Group", ToggleLineGroup),
+        MenuItem::separator(),
+        MenuItem::action("Emoji & Symbols…", InsertSpecialChar),
+    ];
     #[cfg(not(target_os = "macos"))]
     {
         edit_items.push(MenuItem::separator());
@@ -67,6 +71,8 @@ pub(crate) fn build_menus(theme_names: &[SharedString], active_theme: &str) -> V
         MenuItem::action("Image…", InsertImage),
         MenuItem::action("Table…", InsertTable),
         MenuItem::action("Footnote…", InsertFootnote),
+        MenuItem::separator(),
+        MenuItem::action("Special Characters…", InsertSpecialChar),
     ]));
 
     let mut view_items = vec![

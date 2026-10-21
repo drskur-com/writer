@@ -397,7 +397,11 @@ impl<'a> DocBuilder<'a> {
 
     fn block(&mut self, block: &Block, ctx: Context) {
         match block {
-            Block::Heading { level, text } => self.heading(*level, text),
+            Block::Heading {
+                level,
+                text,
+                unnumbered,
+            } => self.heading(*level, text, *unnumbered),
             Block::Paragraph(rich) | Block::Lines(rich) => {
                 let runs = self.runs(rich);
                 let style = if ctx.quote { "Quote" } else { "Normal" };
@@ -500,7 +504,7 @@ impl<'a> DocBuilder<'a> {
         }
     }
 
-    fn heading(&mut self, level: u8, text: &Rich) {
+    fn heading(&mut self, level: u8, text: &Rich, unnumbered: bool) {
         let Some(target) = StyleTarget::for_heading(level) else {
             let runs = self.runs(text);
             let style = format!("Heading{}", level.min(6));
@@ -514,7 +518,8 @@ impl<'a> DocBuilder<'a> {
             _ => 2,
         };
         // 번호는 ePub과 같게: 그리지도 않고 목차에도 없는 제목만 번호를 쓰지 않는다.
-        let numbered = resolved.placement != Placement::Hidden || resolved.in_toc;
+        // `{unnumbered}` 제목(시트 첫 줄만)은 번호를 소비하지 않고 접두사도 붙지 않는다(ADR-0018).
+        let numbered = !unnumbered && (resolved.placement != Placement::Hidden || resolved.in_toc);
         let prefix = if numbered {
             self.numbers[depth] += 1;
             resolved.prefix_text(self.numbers[depth])

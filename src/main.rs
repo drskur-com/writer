@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 #[cfg(not(target_os = "macos"))]
 use gpui_kit::component::*;
 use gpui_kit::gpui::*;
@@ -30,6 +32,7 @@ actions!(
         InsertImage,
         InsertFootnote,
         InsertTable,
+        InsertSpecialChar,
         ToggleLineGroup,
         CompileProject,
         OpenLibrary,
@@ -93,6 +96,9 @@ fn main() {
                 KeyBinding::new("ctrl-shift-l", ToggleTheme, None),
                 KeyBinding::new("cmd-shift-e", CompileProject, None),
                 KeyBinding::new("ctrl-shift-e", CompileProject, None),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("ctrl-cmd-space", InsertSpecialChar, None),
+                KeyBinding::new("ctrl-alt-space", InsertSpecialChar, None),
             ]);
 
             // 저장된 라이브러리를 열어본다(없거나 실패하면 온보딩).

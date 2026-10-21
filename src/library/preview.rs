@@ -68,7 +68,8 @@ fn preview_of(text: &str) -> Preview {
 
     let mut content = lines.filter(|line| !strip_heading(line).is_empty());
     let first = content.next().unwrap_or_default();
-    let title = strip_breaks(strip_heading(first));
+    // 카드 제목에서는 첫 줄의 `{unnumbered}` 속성(ADR-0018)도 지운다.
+    let title = strip_unnumbered(&strip_breaks(strip_heading(first))).to_string();
     let level = heading_level(first);
     let mut content = content.map(strip_heading);
 
@@ -133,6 +134,15 @@ fn strip_heading(line: &str) -> &str {
     }
 }
 
+/// 끝의 `{unnumbered}` 속성과 그 앞 공백을 지운다.
+fn strip_unnumbered(title: &str) -> &str {
+    let title = title.trim_end();
+    match title.strip_suffix(crate::markdown::UNNUMBERED) {
+        Some(head) => head.trim_end(),
+        None => title,
+    }
+}
+
 /// 줄의 ATX 헤딩 레벨(1~6). 헤딩이 아니면 0.
 fn heading_level(line: &str) -> u8 {
     let line = line.trim();
@@ -162,6 +172,17 @@ mod tests {
         assert_eq!(preview_of("##\n그냥 글").level, 0);
         assert_eq!(preview_of("#태그").level, 0);
         assert_eq!(preview_of("####### 일곱").level, 0);
+    }
+
+    #[test]
+    fn title_strips_unnumbered_attribute() {
+        assert_eq!(preview_of("## 서장 {unnumbered}\n본문").title, "서장");
+        assert_eq!(preview_of("## 서장{unnumbered}\n본문").title, "서장");
+        // 본문 줄의 속성은 발췌에 그대로 남는다.
+        assert_eq!(
+            title_and_excerpt("# 제목\n## 끝 {unnumbered}\n"),
+            ("제목".to_string(), "끝 {unnumbered}".to_string())
+        );
     }
 
     #[test]

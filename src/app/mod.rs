@@ -14,6 +14,7 @@ mod file_view;
 mod insert_footnote;
 mod insert_table;
 mod insert_image;
+mod insert_special_char;
 mod library_ops;
 mod library_panel;
 mod new_project;
@@ -546,6 +547,7 @@ impl Render for WriterApp {
             .on_action(cx.listener(Self::on_insert_image))
             .on_action(cx.listener(Self::on_insert_footnote))
             .on_action(cx.listener(Self::on_insert_table))
+            .on_action(cx.listener(Self::on_insert_special_char))
             .on_action(cx.listener(Self::on_toggle_line_group))
             .on_action(cx.listener(Self::on_open_library))
             .on_action(cx.listener(Self::on_close_library))

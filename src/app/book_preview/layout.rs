@@ -515,7 +515,11 @@ impl<'a> Flow<'a> {
 
     fn block(&mut self, block: &Block, ctx: &Context) {
         match block {
-            Block::Heading { level, text } => self.heading(*level, text, ctx),
+            Block::Heading {
+                level,
+                text,
+                unnumbered,
+            } => self.heading(*level, text, *unnumbered, ctx),
             Block::Paragraph(text) => {
                 let mut style = self.body_style().scaled(ctx.scale);
                 if !ctx.indent {
@@ -687,7 +691,7 @@ impl<'a> Flow<'a> {
         }
     }
 
-    fn heading(&mut self, level: u8, text: &Rich, ctx: &Context) {
+    fn heading(&mut self, level: u8, text: &Rich, unnumbered: bool, ctx: &Context) {
         let Some(target) = StyleTarget::for_heading(level) else {
             // `####` 이하: 본문 크기의 굵은 문단.
             let style = TextStyle {
@@ -715,7 +719,8 @@ impl<'a> Flow<'a> {
         };
         // 번호와 접두사는 목차 포함 여부와 무관하게 붙인다(TOC에만 넣지 않는다).
         // 다만 그리지도 않고 목차에도 넣지 않는 제목은 번호를 쓰지 않는다.
-        let numbered = resolved.placement != Placement::Hidden || resolved.in_toc;
+        // `{unnumbered}` 제목(시트 첫 줄만)은 번호를 소비하지 않고 접두사도 붙지 않는다(ADR-0018).
+        let numbered = !unnumbered && (resolved.placement != Placement::Hidden || resolved.in_toc);
         if numbered {
             self.numbers[depth] += 1;
         }

@@ -6,7 +6,8 @@
 mod book;
 
 pub use book::{
-    Block, ColumnAlign, Inline, Marks, Rich, Table, manuscript_blocks, plain, rich_text, table,
+    Block, ColumnAlign, Inline, Marks, Rich, Table, UNNUMBERED, manuscript_blocks, plain,
+    rich_text, table,
 };
 
 use std::ops::Range;

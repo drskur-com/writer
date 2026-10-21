@@ -82,6 +82,8 @@ pub enum Block {
     Heading {
         level: u8,
         text: Rich,
+        /// 번호를 쓰지 않는 제목(`{unnumbered}` 속성). 시트 첫 줄 제목에서만 참조한다(ADR-0018).
+        unnumbered: bool,
     },
     Paragraph(Rich),
     /// 줄 묶음(ADR-0016): 줄마다 강제 줄바꿈인 문단. 첫 줄 들여쓰기 없이 그린다.
@@ -119,7 +121,37 @@ pub fn table(source: &str) -> Option<Table> {
 
 /// 저장된 원고를 읽는다. 줄바꿈 유지 시 블록 사이의 저장용 구분 빈 줄은 세지 않는다.
 pub fn manuscript_blocks(text: &str, preserve_line_breaks: bool) -> Vec<Block> {
-    blocks_with_line_breaks(text, preserve_line_breaks)
+    let mut out = blocks_with_line_breaks(text, preserve_line_breaks);
+    // 시트 첫 줄 제목의 `{unnumbered}` 속성만 참조한다. 본문 중간 제목의 속성은 원문 그대로 둔다.
+    if let Some(Block::Heading { text, unnumbered, .. }) = out
+        .iter_mut()
+        .find(|block| !matches!(block, Block::BlankLines(_)))
+        && strip_unnumbered(text)
+    {
+        *unnumbered = true;
+    }
+    out
+}
+
+/// 번호 없는 제목을 뜻하는 제목 속성(ADR-0018).
+pub const UNNUMBERED: &str = "{unnumbered}";
+
+/// 제목 글자 끝의 `{unnumbered}` 속성을 지운다. 속성이 있었으면 `true`.
+fn strip_unnumbered(text: &mut Rich) -> bool {
+    let Some(last) = text
+        .iter_mut()
+        .rev()
+        .find(|inline| inline.footnote.is_none() && !inline.text.trim().is_empty())
+    else {
+        return false;
+    };
+    let Some(head) = last.text.trim_end().strip_suffix(UNNUMBERED) else {
+        return false;
+    };
+    last.text.truncate(head.trim_end().len());
+    // 글자가 남은 인라인만 둔다(속성만 있던 인라인은 비게 된다).
+    text.retain(|inline| !inline.text.is_empty() || inline.footnote.is_some());
+    true
 }
 
 /// 일반 개행과 블록 사이 빈 줄을 선택적으로 유지한다.
@@ -310,6 +342,7 @@ impl Walk<'_> {
                 out.push(Block::Heading {
                     level: heading.depth,
                     text,
+                    unnumbered: false,
                 });
             }
             Node::Paragraph(paragraph) => {
@@ -607,6 +640,7 @@ mod tests {
                 Block::Heading {
                     level: 2,
                     text: plain("제1장"),
+                    unnumbered: false,
                 },
                 Block::Paragraph(vec![
                     inline("첫 ", Marks::default()),
@@ -631,6 +665,7 @@ mod tests {
             Block::Heading {
                 level: 1,
                 text: plain("제목\n부제"),
+                unnumbered: false,
             }
         );
         // `<br/>`, `<br />`도 같고 다른 HTML은 버린다.
@@ -640,6 +675,7 @@ mod tests {
                 Block::Heading {
                     level: 2,
                     text: plain("제목\n부제"),
+                    unnumbered: false,
                 }
             );
         }
@@ -648,6 +684,7 @@ mod tests {
             Block::Heading {
                 level: 1,
                 text: plain("제목부제"),
+                unnumbered: false,
             }
         );
     }
@@ -739,6 +776,47 @@ mod tests {
         assert_eq!(
             blocks("---\ntitle: a\n---\n\n본문\n"),
             vec![Block::Paragraph(plain("본문"))]
+        );
+    }
+
+    #[test]
+    fn unnumbered_attribute_only_on_first_heading() {
+        // 시트 첫 줄 제목: 속성이 빠지고 표시가 선다.
+        assert_eq!(
+            manuscript_blocks("## 서장 {unnumbered}\n\n본문\n", false)[0],
+            Block::Heading {
+                level: 2,
+                text: plain("서장"),
+                unnumbered: true,
+            }
+        );
+        // 앞 공백 없이 붙여도 같다.
+        assert_eq!(
+            manuscript_blocks("# 서장{unnumbered}\n", false)[0],
+            Block::Heading {
+                level: 1,
+                text: plain("서장"),
+                unnumbered: true,
+            }
+        );
+        // 본문 중간 제목의 속성은 원문 그대로 둔다.
+        let out = manuscript_blocks("## 첫 장\n\n본문\n\n## 끝 {unnumbered}\n", false);
+        assert_eq!(
+            out[2],
+            Block::Heading {
+                level: 2,
+                text: plain("끝 {unnumbered}"),
+                unnumbered: false,
+            }
+        );
+        // 속성이 없으면 그냥 제목이다.
+        assert_eq!(
+            manuscript_blocks("## 서장\n", false)[0],
+            Block::Heading {
+                level: 2,
+                text: plain("서장"),
+                unnumbered: false,
+            }
         );
     }
 }
