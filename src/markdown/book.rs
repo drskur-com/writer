@@ -81,12 +81,15 @@ pub fn manuscript_blocks(text: &str, preserve_line_breaks: bool) -> Vec<Block> {
 
 /// 일반 개행과 블록 사이 빈 줄을 선택적으로 유지한다.
 pub fn blocks_with_line_breaks(text: &str, preserve_line_breaks: bool) -> Vec<Block> {
-    let Ok(root) = markdown::to_mdast(text, &parse_options()) else {
+    let groups = crate::text_transform::line_groups(text);
+    let source = ungroup(text, &groups);
+    let Ok(root) = markdown::to_mdast(&source, &parse_options()) else {
         return Vec::new();
     };
     let mut cx = Walk {
-        source: text,
+        source: &source,
         preserve_line_breaks,
+        groups,
         footnotes: Vec::new(),
         definitions: Vec::new(),
     };
@@ -118,9 +121,108 @@ pub fn blocks_with_line_breaks(text: &str, preserve_line_breaks: bool) -> Vec<Bl
     out
 }
 
+/// 줄 묶음을 강제 줄바꿈으로 이은 한 문단으로 바꾼다. 줄 수는 그대로다(빈 줄 세기·위치용).
+///
+/// 펜스 줄은 빈 줄이 되어 앞뒤 블록과 나뉜다. 안의 줄은 블록 문법으로 읽히지 않게 첫머리를 바꾸고
+/// (들여쓰기는 줄바꿈 없는 공백, 블록 기호는 `\` 이스케이프) 마지막 글줄 앞까지 끝에 `\`를 붙인다.
+/// 안의 빈 줄은 빈 행으로 남는다. 묶음 끝의 빈 줄은 버린다.
+fn ungroup(text: &str, groups: &[std::ops::Range<usize>]) -> String {
+    if groups.is_empty() {
+        return text.to_string();
+    }
+    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+    for group in groups {
+        let fence_end = group.end.min(lines.len());
+        // 닫는 줄(여는 줄 이상의 콜론뿐)이 있으면 마지막 줄도 펜스다.
+        let colons = |line: &str| line.bytes().take_while(|&b| b == b':').count();
+        let last = lines[fence_end - 1].trim_end();
+        let closed = fence_end - group.start >= 2
+            && last.bytes().all(|b| b == b':')
+            && colons(last) >= colons(&lines[group.start]);
+        let body = group.start + 1..if closed { fence_end - 1 } else { fence_end };
+        let last_text = body.clone().rev().find(|&ix| !lines[ix].trim().is_empty());
+        lines[group.start].clear();
+        if closed {
+            lines[fence_end - 1].clear();
+        }
+        for ix in body {
+            if last_text.is_none_or(|last| ix > last) {
+                lines[ix].clear();
+                continue;
+            }
+            let mut line = literal_line(&lines[ix]);
+            if Some(ix) != last_text {
+                line.push('\\');
+            }
+            lines[ix] = line;
+        }
+    }
+    lines.join("\n")
+}
+
+/// 묶음 안의 줄 하나를 문단 안 글줄로 읽히게 한다. 인라인 꾸밈은 그대로 둔다.
+fn literal_line(line: &str) -> String {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    // 끝의 강제 줄바꿈 표시는 뺀다(묶음이 줄바꿈을 넣는다).
+    let mut line = line.trim_end();
+    if line.ends_with('\\') && !line.ends_with("\\\\") {
+        line = &line[..line.len() - 1];
+    }
+    let rest = line.trim_start_matches([' ', '\t']);
+    let indent = &line[..line.len() - rest.len()];
+    if !indent.is_empty() {
+        // 줄바꿈 없는 공백은 들여쓴 코드·목록으로 읽히지 않는다.
+        let spaces: String = indent
+            .chars()
+            .map(|c| if c == '\t' { "\u{a0}".repeat(4) } else { "\u{a0}".to_string() })
+            .collect();
+        return format!("{spaces}{rest}");
+    }
+    let mut out = String::with_capacity(line.len() + 1);
+    match block_marker(line) {
+        Some(ix) => {
+            out.push_str(&line[..ix]);
+            out.push('\\');
+            out.push_str(&line[ix..]);
+        }
+        None => out.push_str(line),
+    }
+    out
+}
+
+/// 줄 첫머리가 블록 문법(제목·인용·목록·구분선·setext 밑줄·표 구분 행·펜스·HTML·정의)이면
+/// 이스케이프할 기호의 위치.
+fn block_marker(line: &str) -> Option<usize> {
+    let first = line.chars().next()?;
+    let after = |marker: usize| line[marker..].starts_with([' ', '\t']) || line.len() == marker;
+    let only = |chars: &[char]| line.chars().all(|c| chars.contains(&c) || c == ' ' || c == '\t');
+    let escape = match first {
+        '#' => super::heading_level(line).is_some(),
+        '>' | '<' | '|' => true,
+        '-' | '+' | '*' => after(1) || only(&['-', ':', '|']) || only(&[first]),
+        '_' => only(&['_']),
+        '=' => only(&['=']),
+        ':' => only(&['-', ':', '|']),
+        '`' | '~' => line.starts_with(&first.to_string().repeat(3)),
+        '$' => line.starts_with("$$"),
+        '[' => line.find("]:").is_some_and(|ix| !line[1..ix].contains(']')),
+        '0'..='9' => {
+            let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+            return (digits <= 9
+                && line[digits..].starts_with(['.', ')'])
+                && after(digits + 1))
+                .then_some(digits);
+        }
+        _ => false,
+    };
+    escape.then_some(0)
+}
+
 struct Walk<'a> {
     source: &'a str,
     preserve_line_breaks: bool,
+    /// 줄 묶음의 줄 범위(0부터, 펜스 포함). 빈 줄을 셀 때 묶음 문단을 펜스까지 넓혀 본다.
+    groups: Vec<std::ops::Range<usize>>,
     /// 참조한 각주 식별자(순서 = 번호 - 1).
     footnotes: Vec<String>,
     /// 각주 정의(식별자, 내용).
@@ -138,19 +240,32 @@ impl Walk<'_> {
         for node in nodes {
             let start = out.len();
             self.block(node, &mut out);
+            let lines = self.line_span(node);
             if self.preserve_line_breaks
                 && out.len() > start
-                && let (Some(end), Some(position)) = (previous_end, node.position())
+                && let (Some(end), Some((first, _))) = (previous_end, lines)
             {
                 // 블록 사이 첫 빈 줄은 저장 형식의 문단 경계이고, 나머지가 원문의 빈 줄이다.
-                let blank_lines = position.start.line.saturating_sub(end + 2);
+                let blank_lines = first.saturating_sub(end + 2);
                 if blank_lines > 0 {
                     out.insert(start, Block::BlankLines(blank_lines));
                 }
             }
-            previous_end = node.position().map(|position| position.end.line);
+            previous_end = lines.map(|(_, last)| last);
         }
         out
+    }
+
+    /// 노드의 (첫 줄, 끝 줄)(1부터). 줄 묶음 문단은 펜스 줄까지 넓힌다.
+    fn line_span(&self, node: &Node) -> Option<(usize, usize)> {
+        let position = node.position()?;
+        let (start, end) = (position.start.line, position.end.line);
+        Some(
+            self.groups
+                .iter()
+                .find(|group| group.contains(&(start - 1)))
+                .map_or((start, end), |group| (group.start + 1, group.end.max(end))),
+        )
     }
 
     fn block(&mut self, node: &Node, out: &mut Vec<Block>) {
@@ -346,6 +461,44 @@ mod tests {
             text: text.into(),
             marks,
         }
+    }
+
+    #[test]
+    fn line_groups_are_one_paragraph_with_line_breaks() {
+        let saved = crate::text_transform::to_markdown(
+            "앞\n:::\n# 제목 아님\n- 목록 아님\n**굵게**\n\n  들여쓰기\n1. 번호 아님\n---\n:::\n뒤",
+        );
+        let parsed = blocks(&saved);
+        assert_eq!(parsed.len(), 3, "{parsed:?}");
+        assert_eq!(parsed[0], Block::Paragraph(plain("앞")));
+        assert_eq!(parsed[2], Block::Paragraph(plain("뒤")));
+        let Block::Paragraph(group) = &parsed[1] else {
+            panic!("{parsed:?}");
+        };
+        assert_eq!(
+            rich_text(group),
+            "# 제목 아님\n- 목록 아님\n굵게\n\n\u{a0}\u{a0}들여쓰기\n1. 번호 아님\n---"
+        );
+        assert!(group.iter().any(|inline| inline.text == "굵게" && inline.marks.strong));
+        // 각주 참조, 묶음 끝의 빈 줄, 닫지 않은 묶음.
+        let parsed = blocks(":::\n하나[^1]\n둘\n\n:::\n\n[^1]: 주석\n\n::: 시\n[셋]: 정의 아님");
+        assert_eq!(parsed[0], Block::Paragraph(plain("하나¹\n둘")));
+        assert_eq!(parsed[1], Block::Paragraph(plain("[셋]: 정의 아님")));
+        assert!(matches!(parsed[2], Block::Footnotes(_)), "{parsed:?}");
+    }
+
+    #[test]
+    fn line_groups_count_blank_lines_from_their_fences() {
+        let saved = crate::text_transform::to_markdown("앞\n\n:::\nA\nB\n:::\n뒤");
+        assert_eq!(
+            manuscript_blocks(&saved, true),
+            vec![
+                Block::Paragraph(plain("앞")),
+                Block::BlankLines(1),
+                Block::Paragraph(plain("A\nB")),
+                Block::Paragraph(plain("뒤")),
+            ]
+        );
     }
 
     #[test]

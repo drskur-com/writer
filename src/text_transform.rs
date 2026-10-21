@@ -8,6 +8,8 @@
 //!   내보내기에서는 문단 경계 하나로 보이고, 이 앱으로 다시 열면 빈 줄이 돌아온다.
 //! - 줄바꿈 하나로 이어져야 하는 줄(목록 항목끼리, 인용 줄끼리, 표 행끼리, 들여쓴 코드, 줄 끝
 //!   강제 줄바꿈, setext 밑줄)은 빈 줄을 넣지 않는다. 코드·수식 펜스와 frontmatter 안은 그대로 둔다.
+//! - 줄 묶음(`:::` 줄로 열고 닫는 구간) 안도 그대로 둔다. 책에서는 구간 전체가 한 문단이고 안의
+//!   줄바꿈은 강제 줄바꿈이다([`line_groups`]).
 //! - 다른 앱에서 만든 파일의 문단 안 줄바꿈(`A\nB`, 한 문단)은 읽을 때 공백으로 이어 한 줄로 만든다.
 //!
 //! 에디터 본문 → 마크다운 → 에디터 본문은 원래대로 돌아온다(테스트로 지킨다).
@@ -270,6 +272,8 @@ enum Kind {
     Blank,
     /// 펜스·frontmatter 안의 줄(여는·닫는 줄 포함). 원문 그대로 둔다.
     Verbatim,
+    /// 줄 묶음 안의 줄(여는·닫는 `:::` 포함). 원문 그대로 두지만 문장 자동 변환은 한다.
+    Grouped,
     /// 목록 항목(`-`, `*`, `+`, `1.`, `1)`).
     ListItem,
     Quote,
@@ -289,9 +293,18 @@ fn classify(lines: &[&str]) -> Vec<Kind> {
     let mut kinds = Vec::with_capacity(lines.len());
     // 열린 펜스의 닫는 표시. frontmatter는 `---`로 닫는다.
     let mut fence: Option<(char, usize)> = None;
+    // 열린 줄 묶음의 콜론 수.
+    let mut group: Option<usize> = None;
     for (ix, line) in lines.iter().enumerate() {
         let trimmed = line.trim_start();
         let indent = line.len() - trimmed.len();
+        if let Some(len) = group {
+            if group_fence(line).is_some_and(|(colons, bare)| bare && colons >= len) {
+                group = None;
+            }
+            kinds.push(Kind::Grouped);
+            continue;
+        }
         if let Some((mark, len)) = fence {
             let closes = indent < 4
                 && trimmed.starts_with(&mark.to_string().repeat(len))
@@ -300,6 +313,11 @@ fn classify(lines: &[&str]) -> Vec<Kind> {
                 fence = None;
             }
             kinds.push(Kind::Verbatim);
+            continue;
+        }
+        if let Some((colons, _)) = group_fence(line) {
+            group = Some(colons);
+            kinds.push(Kind::Grouped);
             continue;
         }
         if ix == 0 && line.trim_end() == "---" {
@@ -328,6 +346,43 @@ fn classify(lines: &[&str]) -> Vec<Kind> {
         kinds.push(kind_of(line));
     }
     kinds
+}
+
+/// 줄 묶음 펜스(줄 첫머리의 콜론 세 개 이상)인지. (콜론 수, 콜론뿐인지)를 돌려준다.
+/// 여는 줄에는 뒤에 이름 등을 적어도 되고(`::: 시`), 닫는 줄은 콜론뿐이다.
+fn group_fence(line: &str) -> Option<(usize, bool)> {
+    let colons = line.bytes().take_while(|&b| b == b':').count();
+    (colons >= 3).then(|| (colons, line[colons..].trim().is_empty()))
+}
+
+/// 줄 묶음의 줄 범위(0부터 센 줄 번호, 여는·닫는 `:::` 줄 포함). 닫지 않은 묶음은 끝까지다.
+///
+/// 묶음 안에서는 줄바꿈이 문단을 나누지 않는다. 코드 펜스·frontmatter 안의 `:::`는 묶음이 아니다.
+pub fn line_groups(text: &str) -> Vec<Range<usize>> {
+    let lines = split(text);
+    let kinds = classify(&lines);
+    let mut groups = Vec::new();
+    // 열린 묶음의 (첫 줄, 콜론 수). 묶음은 닫는 줄이나 문서 끝에서만 끝난다(`classify`).
+    let mut open: Option<(usize, usize)> = None;
+    for (ix, (line, kind)) in lines.iter().zip(&kinds).enumerate() {
+        if *kind != Kind::Grouped {
+            continue;
+        }
+        let fence = group_fence(line);
+        match open {
+            None => open = fence.map(|(colons, _)| (ix, colons)),
+            Some((start, len)) => {
+                if fence.is_some_and(|(colons, bare)| bare && colons >= len) {
+                    groups.push(start..ix + 1);
+                    open = None;
+                }
+            }
+        }
+    }
+    if let Some((start, _)) = open {
+        groups.push(start..lines.len());
+    }
+    groups
 }
 
 /// 펜스 밖 줄 하나의 종류.
@@ -376,7 +431,7 @@ fn tight(prev: (&str, Kind), next: (&str, Kind)) -> bool {
     use Kind::*;
     let (prev_line, prev) = prev;
     let (next_line, next) = next;
-    if prev == Verbatim || next == Verbatim {
+    if matches!(prev, Verbatim | Grouped) || matches!(next, Verbatim | Grouped) {
         return false;
     }
     let indented_item = next_line.starts_with([' ', '\t']) && prev == ListItem;
@@ -436,6 +491,11 @@ fn join(out: &mut String, lines: &[Line<'_>], gap: impl Fn(&Line<'_>, &Line<'_>)
     }
 }
 
+/// 두 줄이 같은 펜스나 줄 묶음 안에 있는지(사이를 원문 그대로 둔다).
+fn same_block(prev: Kind, next: Kind) -> bool {
+    matches!((prev, next), (Kind::Verbatim, Kind::Verbatim) | (Kind::Grouped, Kind::Grouped))
+}
+
 /// 에디터 본문 → 저장할 마크다운.
 pub fn to_markdown(editor: &str) -> String {
     let lines = split(editor);
@@ -446,8 +506,8 @@ pub fn to_markdown(editor: &str) -> String {
     }
     let mut out = String::with_capacity(editor.len() + lines.len());
     join(&mut out, &lines, |prev, next| {
-        if prev.kind == Kind::Verbatim && next.kind == Kind::Verbatim {
-            // 펜스 안의 빈 줄은 원문 그대로.
+        if same_block(prev.kind, next.kind) {
+            // 펜스·줄 묶음 안의 빈 줄은 원문 그대로.
             return "\n".repeat(next.blanks_before + 1);
         }
         let blanks =
@@ -478,7 +538,7 @@ pub fn to_editor(markdown: &str) -> String {
             continue;
         }
         let prev = &lines[ix - 1];
-        if prev.kind == Kind::Verbatim && line.kind == Kind::Verbatim {
+        if same_block(prev.kind, line.kind) {
             out.push_str(&"\n".repeat(line.blanks_before + 1));
         } else if line.blanks_before > 0 {
             // 빈 줄 하나는 문단 경계, 나머지는 에디터의 빈 줄.
@@ -575,10 +635,28 @@ mod tests {
         round_trips("$$x$$\n문단");
     }
 
+    #[test]
+    fn line_groups_are_stored_as_written() {
+        let editor = "앞 문단\n:::\n첫 행\n둘째 행\n\n셋째 행\n:::\n뒤 문단";
+        assert_eq!(
+            to_markdown(editor),
+            "앞 문단\n\n:::\n첫 행\n둘째 행\n\n셋째 행\n:::\n\n뒤 문단"
+        );
+        round_trips(editor);
+        // 묶음 안의 줄은 다른 앱 파일처럼 한 줄로 잇지 않는다.
+        assert_eq!(to_editor(":::\nA\nB\n:::"), ":::\nA\nB\n:::");
+        assert_eq!(line_groups(editor), vec![1..7]);
+        // 닫지 않은 묶음은 끝까지, 코드 펜스 안의 `:::`는 묶음이 아니다.
+        assert_eq!(line_groups("A\n::: 시\nB"), vec![1..3]);
+        assert!(line_groups("```\n:::\n```").is_empty());
+        // 묶음 안에서도 문장 자동 변환은 한다.
+        assert!(!in_literal_context(":::\n가", 7));
+    }
+
     /// 여러 종류의 줄을 네 줄까지 모든 순서로 섞어도 원래대로 돌아온다.
     #[test]
     fn every_short_mix_of_lines_round_trips() {
-        const SAMPLES: [&str; 14] = [
+        const SAMPLES: [&str; 15] = [
             "문단",
             "",
             "- 항목",
@@ -593,6 +671,7 @@ mod tests {
             "x",
             "---",
             "1. 번호",
+            ":::",
         ];
         let mut stack = vec![Vec::<&str>::new()];
         while let Some(lines) = stack.pop() {

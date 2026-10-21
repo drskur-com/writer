@@ -35,7 +35,7 @@ enum Block {
     Heading(u8),
     /// 이미지 줄(ADR-0008). 이미지 블록은 따로 그린다.
     Image,
-    /// 목록·인용·코드·표처럼 문단 모양(들여쓰기·정렬)을 입히지 않는 줄.
+    /// 목록·인용·코드·표·줄 묶음 펜스(`:::`)처럼 문단 모양(들여쓰기·정렬)을 입히지 않는 줄.
     Other,
     /// 문단 줄.
     Text,
@@ -64,7 +64,8 @@ impl Block {
             || rest.starts_with('>')
             || rest.starts_with("```")
             || rest.starts_with("~~~")
-            || rest.starts_with('|');
+            || rest.starts_with('|')
+            || line.starts_with(":::");
         if other { Block::Other } else { Block::Text }
     }
 

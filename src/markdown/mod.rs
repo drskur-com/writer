@@ -28,7 +28,7 @@ pub enum SpanKind {
     Quote,
     /// 코드·수식 블록 전체.
     CodeBlock,
-    /// 구문 기호: `#`, `**`, `_`, `` ` ``, `[`, `](…)`, `>`, `-`, 펜스, 구분선, frontmatter, 이미지.
+    /// 구문 기호: `#`, `**`, `_`, `` ` ``, `[`, `](…)`, `>`, `-`, 펜스, 줄 묶음 펜스, 구분선, frontmatter, 이미지.
     Marker,
 }
 
@@ -55,7 +55,31 @@ pub fn spans(text: &str) -> Vec<Span> {
     if let Ok(root) = markdown::to_mdast(text, &parse_options()) {
         walk(&root, text, false, &mut out);
     }
+    push_group_fences(text, &mut out);
     out
+}
+
+/// 줄 묶음(`:::`)의 여는 줄·닫는 줄을 기호로 표시한다.
+fn push_group_fences(text: &str, out: &mut Vec<Span>) {
+    let groups = crate::text_transform::line_groups(text);
+    if groups.is_empty() {
+        return;
+    }
+    let mut start = 0;
+    for (ix, line) in text.split('\n').enumerate() {
+        let range = start..start + line.len();
+        start = range.end + 1;
+        let closing = line.trim_end().bytes().all(|b| b == b':');
+        let fence = groups
+            .iter()
+            .any(|group| ix == group.start || (ix + 1 == group.end && closing));
+        if fence && !range.is_empty() {
+            out.push(Span {
+                range,
+                kind: SpanKind::Marker,
+            });
+        }
+    }
 }
 
 /// 이미지 정렬. 기본은 가운데라 마크다운에 따로 적지 않는다.
