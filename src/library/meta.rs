@@ -490,6 +490,10 @@ pub fn create_group(
     }
     let dir = create_unique_dir(parent, &base)?;
     let order = write_group_meta(&dir, icon, color).and_then(|()| {
+        // 섹션(`Notes/`·`Projects/`) 바로 아래 그룹은 이름순이라 순서를 적지 않는다.
+        if parent.parent().is_some_and(super::layout::has_marker) {
+            return Ok(());
+        }
         let mut order = group_order(parent)?;
         order.retain(|name| *name != file_name(&dir));
         order.push(file_name(&dir));
@@ -783,6 +787,27 @@ mod tests {
     use super::*;
     use crate::library::test_util::{stem, temp_dir};
     use crate::library::*;
+
+    #[test]
+    fn note_group_is_created_in_notes_section() {
+        let root = temp_dir("note-group");
+        initialize(&root).unwrap();
+        let notes = root.join(SectionKind::Notes.dir());
+        let dir = create_group(&notes, "독서", Some("files"), Some("blue")).unwrap();
+        assert_eq!(dir, notes.join("독서"));
+        // 섹션 바로 아래 그룹은 이름순이라 섹션 폴더에 순서 메타를 쓰지 않는다.
+        assert!(!notes.join(GROUP_META_FILE).exists());
+        let lib = scan(&root).unwrap();
+        let section = lib
+            .sections
+            .iter()
+            .find(|section| section.kind == SectionKind::Notes)
+            .unwrap();
+        assert!(section.entries.iter().any(
+            |entry| matches!(entry, Entry::Group(group) if group.path == dir && group.icon.as_deref() == Some("files"))
+        ));
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn update_project_keeps_sheet_order_and_renames() {

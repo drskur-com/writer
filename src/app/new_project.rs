@@ -439,6 +439,22 @@ impl WriterApp {
         self.open_form_dialog(FormTarget::EditProject(dir.to_path_buf()), window, cx);
     }
 
+    /// 메모 섹션(`Notes/`) 바로 아래에 새 메모 그룹을 만드는 대화상자를 연다.
+    pub(super) fn open_new_note_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(lib) = &self.library else {
+            return;
+        };
+        let parent = lib.root.join(library::SectionKind::Notes.dir());
+        self.open_new_group(parent, true, window, cx);
+    }
+
+    /// 메모 섹션 폴더인지.
+    fn is_notes_section(&self, dir: &Path) -> bool {
+        self.library
+            .as_ref()
+            .is_some_and(|lib| lib.root.join(library::SectionKind::Notes.dir()) == dir)
+    }
+
     /// 그룹 편집 대화상자를 연다(새 그룹과 같은 모양, 값이 채워진 채로).
     pub(super) fn open_edit_group(
         &mut self,
@@ -478,6 +494,9 @@ impl WriterApp {
             } => "새로운 추가자료",
             FormTarget::NewGroup { parent, .. } if self.open_project.as_ref() == Some(parent) => {
                 "새로운 그룹"
+            }
+            FormTarget::NewGroup { parent, .. } if self.is_notes_section(parent) => {
+                "새로운 메모 그룹"
             }
             FormTarget::NewGroup { .. } => "새로운 하위 그룹",
             FormTarget::EditGroup { .. } => "그룹 편집",

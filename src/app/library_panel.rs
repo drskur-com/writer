@@ -106,18 +106,43 @@ impl WriterApp {
                         .child(kind.title())
                         .child(
                             div()
-                                .id(SharedString::from(format!("section-toggle-{}", kind.dir())))
-                                .cursor_pointer()
-                                .font_normal()
-                                // 펼친 섹션은 헤더에 마우스를 올렸을 때만 "가리기"를 보인다.
-                                .when(!collapsed, |this| {
-                                    this.invisible()
-                                        .group_hover(header_group, |style| style.visible())
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                // 메모 그룹은 위쪽 + 버튼으로 만들고, 프로젝트는 헤더의 +로 만든다.
+                                .when(kind == library::SectionKind::Projects, |this| {
+                                    this.child(
+                                        div()
+                                            .id("section-new-project")
+                                            .cursor_pointer()
+                                            .invisible()
+                                            .group_hover(header_group.clone(), |style| {
+                                                style.visible()
+                                            })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.open_new_project(window, cx);
+                                            }))
+                                            .child(Icon::new(icons::new_group()).xsmall()),
+                                    )
                                 })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.toggle_section(kind, cx);
-                                }))
-                                .child(if collapsed { "보기" } else { "가리기" }),
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "section-toggle-{}",
+                                            kind.dir()
+                                        )))
+                                        .cursor_pointer()
+                                        .font_normal()
+                                        // 펼친 섹션은 헤더에 마우스를 올렸을 때만 "가리기"를 보인다.
+                                        .when(!collapsed, |this| {
+                                            this.invisible()
+                                                .group_hover(header_group, |style| style.visible())
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.toggle_section(kind, cx);
+                                        }))
+                                        .child(if collapsed { "보기" } else { "가리기" }),
+                                ),
                         )
                         .into_any_element(),
                 );
@@ -317,7 +342,7 @@ impl WriterApp {
                         .on_click(cx.listener(
                             |this, _, window, cx| match this.open_project.clone() {
                                 Some(dir) => this.open_new_group(dir, true, window, cx),
-                                None => this.open_new_project(window, cx),
+                                None => this.open_new_note_group(window, cx),
                             },
                         )),
                 )
