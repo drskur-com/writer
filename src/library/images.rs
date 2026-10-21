@@ -9,7 +9,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use super::{ATTACHMENTS_GROUP, EXTRAS_DIR, GROUP_META_FILE};
+use super::layout::has_marker;
+use super::{ATTACHMENTS_GROUP, EXTRAS_DIR, GROUP_META_FILE, SECTIONS};
 
 /// 웹 주소인지. 웹 이미지는 파일이 아니라 주소를 그대로 쓴다.
 pub fn is_web_address(destination: &str) -> bool {
@@ -17,6 +18,7 @@ pub fn is_web_address(destination: &str) -> bool {
 }
 
 /// 이미지 경로를 디스크의 파일로 찾는다. 웹 주소이거나 파일이 없으면 `None`.
+/// 찾은 경로는 `..`를 푼 실제 경로라 같은 파일이면 같은 값이다(내보내기에서 한 번만 넣는다).
 ///
 /// `project_dir`는 프로젝트 폴더(원고·추가자료의 기준)다. 모르면 `None`을 주고,
 /// 그때는 시트 폴더 주변만 본다.
@@ -43,21 +45,46 @@ pub fn resolve_image_path(
                 .join(path),
         );
     }
-    if let Some(found) = candidates.into_iter().find(|candidate| candidate.is_file()) {
-        return Some(found);
-    }
-
-    // `../`가 어긋난 경로: `../`를 뗀 꼬리를 시트의 위 폴더들에서 다시 찾는다.
-    // 프로젝트·그룹 폴더는 `.writer.toml`이 있으므로 거기까지만 올라간다.
-    let tail = without_leading_parents(path)?;
-    if tail.as_path() == path {
-        return None;
-    }
-    sheet_dir
-        .ancestors()
-        .take_while(|ancestor| ancestor.join(GROUP_META_FILE).is_file())
-        .map(|ancestor| ancestor.join(&tail))
+    let found = candidates
+        .into_iter()
         .find(|candidate| candidate.is_file())
+        .or_else(|| {
+            // `../`가 어긋난 경로: `../`를 뗀 꼬리를 시트의 위 폴더들에서 다시 찾는다.
+            let tail = without_leading_parents(path)?;
+            if tail.as_path() == path {
+                return None;
+            }
+            search_dirs(sheet_dir, project_dir)
+                .into_iter()
+                .map(|dir| dir.join(&tail))
+                .find(|candidate| candidate.is_file())
+        })?;
+    Some(found.canonicalize().unwrap_or(found))
+}
+
+/// 어긋난 경로를 다시 찾을 시트 폴더와 그 위 폴더들(프로젝트 폴더까지).
+///
+/// 프로젝트 폴더를 알면 거기까지 올라간다. 모르면 라이브러리 섹션(`Projects/`·`Notes/`)
+/// 바로 아래 폴더까지 올라가고, 라이브러리 밖이면 `.writer.toml`이 있는 그룹 폴더까지만 본다.
+/// 그룹 폴더에 `.writer.toml`이 꼭 있지는 않으므로 라이브러리 안에서는 그것에 기대지 않는다.
+fn search_dirs<'a>(sheet_dir: &'a Path, project_dir: Option<&Path>) -> Vec<&'a Path> {
+    let ancestors: Vec<&Path> = sheet_dir.ancestors().collect();
+    let end = match project_dir {
+        Some(project_dir) => ancestors.iter().position(|dir| *dir == project_dir),
+        None => ancestors.iter().position(|dir| {
+            dir.parent().is_some_and(|section| {
+                SECTIONS.iter().any(|kind| section.ends_with(kind.dir()))
+                    && section.parent().is_some_and(has_marker)
+            })
+        }),
+    };
+    match end {
+        Some(end) => ancestors[..=end].to_vec(),
+        None => ancestors
+            .into_iter()
+            .take_while(|dir| dir.join(GROUP_META_FILE).is_file())
+            .collect(),
+    }
 }
 
 /// 앞머리의 `.`·`..`를 뗀 경로. 뗄 것이 없거나 남는 것이 없으면 `None`.
@@ -94,25 +121,43 @@ mod tests {
         (project, sheet_dir)
     }
 
-    /// `Extras/Attachments/a.png`의 실제 경로.
+    /// `Extras/Attachments/a.png`의 실제 경로(`..`·심볼릭 링크를 푼 경로).
     fn attachment(project: &Path) -> PathBuf {
         project
             .join(EXTRAS_DIR)
             .join(ATTACHMENTS_GROUP)
             .join("a.png")
+            .canonicalize()
+            .unwrap()
     }
 
     #[test]
     fn finds_relative_path_from_sheet_folder() {
         let (project, sheet_dir) = project();
-        // `..`가 남은 경로를 그대로 돌려주므로 실제 파일인지만 본다.
-        let found =
-            resolve_image_path(&sheet_dir, Some(&project), "../../Extras/Attachments/a.png")
-                .unwrap();
         assert_eq!(
-            found.canonicalize().unwrap(),
-            attachment(&project).canonicalize().unwrap()
+            resolve_image_path(&sheet_dir, Some(&project), "../../Extras/Attachments/a.png"),
+            Some(attachment(&project))
         );
+    }
+
+    #[test]
+    fn finds_stale_parent_path_in_groups_without_meta_file() {
+        // 라이브러리 안에서는 `.writer.toml`이 없는 그룹이어도 프로젝트 폴더까지 올라간다.
+        let root = temp_dir("images-library");
+        crate::library::initialize(&root).unwrap();
+        let project = root.join("Projects").join("책");
+        let attachments = project.join(EXTRAS_DIR).join(ATTACHMENTS_GROUP);
+        let sheet_dir = project.join("본문").join("1장");
+        std::fs::create_dir_all(&attachments).unwrap();
+        std::fs::create_dir_all(&sheet_dir).unwrap();
+        std::fs::write(attachments.join("a.png"), "png").unwrap();
+        assert_eq!(
+            resolve_image_path(&sheet_dir, None, "../Extras/Attachments/a.png"),
+            Some(attachment(&project))
+        );
+        // 프로젝트 폴더 밖(`Projects/`)까지는 올라가지 않는다.
+        std::fs::write(root.join("Projects").join("b.png"), "png").unwrap();
+        assert_eq!(resolve_image_path(&sheet_dir, None, "../b.png"), None);
     }
 
     #[test]

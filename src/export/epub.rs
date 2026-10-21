@@ -1674,12 +1674,12 @@ mod image_tests {
 
     #[test]
     fn relative_image_path_is_embedded_once() {
-        // 같은 그림을 두 번 써도 파일은 한 번만 넣고 같은 상대 경로를 가리킨다.
+        // 같은 그림을 여러 번(다르게 적은 경로로) 써도 파일은 한 번만 넣고 같은 경로를 가리킨다.
         let mut archive = build_with(
-            "![사진](../../Extras/Attachments/a.png){width=320px}\n\n![또](../../Extras/Attachments/a.png)\n",
+            "![사진](../../Extras/Attachments/a.png){width=320px}\n\n![또](../../Extras/Attachments/a.png)\n\n![옛](../Extras/Attachments/a.png)\n",
         );
         let html = section(&mut archive);
-        assert_eq!(html.matches("../images/img_0001.png").count(), 2, "{html}");
+        assert_eq!(html.matches("../images/img_0001.png").count(), 3, "{html}");
         assert!(archive.by_name("OEBPS/images/img_0001.png").is_ok());
         let names: Vec<String> = (0..archive.len())
             .map(|ix| archive.by_index(ix).unwrap().name().to_string())
