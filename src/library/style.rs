@@ -68,7 +68,7 @@ impl StyleTarget {
     }
 
     /// 대상의 기본 스타일. 파일에 없는 값은 이것으로 채운다.
-    /// 부는 별도 제목 페이지, 장은 새 페이지 첫머리, 절은 앞 내용에 이어서 놓는다.
+    /// 부·장·절 제목은 기본적으로 앞 내용에 이어서 놓고 페이지를 나누지 않는다.
     pub fn defaults(self) -> ResolvedStyle {
         let body = ResolvedStyle {
             font: None,
@@ -99,15 +99,8 @@ impl StyleTarget {
         };
         match self {
             StyleTarget::Body => body,
-            StyleTarget::Part => ResolvedStyle {
-                placement: Placement::Page,
-                page_break: true,
-                ..title(1.6, Align::Center, 4.0, 2.0)
-            },
-            StyleTarget::Chapter => ResolvedStyle {
-                page_break: true,
-                ..title(1.4, Align::Center, 3.0, 1.5)
-            },
+            StyleTarget::Part => title(1.6, Align::Left, 4.0, 2.0),
+            StyleTarget::Chapter => title(1.4, Align::Left, 3.0, 1.5),
             StyleTarget::Section => title(1.2, Align::Left, 1.5, 0.75),
         }
     }
@@ -574,9 +567,11 @@ mod tests {
     fn title_layout_defaults_and_prefix() {
         let styles = Styles::default();
         let part = styles.resolve(StyleTarget::Part);
-        assert_eq!(part.placement, Placement::Page);
+        assert_eq!(part.placement, Placement::Inline);
+        assert!(!part.page_break);
         assert_eq!(part.font_weight, 700);
-        assert!(styles.resolve(StyleTarget::Chapter).page_break);
+        assert_eq!(styles.resolve(StyleTarget::Chapter).placement, Placement::Inline);
+        assert!(!styles.resolve(StyleTarget::Chapter).page_break);
         assert!(!styles.resolve(StyleTarget::Section).page_break);
         assert_eq!(styles.resolve(StyleTarget::Body).font_weight, 400);
 

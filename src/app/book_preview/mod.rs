@@ -11,6 +11,7 @@ mod page;
 #[cfg(not(target_os = "macos"))]
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, WindowExt as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
@@ -246,6 +247,7 @@ impl Device {
 #[derive(Clone, PartialEq, Debug)]
 struct LayoutKey {
     revision: usize,
+    generate_toc: bool,
     setup: PageSetup,
     fonts: Fonts,
 }
@@ -332,6 +334,8 @@ struct BookPreview {
     paper: Paper,
     device: Device,
     zoom: usize,
+    /// PDF 본문 앞에 목차 페이지를 생성할지 여부.
+    generate_toc: bool,
     layout: Option<(LayoutKey, Rc<BookLayout>)>,
     /// ePub에서 보고 있는 페이지.
     epub_page: usize,
@@ -357,6 +361,7 @@ impl BookPreview {
             paper: Paper::Shinguk,
             device: Device::Phone,
             zoom: DEFAULT_ZOOM,
+            generate_toc: false,
             layout: None,
             epub_page: 0,
             pdf_scroll: UniformListScrollHandle::new(),
@@ -441,6 +446,7 @@ impl BookPreview {
         let theme = cx.theme();
         let key = LayoutKey {
             revision: self.revision,
+            generate_toc: self.generate_toc,
             setup: self.setup(),
             fonts: Fonts {
                 editor: Prefs::editor_font_family(cx),
@@ -458,6 +464,7 @@ impl BookPreview {
             key.setup,
             &key.fonts,
             window.text_system(),
+            key.generate_toc,
         ));
         self.epub_page = self.epub_page.min(layout.pages.len().saturating_sub(1));
         self.layout = Some((key, layout.clone()));
@@ -785,6 +792,18 @@ impl BookPreview {
                 }),
         )
         .child(formats)
+        .when(self.format == Format::Pdf, |this| {
+            this.child(
+                Checkbox::new("preview-generate-toc")
+                    .label("목차 생성")
+                    .checked(self.generate_toc)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.generate_toc = *checked;
+                        this.pdf_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                        cx.notify();
+                    })),
+            )
+        })
         .child(
             div()
                 .flex_1()

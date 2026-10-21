@@ -116,12 +116,13 @@ pub(super) struct BookLayout {
     pub toc: Vec<TocEntry>,
 }
 
-/// 원고를 배치한다. PDF는 표지 → 속표지 → 차례 → 본문, ePub은 표지 → 속표지 → 본문 순이다.
+/// 원고를 배치한다. PDF는 표지 → 속표지 → 선택적 차례 → 본문, ePub은 표지 → 속표지 → 본문 순이다.
 pub(super) fn layout_book(
     source: &BookSource,
     setup: PageSetup,
     fonts: &Fonts,
     text_system: &WindowTextSystem,
+    generate_toc: bool,
 ) -> BookLayout {
     let mut front = Vec::new();
     let mut flow = Flow::new(setup, fonts, &source.styles, text_system);
@@ -162,7 +163,7 @@ pub(super) fn layout_book(
                 folio.folio(page, ix + 1);
             }
         }
-        if !body.toc.is_empty() {
+        if generate_toc && !body.toc.is_empty() {
             let flow = Flow::new(setup, fonts, &source.styles, text_system);
             toc_pages = flow.toc_pages(&body.toc);
         }
