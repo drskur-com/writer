@@ -9,18 +9,19 @@
 //! - 독서 앱 호환: 별도의 불필요한 nav 페이지 없이 전자책 내장 목차(`toc.ncx`)가 단독으로 차례를 담당.
 
 use std::collections::HashMap;
-use std::io::{Seek, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use zip::write::SimpleFileOptions;
 use zip::CompressionMethod;
 
-use super::{CompileError, CompileProject};
+use super::{ExportError, ExportProject, load_project};
 use crate::library::{Align, Placement, ResolvedStyle, StyleTarget, VerticalAlign};
 use crate::markdown::{Block, Inline, Marks, Rich};
 
 /// XML 특수문자를 이스케이프한다.
-pub fn escape_xml(s: &str) -> String {
+fn escape_xml(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -77,12 +78,14 @@ struct ImageAsset {
     is_cover: bool,
 }
 
-/// ePub 컴파일러 상태.
-struct EPubBuilder<'a> {
-    project: &'a CompileProject,
+/// ePub 생성 상태.
+struct EpubBuilder<'a> {
+    project: &'a ExportProject,
     sections: Vec<Section>,
     current_section: Option<Section>,
     section_counter: usize,
+    /// 목차 포함 여부와 무관하게 제목마다 고유 앵커를 만든다.
+    heading_counter: usize,
     image_counter: usize,
     images: Vec<ImageAsset>,
     image_dest_map: HashMap<String, String>,
@@ -91,13 +94,14 @@ struct EPubBuilder<'a> {
     numbers: [usize; 3],
 }
 
-impl<'a> EPubBuilder<'a> {
-    fn new(project: &'a CompileProject) -> Self {
+impl<'a> EpubBuilder<'a> {
+    fn new(project: &'a ExportProject) -> Self {
         Self {
             project,
             sections: Vec::new(),
             current_section: None,
             section_counter: 0,
+            heading_counter: 0,
             image_counter: 0,
             images: Vec::new(),
             image_dest_map: HashMap::new(),
@@ -133,6 +137,8 @@ impl<'a> EPubBuilder<'a> {
 
     /// 제목 블록을 스타일 설정에 맞춰 렌더링한다.
     fn render_heading(&mut self, level: u8, text: &Rich) {
+        self.heading_counter += 1;
+        let anchor_id = format!("h-{}", self.heading_counter);
         let raw_title = crate::markdown::rich_text(text).trim().to_string();
         let target = StyleTarget::for_heading(level);
 
@@ -164,8 +170,6 @@ impl<'a> EPubBuilder<'a> {
                 StyleTarget::Section => "title-section",
                 _ => "title-heading",
             };
-
-            let anchor_id = format!("h-{}", self.toc_items.len() + 1);
 
             match resolved.placement {
                 Placement::Hidden => {
@@ -240,7 +244,6 @@ impl<'a> EPubBuilder<'a> {
             }
         } else {
             // H4~H6 등 제목 스타일 대상이 아닌 일반 헤딩
-            let anchor_id = format!("h-{}", self.toc_items.len() + 1);
             let filename = self.ensure_section(&raw_title).filename.clone();
             let href = format!("{}#{}", filename, anchor_id);
             self.toc_items.push(TocItem {
@@ -419,8 +422,47 @@ impl<'a> EPubBuilder<'a> {
     }
 }
 
-/// ePub 파일을 생성하여 스트림에 쓴다.
-pub fn build_epub<W: Write + Seek>(project: &CompileProject, writer: &mut W) -> Result<(), CompileError> {
+/// 프로젝트 원고를 ePub 파일로 저장한다. 완성된 임시 파일로 목적 파일을 교체한다.
+pub fn export_to_file(project_dir: &Path, output_path: &Path) -> Result<(), ExportError> {
+    let project = load_project(project_dir)?;
+    save_to_file(&project, output_path)
+}
+
+/// 선택한 그룹 또는 복수 시트의 접합 묶음만 ePub 파일로 저장한다.
+pub fn export_selection_to_file(
+    root: &Path,
+    selected: &[PathBuf],
+    output_path: &Path,
+) -> Result<(), ExportError> {
+    let project = super::load_selection(root, selected)?;
+    save_to_file(&project, output_path)
+}
+
+fn save_to_file(project: &ExportProject, output_path: &Path) -> Result<(), ExportError> {
+    let parent = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".writer-export-{}.tmp", ulid::Ulid::generate()));
+    let file = OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+    let result = (|| {
+        let mut writer = BufWriter::new(file);
+        build(project, &mut writer)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        drop(writer);
+        std::fs::rename(&temporary, output_path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// 읽어 둔 프로젝트 원고를 ePub 아카이브로 만들어 스트림에 쓴다.
+pub fn build<W: Write + Seek>(project: &ExportProject, writer: &mut W) -> Result<(), ExportError> {
     let mut zip = zip::ZipWriter::new(writer);
 
     // 1. mimetype: 반드시 첫 번째 파일이며 압축 없이(Stored) 저장되어야 함 (EPUB 규격 필수).
@@ -434,8 +476,8 @@ pub fn build_epub<W: Write + Seek>(project: &CompileProject, writer: &mut W) -> 
     zip.start_file("META-INF/container.xml", deflated_options)?;
     zip.write_all(container_xml().as_bytes())?;
 
-    // 3. EPubBuilder 상태 초기화 및 표지 확인
-    let mut builder = EPubBuilder::new(project);
+    // 3. 생성 상태 초기화 및 표지 확인
+    let mut builder = EpubBuilder::new(project);
 
     let cover_path = project.book.cover_path(&project.dir).filter(|p| p.is_file());
     let has_cover = if let Some(path) = cover_path {
@@ -520,10 +562,9 @@ pub fn build_epub<W: Write + Seek>(project: &CompileProject, writer: &mut W) -> 
 
     // 8. 이미지 에셋 저장
     for img in &builder.images {
-        if let Ok(bytes) = std::fs::read(&img.source_path) {
-            zip.start_file(format!("OEBPS/{}", img.zip_path), deflated_options)?;
-            zip.write_all(&bytes)?;
-        }
+        let mut image = File::open(&img.source_path)?;
+        zip.start_file(format!("OEBPS/{}", img.zip_path), deflated_options)?;
+        std::io::copy(&mut image, &mut zip)?;
     }
 
     // 9. 목차 생성 (toc.ncx)
@@ -681,7 +722,7 @@ fn resolve_image_path(sheet_dir: &Path, project_dir: &Path, destination: &str) -
 }
 
 /// 프로젝트 책 스타일(`[styles.*]`)을 반영한 CSS를 생성한다.
-fn generate_css(project: &CompileProject) -> String {
+fn generate_css(project: &ExportProject) -> String {
     let body_style = project.styles.resolve(StyleTarget::Body);
     let part_style = project.styles.resolve(StyleTarget::Part);
     let chapter_style = project.styles.resolve(StyleTarget::Chapter);
@@ -911,7 +952,7 @@ section.footnotes {{
 }
 
 /// EPUB NCX (`toc.ncx`) 생성.
-fn generate_toc_ncx(project: &CompileProject, sections: &[Section], toc_items: &[TocItem]) -> String {
+fn generate_toc_ncx(project: &ExportProject, sections: &[Section], toc_items: &[TocItem]) -> String {
     let title = if project.book.title.is_empty() {
         &project.name
     } else {
@@ -977,7 +1018,7 @@ fn generate_toc_ncx(project: &CompileProject, sections: &[Section], toc_items: &
 
 /// `OEBPS/content.opf` (패키지 문서) 생성.
 fn generate_content_opf(
-    project: &CompileProject,
+    project: &ExportProject,
     has_cover: bool,
     sections: &[Section],
     images: &[ImageAsset],
@@ -1087,7 +1128,7 @@ fn generate_content_opf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::CompileSheet;
+    use crate::export::ExportSheet;
     use crate::library::{BookMeta, Styles};
     use std::io::Cursor;
 
@@ -1096,7 +1137,7 @@ mod tests {
         let mut styles = Styles::default();
         styles.chapter.prefix = Some("제{n}장 ".to_string());
 
-        let project = CompileProject {
+        let project = ExportProject {
             name: "테스트 프로젝트".to_string(),
             dir: PathBuf::from("fake/project"),
             book: BookMeta {
@@ -1109,17 +1150,17 @@ mod tests {
             },
             styles,
             sheets: vec![
-                CompileSheet {
+                ExportSheet {
                     path: PathBuf::from("fake/project/01.md"),
                     glued: false,
                     content: "# 1부 시작\n\n부 제목은 기본이 별도 제목 페이지(도비라)다.\n".to_string(),
                 },
-                CompileSheet {
+                ExportSheet {
                     path: PathBuf::from("fake/project/02.md"),
                     glued: true,
                     content: "## 첫 이야기\n\n이 문장은 앞 시트에 이어진 본문이다.\n".to_string(),
                 },
-                CompileSheet {
+                ExportSheet {
                     path: PathBuf::from("fake/project/03.md"),
                     glued: false,
                     content: "## 두 번째 이야기\n\n모험을 떠났습니다.\n".to_string(),
@@ -1128,7 +1169,7 @@ mod tests {
         };
 
         let mut buffer = Cursor::new(Vec::new());
-        build_epub(&project, &mut buffer).unwrap();
+        build(&project, &mut buffer).unwrap();
 
         let bytes = buffer.into_inner();
         assert!(!bytes.is_empty());
@@ -1187,12 +1228,12 @@ mod tests {
         let mut styles = Styles::default();
         styles.chapter.prefix = Some("제{n}장\n".to_string());
 
-        let project = CompileProject {
+        let project = ExportProject {
             name: "테스트".to_string(),
             dir: PathBuf::from("fake/project"),
             book: BookMeta::default(),
             styles,
-            sheets: vec![CompileSheet {
+            sheets: vec![ExportSheet {
                 path: PathBuf::from("fake/project/01.md"),
                 glued: false,
                 content: "## 첫 이야기\n\n본문.\n".to_string(),
@@ -1200,7 +1241,7 @@ mod tests {
         };
 
         let mut buffer = Cursor::new(Vec::new());
-        build_epub(&project, &mut buffer).unwrap();
+        build(&project, &mut buffer).unwrap();
 
         let mut reader = zip::ZipArchive::new(Cursor::new(buffer.into_inner())).unwrap();
         let mut ncx = reader.by_name("OEBPS/toc.ncx").unwrap();
@@ -1211,12 +1252,12 @@ mod tests {
 
     #[test]
     fn toc_flattens_title_break() {
-        let project = CompileProject {
+        let project = ExportProject {
             name: "테스트".to_string(),
             dir: PathBuf::from("fake/project"),
             book: BookMeta::default(),
             styles: Styles::default(),
-            sheets: vec![CompileSheet {
+            sheets: vec![ExportSheet {
                 path: PathBuf::from("fake/project/01.md"),
                 glued: false,
                 content: "## 제목<br>부제\n\n본문.\n".to_string(),
@@ -1224,7 +1265,7 @@ mod tests {
         };
 
         let mut buffer = Cursor::new(Vec::new());
-        build_epub(&project, &mut buffer).unwrap();
+        build(&project, &mut buffer).unwrap();
 
         let mut reader = zip::ZipArchive::new(Cursor::new(buffer.into_inner())).unwrap();
         let mut ncx = reader.by_name("OEBPS/toc.ncx").unwrap();

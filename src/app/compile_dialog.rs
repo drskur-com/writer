@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use super::WriterApp;
 use super::style::*;
-use crate::compile::compile_epub_to_file;
+use crate::export::epub;
 use crate::{icons, library};
 
 /// 컴파일 대화상자 폭.
@@ -57,6 +57,8 @@ impl CompileFormat {
 pub struct CompileDialog {
     app: WeakEntity<WriterApp>,
     project_dir: PathBuf,
+    /// 에디터에서 열었으면 라이브러리 루트와 선택 경로로 범위를 한정한다.
+    selection: Option<(PathBuf, Vec<PathBuf>)>,
     project_name: String,
     book: library::BookMeta,
     sheet_count: usize,
@@ -74,6 +76,7 @@ impl CompileDialog {
         Self {
             app,
             project_dir,
+            selection: None,
             project_name,
             book,
             sheet_count,
@@ -85,6 +88,7 @@ impl CompileDialog {
     fn start_compile(&self, window: &mut Window, cx: &mut Context<Self>) {
         let app = self.app.clone();
         let project_dir = self.project_dir.clone();
+        let selection = self.selection.clone();
         let format = self.format;
 
         let title = if self.book.title.trim().is_empty() {
@@ -112,7 +116,12 @@ impl CompileDialog {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    compile_epub_to_file(&project_path, &target_path)
+                    match selection {
+                        Some((root, selected)) => {
+                            epub::export_selection_to_file(&root, &selected, &target_path)
+                        }
+                        None => epub::export_to_file(&project_path, &target_path),
+                    }
                 })
                 .await;
 
@@ -310,35 +319,6 @@ impl Render for CompileDialog {
                             })),
                     ),
             )
-            .child(
-                // ePub 상세 안내
-                div()
-                    .px_3()
-                    .py_2p5()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(pal.border)
-                    .bg(pal.panel)
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(pal.muted)
-                    .child(
-                        div()
-                            .font_medium()
-                            .text_color(pal.foreground)
-                            .child("포함 정보"),
-                    )
-                    .child(div().child("• 원고 시트 순서 및 접합(연결) 여부 반영"))
-                    .child(div().child("• 프로젝트 책 스타일(글꼴 크기, 여백, 문단 들여쓰기) 적용"))
-                    .child(div().child(if self.book.cover.is_some() {
-                        "• 표지 이미지 포함 (Extras/Attachments/cover)"
-                    } else {
-                        "• 표지 이미지 없음 (기본 표지 생략)"
-                    }))
-                    .child(div().child("• 제목(H1~H6) 기반 TOC 목차(toc.ncx) 자동 생성")),
-            )
     }
 }
 
@@ -373,13 +353,61 @@ impl WriterApp {
                 sheet_count,
             )
         });
+        self.show_compile_dialog(dialog_view, "프로젝트 컴파일", window, cx);
+    }
 
+    /// 에디터에서 선택한 범위를 미리보기와 같은 방식으로 컴파일한다.
+    pub(super) fn open_selection_compile_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selected) = self.editor_selection() else {
+            self.notify("컴파일할 그룹이나 시트를 선택하세요.", window, cx);
+            return;
+        };
+        let Some(root) = self.library.as_ref().map(|lib| lib.root.clone()) else {
+            return;
+        };
+        if let Err(err) = self.save_open_sheet(cx) {
+            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+            return;
+        }
+        let project = match crate::export::load_selection(&root, &selected) {
+            Ok(project) => project,
+            Err(err) => {
+                self.notify(format!("컴파일할 원고를 읽을 수 없습니다: {err}"), window, cx);
+                return;
+            }
+        };
+        let app = cx.entity().downgrade();
+        let dialog_view = cx.new(|_| {
+            let mut dialog = CompileDialog::new(
+                app,
+                project.dir,
+                project.name,
+                project.book,
+                project.sheets.len(),
+            );
+            dialog.selection = Some((root, selected));
+            dialog
+        });
+        self.show_compile_dialog(dialog_view, "선택 범위 컴파일", window, cx);
+    }
+
+    fn show_compile_dialog(
+        &self,
+        dialog_view: Entity<CompileDialog>,
+        title: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let compile_action_view = dialog_view.clone();
         window.open_dialog(cx, move |dialog, _, _| {
             let ok_view = compile_action_view.clone();
             dialog
                 .w(px(DIALOG_WIDTH))
-                .title("프로젝트 컴파일")
+                .title(title)
                 .close_button(true)
                 .child(dialog_view.clone())
                 .footer(

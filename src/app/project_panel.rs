@@ -112,6 +112,7 @@ impl WriterApp {
                             }),
                         ),
                     )
+                    .child(div().flex_1())
                     .child(self.project_more_button(project.path.clone(), cx, pal)),
             )
             .child(
@@ -146,21 +147,10 @@ impl WriterApp {
             .size(px(30.0))
             .rounded(px(15.0))
             .dropdown_menu(move |menu, _, _| {
-                let (compile_app, compile_dir) = (app.clone(), dir.clone());
                 let (edit_app, edit_dir) = (app.clone(), dir.clone());
                 let (book_app, book_dir) = (app.clone(), dir.clone());
                 let (style_app, style_dir) = (app.clone(), dir.clone());
                 menu.min_w(px(200.0))
-                    .item(
-                        PopupMenuItem::element(move |_, _| {
-                            menu_row(icons::build(), "프로젝트 컴파일 (ePub)…", None)
-                        })
-                        .on_click(move |_, window, cx| {
-                            compile_app
-                                .update(cx, |app, cx| app.open_compile_dialog(&compile_dir, window, cx))
-                                .ok();
-                        }),
-                    )
                     .item(
                         PopupMenuItem::element(move |_, _| {
                             menu_row(icons::edit(), "프로젝트 편집…", None)

@@ -228,6 +228,12 @@ impl WriterApp {
             self.notify(format!("순서를 저장할 수 없습니다: {err}"), window, cx);
             return;
         }
+        if !self.selected_sheets.is_empty() {
+            self.selected_sheets = group.sheets.iter()
+                .filter(|sheet| self.selected_sheets.contains(&sheet.path))
+                .map(|sheet| sheet.path.clone())
+                .collect();
+        }
         cx.notify();
     }
 

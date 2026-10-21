@@ -4,7 +4,7 @@ use gpui_kit::gpui::*;
 
 mod app;
 mod assets;
-pub mod compile;
+pub mod export;
 mod config;
 mod dock_icon;
 mod icons;

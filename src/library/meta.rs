@@ -68,41 +68,42 @@ pub(super) fn write_group_meta_if_absent(
 /// 그룹 안에서 시트를 `from` 위치에서 `to` 위치로 옮기고, 새 순서를 `.writer.toml`에 쓴다.
 ///
 /// 범위를 벗어나면 아무것도 하지 않는다. 쓰기에 실패하면 메모리의 순서도 되돌린다.
-/// 접합한 시트는 묶음째 옮긴다(ADR-0012). 놓는 자리가 다른 묶음이면 그 묶음 앞(위로 옮길 때)이나
-/// 뒤(아래로 옮길 때)에 놓아 묶음을 가르지 않는다. 같은 묶음 안에 놓으면 그대로 둔다.
+/// 개별 시트를 옮긴다(ADR-0014). 같은 접합 안에서는 접합을 유지하고, 밖으로 빼면
+/// 옮긴 시트만 해제한다. 다른 접합의 두 시트 사이에 넣으면 그 접합에 들어간다.
+/// `to`는 이동 후 시트 위치다. 위로 옮기면 대상 앞, 아래로 옮기면 대상 뒤에 놓는다.
 pub fn move_sheet(group: &mut Group, from: usize, to: usize) -> io::Result<()> {
     if from >= group.sheets.len() || to >= group.sheets.len() || from == to {
         return Ok(());
     }
-    let block = glued_block(group, from);
-    let target = glued_block(group, to);
-    if block == target {
-        return Ok(());
-    }
     let before = group.sheets.clone();
-    let moved: Vec<_> = group.sheets.drain(block.clone()).collect();
-    // 묶음을 빼낸 뒤의 자리: 위로 옮기면 대상 묶음 앞, 아래로 옮기면 대상 묶음 뒤.
-    let at = if target.start < block.start {
-        target.start
+    // 이동 전 접합 소속을 임시 번호로 보존한다. 메타에는 앞 시트에 이어짐만 저장한다.
+    let mut membership = Vec::with_capacity(group.sheets.len());
+    let mut block = 0;
+    for (index, sheet) in group.sheets.iter().enumerate() {
+        if index > 0 && !sheet.glued {
+            block += 1;
+        }
+        membership.push(block);
+    }
+    let source = membership[from];
+    let same_block = source == membership[to];
+    let moved = group.sheets.remove(from);
+    membership.remove(from);
+    let destination = if same_block {
+        source
     } else {
-        target.end - block.len()
+        // 양쪽 이웃이 같은 접합에 속할 때만 접합 내부에 놓인 것이다.
+        match (to.checked_sub(1).and_then(|index| membership.get(index)), membership.get(to)) {
+            (Some(left), Some(right)) if left == right => *left,
+            _ => block + 1,
+        }
     };
-    group.sheets.splice(at..at, moved);
+    group.sheets.insert(to, moved);
+    membership.insert(to, destination);
+    for (index, sheet) in group.sheets.iter_mut().enumerate() {
+        sheet.glued = index > 0 && membership[index - 1] == membership[index];
+    }
     write_order_and_glue(group, before)
-}
-
-/// `index` 시트가 든 접합 묶음(접합하지 않은 시트는 자기 하나).
-fn glued_block(group: &Group, index: usize) -> Range<usize> {
-    let glued = |index: usize| index > 0 && group.sheets[index].glued;
-    let mut start = index;
-    while glued(start) {
-        start -= 1;
-    }
-    let mut end = index + 1;
-    while end < group.sheets.len() && group.sheets[end].glued {
-        end += 1;
-    }
-    start..end
 }
 
 /// `range`의 시트를 하나로 잇는다: 첫 시트 뒤의 시트를 모두 앞 시트에 접합한다.
@@ -762,21 +763,39 @@ mod tests {
         let text = std::fs::read_to_string(inbox.join(GROUP_META_FILE)).unwrap();
         assert!(!text.contains("glued"), "{text}");
 
-        // 접합한 시트는 묶음째 옮기고, 다른 묶음을 가르지 않는다.
-        glue_sheets(&mut group, 1..3).unwrap(); // a [b c] d
+        // 접합 내 이동은 유지, 외부로 빼면 해당 시트만 해제, 내부로 넣으면 접합한다.
+        glue_sheets(&mut group, 0..3).unwrap(); // [a b c] d
+        let initial = group.sheets.clone();
         let order = |group: &Group| -> Vec<String> { group.sheets.iter().map(stem).collect() };
-        move_sheet(&mut group, 2, 3).unwrap();
-        assert_eq!(order(&group), vec!["a", "d", "b", "c"]);
-        assert_eq!(glued(&group), vec![false, false, false, true]);
-        move_sheet(&mut group, 0, 3).unwrap();
-        assert_eq!(order(&group), vec!["d", "b", "c", "a"]);
-        move_sheet(&mut group, 3, 2).unwrap(); // c 위에 놓으면 묶음 앞으로
-        assert_eq!(order(&group), vec!["d", "a", "b", "c"]);
-        move_sheet(&mut group, 2, 3).unwrap(); // 같은 묶음 안은 그대로
-        assert_eq!(order(&group), vec!["d", "a", "b", "c"]);
+        for (from, to, expected_order, expected_glue) in [
+            (0, 2, ["b", "c", "a", "d"], [false, true, true, false]),
+            (1, 0, ["b", "a", "c", "d"], [false, true, true, false]),
+            (1, 3, ["a", "c", "d", "b"], [false, true, false, false]),
+            (0, 3, ["b", "c", "d", "a"], [false, true, false, false]),
+            (2, 3, ["a", "b", "d", "c"], [false, true, false, false]),
+            (3, 0, ["d", "a", "b", "c"], [false, false, true, true]),
+            (3, 1, ["a", "d", "b", "c"], [false, true, true, true]),
+        ] {
+            group.sheets = initial.clone();
+            move_sheet(&mut group, from, to).unwrap();
+            assert_eq!(order(&group), expected_order, "{from} → {to}");
+            assert_eq!(glued(&group), expected_glue, "{from} → {to}");
+            let rescanned = scan_group(&inbox, false).unwrap();
+            assert_eq!(order(&rescanned), order(&group));
+            assert_eq!(glued(&rescanned), glued(&group));
+        }
+
+        // 다른 접합으로 옮겨도 남은 시트들의 접합은 유지된다.
+        group.sheets = initial;
+        unglue_sheets(&mut group, 0..4).unwrap();
+        glue_sheets(&mut group, 0..2).unwrap(); // [a b] c d
+        glue_sheets(&mut group, 2..4).unwrap(); // [a b] [c d]
+        move_sheet(&mut group, 1, 2).unwrap(); // a [c b d]
+        assert_eq!(order(&group), vec!["a", "c", "b", "d"]);
+        assert_eq!(glued(&group), vec![false, false, true, true]);
         let rescanned = scan_group(&inbox, false).unwrap();
         assert_eq!(order(&rescanned), order(&group));
-        assert_eq!(glued(&rescanned), vec![false, false, false, true]);
+        assert_eq!(glued(&rescanned), glued(&group));
 
         std::fs::remove_dir_all(&root).ok();
     }

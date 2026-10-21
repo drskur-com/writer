@@ -43,26 +43,22 @@ pub(super) fn sheet_label(preview: Option<&library::Preview>) -> String {
     }
 }
 
-/// 끄는 접합 묶음 미리보기에 보일 최대 시트 수. 넘으면 "외 N개"로 줄인다.
-const DRAG_PREVIEW_MAX_SHEETS: usize = 5;
-
 /// 시트 목록에서 끌고 있는 시트. 끄는 동안 커서를 따라다니는 미리보기로도 그린다.
 /// 파일 그룹의 파일을 끌 때도 같은 모양을 쓴다.
 #[derive(Clone)]
 pub(super) struct DraggedSheet {
     /// 그룹 안에서의 원래 위치.
     pub(super) index: usize,
-    /// 함께 옮기는 시트 이름(목록 순서). 접합 묶음이면 여럿이다(ADR-0012).
+    /// 옮기는 시트 또는 파일 하나의 이름.
     pub(super) labels: Vec<SharedString>,
     pub(super) pal: Palette,
 }
 
 impl Render for DraggedSheet {
-    /// 시트 하나는 이름 한 줄. 접합 묶음은 한 덩어리로 옮겨 가는 것이 보이게 이름을 이어 붙이고
-    /// 목록처럼 왼쪽 선으로 잇는다.
+    /// 끄는 시트 하나의 이름을 보여 준다.
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let pal = self.pal;
-        let card = div()
+        div()
             .px_3()
             .py_2()
             .max_w(px(SHEET_COLUMN_WIDTH - 32.0))
@@ -72,50 +68,10 @@ impl Render for DraggedSheet {
             .bg(pal.background)
             .shadow_md()
             .text_sm()
-            .text_color(pal.foreground);
-        if self.labels.len() < 2 {
-            return card
-                .truncate()
-                .font_semibold()
-                .children(self.labels.first().cloned());
-        }
-        let rest = self.labels.len().saturating_sub(DRAG_PREVIEW_MAX_SHEETS);
-        let lines = self
-            .labels
-            .iter()
-            .take(DRAG_PREVIEW_MAX_SHEETS)
-            .map(|label| {
-                div()
-                    .h(px(TITLE_LINE_HEIGHT))
-                    .line_height(px(TITLE_LINE_HEIGHT))
-                    .truncate()
-                    .font_semibold()
-                    .child(label.clone())
-            });
-        card.flex()
-            .gap_2()
-            .child(
-                div()
-                    .w(px(GLUE_BAR_WIDTH))
-                    .flex_shrink_0()
-                    .rounded_full()
-                    .bg(pal.accent),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .children(lines)
-                    .when(rest > 0, |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(pal.muted)
-                                .child(format!("외 {rest}개 시트")),
-                        )
-                    }),
-            )
+            .text_color(pal.foreground)
+            .truncate()
+            .font_semibold()
+            .children(self.labels.first().cloned())
     }
 }
 
@@ -281,20 +237,15 @@ impl WriterApp {
                 .enumerate()
                 .map(|(index, sheet)| group_path.is_some() && index > 0 && sheet.glued)
                 .collect();
-            // 끄는 중이면 놓일 자리: (시트 위치, 위쪽인지). 접합 묶음은 묶음째 옮기므로(ADR-0012)
-            // 대상 묶음의 앞(위로 옮길 때)이나 뒤(아래로 옮길 때) 가장자리에만 보인다.
+            // 개별 시트의 놓일 자리. 접합 내부의 시트 사이에도 표시한다(ADR-0014).
             let drop_edge =
                 self.sheet_drop
                     .filter(|_| cx.has_active_drag())
                     .and_then(|(from, over)| {
-                        let (block, target) =
-                            (glued_block(&glued, from), glued_block(&glued, over));
-                        if block == target {
+                        if from == over {
                             None
-                        } else if target.start < block.start {
-                            Some((target.start, true))
                         } else {
-                            Some((target.end - 1, false))
+                            Some((over, over < from))
                         }
                     });
             let labels: Vec<SharedString> = sheets
@@ -426,10 +377,10 @@ impl WriterApp {
                 let row = match &group_path {
                     Some(group_path) => {
                         let group_path = group_path.clone();
-                        // 접합 묶음은 묶음째 옮기므로 미리보기도 묶음 전체다.
+                        // 접합 여부와 무관하게 끄는 시트 하나만 옮긴다.
                         let dragged = DraggedSheet {
                             index,
-                            labels: labels[glued_block(&glued, index)].to_vec(),
+                            labels: vec![labels[index].clone()],
                             pal,
                         };
                         row.on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
@@ -537,19 +488,6 @@ impl WriterApp {
             )
             .child(list)
     }
-}
-
-/// `index` 시트가 든 접합 묶음(`glued[i]` = i번 시트가 앞 시트에 이어짐). `library::move_sheet`와 같은 규칙이다.
-fn glued_block(glued: &[bool], index: usize) -> std::ops::Range<usize> {
-    let mut start = index;
-    while start > 0 && glued[start] {
-        start -= 1;
-    }
-    let mut end = index + 1;
-    while glued.get(end).copied().unwrap_or(false) {
-        end += 1;
-    }
-    start..end
 }
 
 /// 시트 카드 우클릭 메뉴: 시트 접합, 접합 해제.

@@ -103,6 +103,25 @@ fn load_source(project_dir: &Path) -> io::Result<BookSource> {
     })
 }
 
+/// 선택한 그룹 또는 시트의 접합 묶음만 읽는다.
+fn load_selection(root: &Path, selected: &[PathBuf]) -> io::Result<BookSource> {
+    let project = crate::export::load_selection(root, selected).map_err(io::Error::other)?;
+    let chunks = project.sheets.into_iter().map(|sheet| {
+        Chunk {
+            dir: sheet.path.parent().map(Path::to_path_buf).unwrap_or_default(),
+            glued: sheet.glued,
+            blocks: markdown::blocks(&sheet.content),
+        }
+    }).collect();
+    Ok(BookSource {
+        title: project.name,
+        authors: Vec::new(),
+        cover: None,
+        styles: project.styles,
+        chunks,
+    })
+}
+
 /// 미리보기 기준.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Format {
@@ -233,15 +252,24 @@ struct LayoutKey {
 
 /// 열린 미리보기 창(프로젝트 폴더 → 창).
 #[derive(Default)]
-struct OpenPreviews(HashMap<PathBuf, AnyWindowHandle>);
+struct OpenPreviews(HashMap<(PathBuf, Option<Vec<PathBuf>>), AnyWindowHandle>);
 
 impl Global for OpenPreviews {}
 
 /// 프로젝트 미리보기 창을 연다(이미 열려 있으면 앞으로 가져온다).
 pub(crate) fn open(project: &Path, cx: &mut App) {
+    open_preview(project, None, cx);
+}
+
+pub(super) fn open_selection(root: &Path, selected: &[PathBuf], cx: &mut App) {
+    open_preview(root, Some(selected.to_vec()), cx);
+}
+
+fn open_preview(project: &Path, selected: Option<Vec<PathBuf>>, cx: &mut App) {
+    let key = (project.to_path_buf(), selected.clone());
     if let Some(handle) = cx
         .try_global::<OpenPreviews>()
-        .and_then(|open| open.0.get(project))
+        .and_then(|open| open.0.get(&key))
         .copied()
         && handle
             .update(cx, |_, window, _| window.activate_window())
@@ -278,7 +306,7 @@ pub(crate) fn open(project: &Path, cx: &mut App) {
 
     let dir = project.to_path_buf();
     match gpui_kit::open_window(options, cx, |window, cx| {
-        cx.new(|cx| BookPreview::new(dir, window, cx))
+        cx.new(|cx| BookPreview::new(dir, selected, window, cx))
     }) {
         Ok((handle, _)) => {
             if !cx.has_global::<OpenPreviews>() {
@@ -286,7 +314,7 @@ pub(crate) fn open(project: &Path, cx: &mut App) {
             }
             cx.global_mut::<OpenPreviews>()
                 .0
-                .insert(project.to_path_buf(), handle);
+                .insert(key, handle);
         }
         Err(err) => eprintln!("미리보기 창을 열 수 없습니다: {err}"),
     }
@@ -295,6 +323,7 @@ pub(crate) fn open(project: &Path, cx: &mut App) {
 /// 미리보기 창 화면.
 struct BookPreview {
     project: PathBuf,
+    selected: Option<Vec<PathBuf>>,
     source: Option<Rc<BookSource>>,
     /// 원고를 다시 읽을 때마다 올린다(배치 다시 하기).
     revision: usize,
@@ -315,11 +344,12 @@ struct BookPreview {
 }
 
 impl BookPreview {
-    fn new(project: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(project: PathBuf, selected: Option<Vec<PathBuf>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mut this = Self {
             project,
+            selected,
             source: None,
             revision: 0,
             error: None,
@@ -344,10 +374,16 @@ impl BookPreview {
     /// 원고를 백그라운드에서 다시 읽는다.
     fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let project = self.project.clone();
+        let selected = self.selected.clone();
         self.load_task = Some(cx.spawn_in(window, async move |this, cx| {
             let loaded = cx
                 .background_executor()
-                .spawn(async move { load_source(&project) })
+                .spawn(async move {
+                    match selected {
+                        Some(selected) => load_selection(&project, &selected),
+                        None => load_source(&project),
+                    }
+                })
                 .await;
             this.update_in(cx, |this, window, cx| {
                 match loaded {
@@ -488,7 +524,7 @@ impl BookPreview {
             let target = output_path.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { crate::compile::compile_epub_to_file(&project, &target) })
+                .spawn(async move { crate::export::epub::export_to_file(&project, &target) })
                 .await;
 
             this.update_in(cx, |_this, window, cx| {
@@ -762,13 +798,13 @@ impl BookPreview {
                         .when_some(toc_menu, |this, menu| this.child(menu)),
                 )
                 .child(navigation)
-                .child(
+                .when(self.selected.is_none(), |this| this.child(
                     tool_group(pal).child(
                         icon_button("export-epub", icons::export(), true, pal).on_click(
                             cx.listener(|this, _, window, cx| this.export_epub(window, cx)),
                         ),
                     ),
-                ),
+                )),
         )
         .into_any_element()
     }

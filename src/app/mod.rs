@@ -51,7 +51,6 @@ enum Selection {
 pub(crate) struct WriterApp {
     /// 사이드바 1단(섹션+그룹) 표시 여부. 2단(시트 목록)은 항상 보인다.
     sidebar_visible: bool,
-    preview_visible: bool,
     library: Option<library::Library>,
     /// 접힌 최상위 섹션(UI 상태; 추후 registry에 저장).
     collapsed_sections: std::collections::HashSet<library::SectionKind>,
@@ -114,7 +113,6 @@ impl WriterApp {
         });
         let mut app = WriterApp {
             sidebar_visible: true,
-            preview_visible: false,
             library,
             notice,
             collapsed_sections: std::collections::HashSet::new(),
@@ -233,9 +231,32 @@ impl WriterApp {
         cx.notify();
     }
 
-    fn on_toggle_preview(&mut self, _: &TogglePreview, _: &mut Window, cx: &mut Context<Self>) {
-        self.preview_visible = !self.preview_visible;
-        cx.notify();
+    fn on_toggle_preview(&mut self, _: &TogglePreview, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(selected) = self.editor_selection() else {
+            self.notify("미리보기할 그룹이나 시트를 선택하세요.", window, cx);
+            return;
+        };
+        let Some(root) = self.library.as_ref().map(|lib| lib.root.clone()) else {
+            return;
+        };
+        if let Err(err) = self.save_open_sheet(cx) {
+            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+            return;
+        }
+        book_preview::open_selection(&root, &selected, cx);
+    }
+
+    /// 에디터의 미리보기·컴파일에서 사용할 선택 항목.
+    fn editor_selection(&self) -> Option<Vec<PathBuf>> {
+        if !self.selected_sheets.is_empty() {
+            return Some(self.selected_sheets.clone());
+        }
+        self.selected_sheet.clone().map(|path| vec![path]).or_else(|| {
+            match self.effective_selection() {
+                Some(Selection::Group(path)) if !self.viewing_file_group() => Some(vec![path]),
+                _ => None,
+            }
+        })
     }
 
     fn on_set_theme(&mut self, action: &SetTheme, _: &mut Window, cx: &mut Context<Self>) {
@@ -479,31 +500,6 @@ impl WriterApp {
                 this.child(self.render_sheet_column(cx, pal))
             })
             .child(self.render_editor_column(cx, pal))
-            .when(self.preview_visible, |this| {
-                this.child(
-                    div()
-                        .w(px(320.0))
-                        .h_full()
-                        .p_4()
-                        .border_l_1()
-                        .border_color(pal.border)
-                        .bg(pal.panel)
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_semibold()
-                                .text_color(pal.muted)
-                                .mb_2()
-                                .child("PREVIEW"),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(pal.muted)
-                                .child("프리뷰 영역 (M4)"),
-                        ),
-                )
-            })
     }
 }
 

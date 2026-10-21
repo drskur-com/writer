@@ -248,18 +248,8 @@ pub fn paragraph() -> IconName {
     IconName::Pilcrow
 }
 
-/// 공유/내보내기.
-pub fn share() -> IconName {
-    IconName::Share
-}
-
 pub fn export() -> IconName {
     IconName::FileUp
-}
-
-/// 프리뷰(오른쪽 패널) 토글.
-pub fn preview() -> IconName {
-    IconName::PanelRight
 }
 
 #[cfg(test)]

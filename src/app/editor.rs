@@ -300,24 +300,20 @@ impl WriterApp {
                 )
                 .child(
                     tool_group(pal)
-                        .child(icon_button("share", icons::share(), false, pal))
                         .child(
-                            icon_button("export", icons::export(), self.active_project().is_some(), pal).on_click(
+                            icon_button("editor-compile", icons::build(), self.editor_selection().is_some(), pal).on_click(
                                 cx.listener(|this, _, window, cx| {
-                                    if let Some(ref project_dir) = this.active_project() {
-                                        this.open_compile_dialog(project_dir, window, cx);
-                                    }
+                                    this.open_selection_compile_dialog(window, cx);
                                 }),
                             ),
+                        )
+                        .child(
+                            icon_button("toggle-preview", icons::book_preview(), self.editor_selection().is_some(), pal)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.on_toggle_preview(&TogglePreview, window, cx)
+                                })),
                         ),
-                )
-                .child(tool_group(pal).child(
-                    icon_button("toggle-preview", icons::preview(), true, pal).on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.on_toggle_preview(&TogglePreview, window, cx)
-                        }),
-                    ),
-                )),
+                ),
         });
 
         let body: AnyElement = match &self.editor {
@@ -504,6 +500,8 @@ impl WriterApp {
         // 마지막 줄 아래 빈 공간(scroll_beyond_last_line)은 코드 에디터 모드에만 있어서
         // EditorState를 쓰고 코드용 기능(줄 번호·들여쓰기 안내선·괄호 자동 닫기·접기)은 끈다.
         // 빈 공간이 없으면 문서 끝에서 커서 여백을 맞추려 끝 너머로 스크롤했다가 되돌아오며 출렁인다.
+        let image_app = cx.entity().downgrade();
+        let image_sheet = path.clone();
         let state = cx.new(|cx| {
             let mut state = EditorState::new(window, cx)
                 .clipboard_text_transform(
@@ -532,18 +530,34 @@ impl WriterApp {
                     }
                     let image = images.measure(&block.text, Some(block.size.width));
                     let mark = block.size.height - image;
+                    let render_image = |size| {
+                        let app = image_app.clone();
+                        let sheet = image_sheet.clone();
+                        let line = block.line;
+                        let original = block.text.clone();
+                        div()
+                            .id(("editor-image", line))
+                            .cursor_pointer()
+                            .on_click(move |event: &ClickEvent, window, cx| {
+                                if event.click_count() == 2 {
+                                    cx.stop_propagation();
+                                    app.update(cx, |app, cx| {
+                                        app.edit_image(&sheet, line, &original, window, cx);
+                                    })
+                                    .ok();
+                                }
+                            })
+                            .child(images.render(&block.text, size, cx))
+                            .into_any_element()
+                    };
                     if mark < px(PAGE_BREAK_HEIGHT) {
-                        return images.render(&block.text, block.size, cx);
+                        return render_image(block.size);
                     }
                     div()
                         .flex()
                         .flex_col()
                         .when(image > px(0.), |this| {
-                            this.child(images.render(
-                                &block.text,
-                                size(block.size.width, image),
-                                cx,
-                            ))
+                            this.child(render_image(size(block.size.width, image)))
                         })
                         .child(page_break_mark(size(block.size.width, mark), cx))
                         .into_any_element()

@@ -16,6 +16,7 @@ use gpui_kit::component::{
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::cell::Cell;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use super::WriterApp;
@@ -52,10 +53,21 @@ enum Source {
 enum ImageSource {
     File(PathBuf),
     Url(String),
+    Existing(String),
+}
+
+struct EditImage {
+    state: Entity<gpui_kit::component::input::EditorState>,
+    range: Range<usize>,
+    original: String,
+    destination: String,
+    source: Source,
+    path: Option<PathBuf>,
 }
 
 /// 대화상자 안의 입력 상태.
 struct InsertImageForm {
+    edit: Option<EditImage>,
     sheet: PathBuf,
     source: Source,
     /// 보여 줄 탭. 프로젝트 시트에만 "첨부파일" 탭이 있다.
@@ -137,6 +149,7 @@ impl InsertImageForm {
             ));
         }
         Self {
+            edit: None,
             sheet,
             source: Source::File,
             tabs: match attachments {
@@ -263,6 +276,15 @@ impl InsertImageForm {
 
     /// 지금 탭에서 고른 이미지. 아직 없으면 `None`.
     fn image(&self, cx: &App) -> Option<ImageSource> {
+        if let Some(edit) = &self.edit {
+            let unchanged = self.source == edit.source && match self.source {
+                Source::Url => self.url.read(cx).value().trim() == edit.destination,
+                _ => self.local_path() == edit.path.as_ref(),
+            };
+            if unchanged {
+                return Some(ImageSource::Existing(edit.destination.clone()));
+            }
+        }
         match self.source {
             Source::Url => {
                 let url = self.url.read(cx).value().trim().to_string();
@@ -290,7 +312,7 @@ impl InsertImageForm {
         let options = self.options(cx);
         let sheet = self.sheet.clone();
         let done = self.app.update(cx, |app, cx| {
-            app.insert_image(&sheet, image, &caption, &options, window, cx)
+            app.insert_image(&sheet, image, &caption, &options, self.edit.as_ref(), window, cx)
         });
         if done.unwrap_or(false) {
             window.close_dialog(cx);
@@ -638,6 +660,66 @@ impl WriterApp {
             self.notify("먼저 시트를 여세요.", window, cx);
             return;
         };
+        self.open_image_dialog(sheet, None, window, cx);
+    }
+
+    pub(super) fn edit_image(
+        &mut self,
+        sheet: &Path,
+        line: usize,
+        original: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        if editor.path() != sheet {
+            return;
+        }
+        let text = editor.state().read(cx).value();
+        let Some((start, current)) = text.split('\n').scan(0, |offset, line| {
+            let start = *offset;
+            *offset += line.len() + 1;
+            Some((start, line))
+        }).nth(line) else {
+            return;
+        };
+        if current != original {
+            return;
+        }
+        let Some(image) = markdown::image_line(current) else {
+            return;
+        };
+        let source = if image.destination.starts_with("http://")
+            || image.destination.starts_with("https://") {
+            Source::Url
+        } else {
+            Source::File
+        };
+        let path = (source == Source::File).then(|| {
+            let path = Path::new(image.destination.strip_prefix("file://").unwrap_or(&image.destination));
+            if path.is_absolute() { path.to_path_buf() }
+            else { sheet.parent().unwrap_or(Path::new("")).join(path) }
+        });
+        let edit = EditImage {
+            state: editor.state().clone(),
+            range: start..start + current.len(),
+            original: current.to_string(),
+            destination: image.destination,
+            source,
+            path,
+        };
+        self.open_image_dialog(sheet.to_path_buf(), Some(edit), window, cx);
+    }
+
+    fn open_image_dialog(
+        &mut self,
+        sheet: PathBuf,
+        edit: Option<EditImage>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let attachments = self.project_of(&sheet).map(|project| {
             let dir = project
                 .join(library::EXTRAS_DIR)
@@ -653,7 +735,26 @@ impl WriterApp {
                 .unwrap_or_default()
         });
         let app = cx.entity().downgrade();
-        let form = cx.new(|cx| InsertImageForm::new(app, sheet, attachments, window, cx));
+        let editing = edit.is_some();
+        let form = cx.new(|cx| {
+            let mut form = InsertImageForm::new(app, sheet, attachments, window, cx);
+            if let Some(edit) = edit {
+                let image = markdown::image_line(&edit.original).unwrap();
+                form.source = edit.source;
+                form.file = edit.path.clone();
+                form.file_modified = form.file.as_deref().map(library::modified_nanos).unwrap_or(0);
+                form.url.update(cx, |state, cx| state.set_value(image.destination, window, cx));
+                form.caption.update(cx, |state, cx| state.set_value(image.alt, window, cx));
+                form.width.update(cx, |state, cx| state.set_value(
+                    image.options.width.map(|v| v.to_string()).unwrap_or_default(), window, cx));
+                form.height.update(cx, |state, cx| state.set_value(
+                    image.options.height.map(|v| v.to_string()).unwrap_or_default(), window, cx));
+                form.align = image.options.align;
+                form.full_page = image.options.full_page;
+                form.edit = Some(edit);
+            }
+            form
+        });
         // 처음 그릴 때만 캡션 칸에 포커스를 줘서 Enter로 바로 넣을 수 있게 한다.
         let initial_focus = Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
@@ -664,7 +765,7 @@ impl WriterApp {
             let ok_form = form.clone();
             dialog
                 .w(px(DIALOG_WIDTH))
-                .title("이미지 삽입")
+                .title(if editing { "이미지 수정" } else { "이미지 삽입" })
                 .close_button(false)
                 .child(form.clone())
                 .footer(
@@ -677,7 +778,7 @@ impl WriterApp {
                         .child(
                             Button::new("insert-image-ok")
                                 .primary()
-                                .label("삽입")
+                                .label(if editing { "저장" } else { "삽입" })
                                 .on_click(move |_, window, cx| {
                                     ok_form.update(cx, |form, cx| form.submit(window, cx));
                                 }),
@@ -695,6 +796,7 @@ impl WriterApp {
         image: ImageSource,
         caption: &str,
         options: &ImageOptions,
+        edit: Option<&EditImage>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -702,7 +804,17 @@ impl WriterApp {
             self.notify("이미지를 넣을 시트가 닫혔습니다.", window, cx);
             return false;
         }
+        if let Some(edit) = edit {
+            let editor = self.editor.as_ref().unwrap();
+            let text = editor.state().read(cx).value();
+            if editor.state() != &edit.state
+                || text.get(edit.range.clone()) != Some(edit.original.as_str()) {
+                self.notify("수정할 이미지가 변경되었습니다. 이미지를 다시 열어 주세요.", window, cx);
+                return false;
+            }
+        }
         let destination = match image {
+            ImageSource::Existing(destination) => destination,
             ImageSource::Url(url) => url,
             ImageSource::File(path) => match self.project_of(sheet) {
                 Some(project) => match library::attach_to_sheet(&project, sheet, &path) {
@@ -721,6 +833,12 @@ impl WriterApp {
         };
         let image = markdown::image(caption, &destination, options);
         editor.state().update(cx, |state, cx| {
+            if let Some(edit) = edit {
+                state.set_selected_range(edit.range.clone(), cx);
+                state.replace(image, window, cx);
+                state.focus(window, cx);
+                return;
+            }
             let text = state.value();
             let cursor = state.cursor().min(text.len());
             let text = paragraph_around(&text[..cursor], &text[cursor..], &image);
