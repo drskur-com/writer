@@ -140,6 +140,30 @@ fn load_selection(root: &Path, selected: &[PathBuf]) -> io::Result<BookSource> {
     })
 }
 
+/// DOCX 판형·서체(컴파일 대화상자). PDF와 같은 판형 값(여백·본문 크기)을 쓴다.
+pub(crate) fn docx_options(
+    paper: Paper,
+    generate_toc: bool,
+    cx: &App,
+) -> crate::export::docx::DocxOptions {
+    let setup = paper.setup();
+    let fonts = layout_fonts(cx);
+    // 테마 서체 같은 시스템 내부 이름(`.`으로 시작)은 Word가 모르므로 적지 않는다.
+    let named = |family: SharedString| (!family.starts_with('.')).then(|| family.to_string());
+    crate::export::docx::DocxOptions {
+        page_width: f32::from(setup.width),
+        page_height: f32::from(setup.height),
+        margin_top: f32::from(setup.margin.top),
+        margin_right: f32::from(setup.margin.right),
+        margin_bottom: f32::from(setup.margin.bottom),
+        margin_left: f32::from(setup.margin.left),
+        font_size: f32::from(setup.font_size),
+        default_font: named(fonts.editor),
+        mono_font: named(fonts.mono).unwrap_or_else(|| "Menlo".into()),
+        generate_toc,
+    }
+}
+
 /// 배치에 쓰는 서체: 설정의 에디터 서체, 리더 기본 서체(테마 서체), 고정폭 서체.
 fn layout_fonts(cx: &App) -> Fonts {
     let theme = cx.theme();

@@ -1,4 +1,4 @@
-//! 프로젝트 컴파일 대화상자: ePub 등의 형식으로 원고를 묶어 내보낸다.
+//! 프로젝트 컴파일 대화상자: ePub·PDF·DOCX로 원고를 묶어 내보낸다.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -9,7 +9,7 @@ use gpui_kit::gpui::*;
 use std::path::{Path, PathBuf};
 
 use super::WriterApp;
-use super::book_preview::{Paper, export_pdf};
+use super::book_preview::{Paper, docx_options, export_pdf};
 use super::style::*;
 use crate::export::epub;
 use crate::{icons, library};
@@ -38,12 +38,15 @@ impl CompileFormat {
         match self {
             CompileFormat::Epub => "표준 전자책 형식 (리더기·스마트폰·태블릿)",
             CompileFormat::Pdf => "인쇄용 고정 판형 문서 (미리보기와 같은 배치)",
-            CompileFormat::Docx => "Microsoft Word 문서 (준비 중)",
+            CompileFormat::Docx => "Microsoft Word 문서 (Word 스타일로 고쳐 쓸 수 있음)",
         }
     }
 
     pub fn is_supported(self) -> bool {
-        matches!(self, CompileFormat::Epub | CompileFormat::Pdf)
+        matches!(
+            self,
+            CompileFormat::Epub | CompileFormat::Pdf | CompileFormat::Docx
+        )
     }
 
     pub fn extension(self) -> &'static str {
@@ -65,9 +68,9 @@ pub struct CompileDialog {
     book: library::BookMeta,
     sheet_count: usize,
     format: CompileFormat,
-    /// PDF 판형.
+    /// PDF·DOCX 판형.
     paper: Paper,
-    /// PDF에 인쇄 차례를 넣는지(미리보기의 "목차 생성"과 같다).
+    /// PDF·DOCX에 차례를 넣는지(미리보기의 "목차 생성"과 같다).
     generate_toc: bool,
 }
 
@@ -142,7 +145,26 @@ impl CompileDialog {
                         Err(err) => Err(err.to_string()),
                     }
                 }
-                _ => cx
+                CompileFormat::Docx => {
+                    let options = cx.update(|_, cx| docx_options(paper, generate_toc, cx));
+                    match options {
+                        Ok(options) => cx
+                            .background_executor()
+                            .spawn(async move {
+                                let project = match selection {
+                                    Some((root, selected)) => {
+                                        crate::export::load_selection(&root, &selected)?
+                                    }
+                                    None => crate::export::load_project(&project_path)?,
+                                };
+                                crate::export::docx::save_to_file(&project, &options, &target_path)
+                            })
+                            .await
+                            .map_err(|err| err.to_string()),
+                        Err(err) => Err(err.to_string()),
+                    }
+                }
+                CompileFormat::Epub => cx
                     .background_executor()
                     .spawn(async move {
                         match selection {
@@ -157,7 +179,8 @@ impl CompileDialog {
             };
             let label = match format {
                 CompileFormat::Pdf => "PDF",
-                _ => "ePub",
+                CompileFormat::Docx => "DOCX",
+                CompileFormat::Epub => "ePub",
             };
 
             let file_display_name = output_path
@@ -343,14 +366,14 @@ impl Render for CompileDialog {
                             })),
                     ),
             )
-            .when(self.format == CompileFormat::Pdf, |this| {
+            .when(matches!(self.format, CompileFormat::Pdf | CompileFormat::Docx), |this| {
                 this.child(self.render_pdf_options(cx, pal))
             })
     }
 }
 
 impl CompileDialog {
-    /// PDF 판형과 차례. 미리보기 창의 PDF 보기와 같은 값이다.
+    /// PDF·DOCX 판형과 차례. PDF는 미리보기 창의 PDF 보기와 같은 값이다.
     fn render_pdf_options(&self, cx: &mut Context<Self>, pal: Palette) -> impl IntoElement {
         let chips = Paper::ALL.into_iter().map(|paper| {
             let selected = self.paper == paper;

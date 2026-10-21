@@ -87,7 +87,7 @@
 | HTML(+CSS 테마) | P0 | AST → html, assets 인라인/폴더 | M7 | ⬜ |
 | RTF | P1 | AST → rtf | M7 | ⬜ |
 | PDF | P1 | 미리보기 배치를 krilla로 그대로(서체 subset·CJK 대체 서체), 미리보기·컴파일 대화상자에서 내보내기(ADR-0014) | M7 | ✅ |
-| DOCX | P2 | `docx` crate 또는 OOXML 직접 | M7 | ⬜ |
+| DOCX | P2 | 원고 블록 → Word 스타일 문서(제목 1~3·각주·목차 필드·구역), zip + OOXML(ADR-0015) | M7 | ✅ |
 | ePub | P2 | zip + XHTML + 목차 + 책 스타일 CSS | M7 | ✅ |
 | 프로젝트 미리보기(PDF·ePub, 별도 창) | P1 | 자체 배치 엔진: 판형/기기별 쪽 나눔·양쪽 정렬·제목 배치·표지·차례·쪽 번호, 폴더 감시로 자동 갱신(ADR-0013) | M7 | ✅ |
 | 클립보드로 내보내기 | P1 | 포맷 선택 → clipboard | M7 | ⬜ |

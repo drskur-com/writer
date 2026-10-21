@@ -26,6 +26,7 @@
 | [0012](./0012-sheet-glue-flag.md) | 시트 접합은 파일을 합치지 않고 그룹 메타 `glued`에 "앞 시트에 이어짐"으로 적는다 | Proposed (이동 규칙 일부 Superseded by 0014) | 2026-10-20 |
 | [0013](./0013-book-preview-window.md) | 프로젝트 미리보기는 별도 창에서 자체 배치 엔진으로 PDF·ePub 페이지를 그린다 | Proposed | 2026-10-21 |
 | [0014](./0014-pdf-export-from-preview-layout.md) | PDF는 미리보기 배치를 그대로 krilla로 찍는다(typst 대신) | Proposed | 2026-10-21 |
+| [0015](./0015-docx-export-word-styles.md) | DOCX는 원고 블록을 Word 스타일 문서로 만든다(미리보기 배치를 옮기지 않는다) | Proposed | 2026-10-21 |
 | [0014](./0014-individual-sheet-move-glue.md) | 시트는 개별로 옮기고 이동 위치에 따라 접합을 유지·해제·추가한다 | Proposed | 2026-10-21 |
 
 ## 작성 규칙

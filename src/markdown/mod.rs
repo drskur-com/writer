@@ -5,7 +5,7 @@
 
 mod book;
 
-pub use book::{Block, Inline, Marks, Rich, manuscript_blocks, plain, rich_text};
+pub use book::{Block, Inline, Marks, Rich, manuscript_blocks, plain, rich_text, superscript};
 
 use std::ops::Range;
 
