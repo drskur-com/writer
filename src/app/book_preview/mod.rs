@@ -7,6 +7,9 @@
 
 mod layout;
 mod page;
+mod pdf;
+
+pub(crate) use pdf::export_pdf;
 
 #[cfg(not(target_os = "macos"))]
 use gpui_kit::component::TitleBar;
@@ -76,7 +79,9 @@ fn load_source(project_dir: &Path) -> io::Result<BookSource> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "프로젝트를 찾을 수 없습니다"))?;
     let book = library::read_book(project_dir);
     let styles = library::read_styles(project_dir);
-    let preserve_line_breaks = styles.resolve(library::StyleTarget::Body).preserve_line_breaks;
+    let preserve_line_breaks = styles
+        .resolve(library::StyleTarget::Body)
+        .preserve_line_breaks;
     let chunks = library::manuscript_sheets(project)
         .into_iter()
         .map(|sheet| {
@@ -109,14 +114,23 @@ fn load_source(project_dir: &Path) -> io::Result<BookSource> {
 /// 선택한 그룹 또는 시트의 접합 묶음만 읽는다.
 fn load_selection(root: &Path, selected: &[PathBuf]) -> io::Result<BookSource> {
     let project = crate::export::load_selection(root, selected).map_err(io::Error::other)?;
-    let preserve_line_breaks = project.styles.resolve(library::StyleTarget::Body).preserve_line_breaks;
-    let chunks = project.sheets.into_iter().map(|sheet| {
-        Chunk {
-            dir: sheet.path.parent().map(Path::to_path_buf).unwrap_or_default(),
+    let preserve_line_breaks = project
+        .styles
+        .resolve(library::StyleTarget::Body)
+        .preserve_line_breaks;
+    let chunks = project
+        .sheets
+        .into_iter()
+        .map(|sheet| Chunk {
+            dir: sheet
+                .path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
             glued: sheet.glued,
             blocks: markdown::manuscript_blocks(&sheet.content, preserve_line_breaks),
-        }
-    }).collect();
+        })
+        .collect();
     Ok(BookSource {
         title: project.name,
         authors: Vec::new(),
@@ -124,6 +138,16 @@ fn load_selection(root: &Path, selected: &[PathBuf]) -> io::Result<BookSource> {
         styles: project.styles,
         chunks,
     })
+}
+
+/// 배치에 쓰는 서체: 설정의 에디터 서체, 리더 기본 서체(테마 서체), 고정폭 서체.
+fn layout_fonts(cx: &App) -> Fonts {
+    let theme = cx.theme();
+    Fonts {
+        editor: Prefs::editor_font_family(cx),
+        reader: theme.font_family.clone(),
+        mono: theme.mono_font_family.clone(),
+    }
 }
 
 /// 미리보기 기준.
@@ -144,7 +168,7 @@ impl Format {
 
 /// PDF 판형.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Paper {
+pub(crate) enum Paper {
     Shinguk,
     A5,
     SixFour,
@@ -153,7 +177,7 @@ enum Paper {
 }
 
 impl Paper {
-    const ALL: [Paper; 5] = [
+    pub(crate) const ALL: [Paper; 5] = [
         Paper::Shinguk,
         Paper::A5,
         Paper::SixFour,
@@ -161,7 +185,7 @@ impl Paper {
         Paper::Letter,
     ];
 
-    fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Paper::Shinguk => "신국판 (152×225mm)",
             Paper::A5 => "A5 (148×210mm)",
@@ -171,7 +195,7 @@ impl Paper {
         }
     }
 
-    fn short_title(self) -> &'static str {
+    pub(crate) fn short_title(self) -> &'static str {
         match self {
             Paper::Shinguk => "신국판",
             Paper::A5 => "A5",
@@ -317,9 +341,7 @@ fn open_preview(project: &Path, selected: Option<Vec<PathBuf>>, cx: &mut App) {
             if !cx.has_global::<OpenPreviews>() {
                 cx.set_global(OpenPreviews::default());
             }
-            cx.global_mut::<OpenPreviews>()
-                .0
-                .insert(key, handle);
+            cx.global_mut::<OpenPreviews>().0.insert(key, handle);
         }
         Err(err) => eprintln!("미리보기 창을 열 수 없습니다: {err}"),
     }
@@ -351,7 +373,12 @@ struct BookPreview {
 }
 
 impl BookPreview {
-    fn new(project: PathBuf, selected: Option<Vec<PathBuf>>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        project: PathBuf,
+        selected: Option<Vec<PathBuf>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mut this = Self {
@@ -446,16 +473,11 @@ impl BookPreview {
     /// 지금 기준의 배치. 원고·판형·서체가 바뀌었으면 다시 배치한다.
     fn ensure_layout(&mut self, window: &mut Window, cx: &App) -> Option<Rc<BookLayout>> {
         let source = self.source.clone()?;
-        let theme = cx.theme();
         let key = LayoutKey {
             revision: self.revision,
             generate_toc: self.generate_toc,
             setup: self.setup(),
-            fonts: Fonts {
-                editor: Prefs::editor_font_family(cx),
-                reader: theme.font_family.clone(),
-                mono: theme.mono_font_family.clone(),
-            },
+            fonts: layout_fonts(cx),
         };
         if let Some((current, layout)) = &self.layout
             && *current == key
@@ -508,6 +530,51 @@ impl BookPreview {
             "right" | "pagedown" | "space" => self.turn_page(1, cx),
             _ => {}
         }
+    }
+
+    /// 지금 보이는 PDF 배치(판형·목차 포함)를 그대로 PDF 파일로 내보낸다.
+    fn export_pdf(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some((_, layout)), Some(source)) = (&self.layout, &self.source) else {
+            return;
+        };
+        if !layout.setup.print {
+            return;
+        }
+        let pdf = pdf::document(layout, &source.title, &source.authors);
+        let default_name = format!("{}.pdf", source.title.trim());
+        let default_dir = self
+            .project
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.project.clone());
+        let receiver = cx.prompt_for_new_path(&default_dir, Some(&default_name));
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(target))) = receiver.await else {
+                return;
+            };
+            let name = target
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::export::pdf::write(&pdf, &target) })
+                .await;
+            this.update_in(cx, |_, window, cx| {
+                let message = match result {
+                    Ok(()) => format!("PDF 내보내기 완료: {name}"),
+                    Err(err) => format!("PDF 내보내기 실패: {err}"),
+                };
+                window.push_notification(
+                    gpui_kit::component::notification::Notification::info(SharedString::from(
+                        message,
+                    )),
+                    cx,
+                );
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// 현재 프로젝트를 ePub 파일로 내보낸다.
@@ -820,13 +887,20 @@ impl BookPreview {
                         .when_some(toc_menu, |this, menu| this.child(menu)),
                 )
                 .child(navigation)
-                .when(self.selected.is_none(), |this| this.child(
-                    tool_group(pal).child(
-                        icon_button("export-epub", icons::export(), true, pal).on_click(
-                            cx.listener(|this, _, window, cx| this.export_epub(window, cx)),
-                        ),
-                    ),
-                )),
+                // PDF는 보이는 배치를 그대로, ePub은 프로젝트 전체를 내보낸다.
+                .when(
+                    self.format == Format::Pdf || self.selected.is_none(),
+                    |this| {
+                        this.child(tool_group(pal).child(
+                            icon_button("export", icons::export(), pages > 0, pal).on_click(
+                                cx.listener(|this, _, window, cx| match this.format {
+                                    Format::Pdf => this.export_pdf(window, cx),
+                                    Format::Epub => this.export_epub(window, cx),
+                                }),
+                            ),
+                        ))
+                    },
+                ),
         )
         .into_any_element()
     }

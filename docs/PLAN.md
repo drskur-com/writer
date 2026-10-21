@@ -279,7 +279,7 @@ Rope(원문)
 
 ### M7 — 내보내기 (5~7일)
 - [ ] 공통: mdast(+ Ulysses 구문 확장 노드) → 렌더러별 writer (Markdown 정규화, HTML+CSS, RTF)
-- [ ] PDF: **typst** crate(폰트 임베딩·CJK 강점) 1순위, 대안 `printpdf`/HTML→시스템 인쇄
+- [x] PDF: 미리보기 배치를 krilla로 그대로 찍는다(ADR-0014, typst 대신)
 - [ ] DOCX: `docx-rs` 또는 OOXML 직접 생성(`zip`+`quick-xml`)
 - [x] ePub: 직접 zip+XHTML(EPUB 3 nav + EPUB 2 ncx 목차 / 표지 / 메타 / 책 스타일 CSS)
 - [ ] 스타일 테마(폰트·여백·헤더/푸터·각주 처리) + 내보내기 프리뷰 다이얼로그

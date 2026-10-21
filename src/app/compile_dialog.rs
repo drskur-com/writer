@@ -1,6 +1,7 @@
 //! 프로젝트 컴파일 대화상자: ePub 등의 형식으로 원고를 묶어 내보낸다.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::{ActiveTheme as _, Icon, StyledExt as _, WindowExt as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
@@ -8,6 +9,7 @@ use gpui_kit::gpui::*;
 use std::path::{Path, PathBuf};
 
 use super::WriterApp;
+use super::book_preview::{Paper, export_pdf};
 use super::style::*;
 use crate::export::epub;
 use crate::{icons, library};
@@ -35,13 +37,13 @@ impl CompileFormat {
     pub fn description(self) -> &'static str {
         match self {
             CompileFormat::Epub => "표준 전자책 형식 (리더기·스마트폰·태블릿)",
-            CompileFormat::Pdf => "인쇄 및 고정 판형 문서 (준비 중)",
+            CompileFormat::Pdf => "인쇄용 고정 판형 문서 (미리보기와 같은 배치)",
             CompileFormat::Docx => "Microsoft Word 문서 (준비 중)",
         }
     }
 
     pub fn is_supported(self) -> bool {
-        matches!(self, CompileFormat::Epub)
+        matches!(self, CompileFormat::Epub | CompileFormat::Pdf)
     }
 
     pub fn extension(self) -> &'static str {
@@ -63,6 +65,10 @@ pub struct CompileDialog {
     book: library::BookMeta,
     sheet_count: usize,
     format: CompileFormat,
+    /// PDF 판형.
+    paper: Paper,
+    /// PDF에 인쇄 차례를 넣는지(미리보기의 "목차 생성"과 같다).
+    generate_toc: bool,
 }
 
 impl CompileDialog {
@@ -81,6 +87,8 @@ impl CompileDialog {
             book,
             sheet_count,
             format: CompileFormat::Epub,
+            paper: Paper::Shinguk,
+            generate_toc: false,
         }
     }
 
@@ -90,6 +98,7 @@ impl CompileDialog {
         let project_dir = self.project_dir.clone();
         let selection = self.selection.clone();
         let format = self.format;
+        let (paper, generate_toc) = (self.paper, self.generate_toc);
 
         let title = if self.book.title.trim().is_empty() {
             &self.project_name
@@ -113,17 +122,43 @@ impl CompileDialog {
             let project_path = project_dir.clone();
             let target_path = output_path.clone();
 
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    match selection {
-                        Some((root, selected)) => {
-                            epub::export_selection_to_file(&root, &selected, &target_path)
-                        }
-                        None => epub::export_to_file(&project_path, &target_path),
+            let result: Result<(), String> = match format {
+                // PDF는 미리보기와 같은 배치가 필요해 UI 스레드에서 배치한 뒤 백그라운드에서 쓴다.
+                CompileFormat::Pdf => {
+                    // 대화상자는 이미 닫혀 뷰가 없을 수 있으므로 창으로 배치한다.
+                    let task = cx.update(|window, cx| {
+                        export_pdf(
+                            project_path,
+                            selection,
+                            paper,
+                            generate_toc,
+                            target_path,
+                            window,
+                            cx,
+                        )
+                    });
+                    match task {
+                        Ok(task) => task.await,
+                        Err(err) => Err(err.to_string()),
                     }
-                })
-                .await;
+                }
+                _ => cx
+                    .background_executor()
+                    .spawn(async move {
+                        match selection {
+                            Some((root, selected)) => {
+                                epub::export_selection_to_file(&root, &selected, &target_path)
+                            }
+                            None => epub::export_to_file(&project_path, &target_path),
+                        }
+                    })
+                    .await
+                    .map_err(|err| err.to_string()),
+            };
+            let label = match format {
+                CompileFormat::Pdf => "PDF",
+                _ => "ePub",
+            };
 
             let file_display_name = output_path
                 .file_name()
@@ -132,20 +167,15 @@ impl CompileDialog {
 
             this.update(cx, |_dialog, cx| {
                 if let Some(app) = app.upgrade() {
-                    app.update(cx, |writer, cx| {
-                        match result {
-                            Ok(()) => {
-                                writer.set_notice(
-                                    format!("ePub 컴파일 완료: {file_display_name}"),
-                                    cx,
-                                );
-                            }
-                            Err(err) => {
-                                writer.set_notice(
-                                    format!("ePub 컴파일 실패: {err}"),
-                                    cx,
-                                );
-                            }
+                    app.update(cx, |writer, cx| match result {
+                        Ok(()) => {
+                            writer.set_notice(
+                                format!("{label} 컴파일 완료: {file_display_name}"),
+                                cx,
+                            );
+                        }
+                        Err(err) => {
+                            writer.set_notice(format!("{label} 컴파일 실패: {err}"), cx);
                         }
                     });
                 }
@@ -206,19 +236,10 @@ impl Render for CompileDialog {
                             .flex()
                             .flex_col()
                             .gap_0p5()
-                            .child(
-                                div()
-                                    .font_semibold()
-                                    .truncate()
-                                    .child(title.to_string()),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(pal.muted)
-                                    .truncate()
-                                    .child(format!("{author_text} · 원고 시트 {}개", self.sheet_count)),
-                            ),
+                            .child(div().font_semibold().truncate().child(title.to_string()))
+                            .child(div().text_xs().text_color(pal.muted).truncate().child(
+                                format!("{author_text} · 원고 시트 {}개", self.sheet_count),
+                            )),
                     ),
             )
             .child(
@@ -251,8 +272,7 @@ impl Render for CompileDialog {
                                                 .hover(|s| s.bg(pal.hover))
                                                 .cursor_pointer()
                                         } else {
-                                            this.border_color(pal.border.opacity(0.5))
-                                                .opacity(0.6)
+                                            this.border_color(pal.border.opacity(0.5)).opacity(0.6)
                                         }
                                     })
                                     .when(is_supported, |this| {
@@ -302,7 +322,11 @@ impl Render for CompileDialog {
                                             .h(px(18.0))
                                             .rounded_full()
                                             .border_1()
-                                            .border_color(if is_selected { pal.accent } else { pal.border })
+                                            .border_color(if is_selected {
+                                                pal.accent
+                                            } else {
+                                                pal.border
+                                            })
                                             .flex()
                                             .items_center()
                                             .justify_center()
@@ -319,17 +343,59 @@ impl Render for CompileDialog {
                             })),
                     ),
             )
+            .when(self.format == CompileFormat::Pdf, |this| {
+                this.child(self.render_pdf_options(cx, pal))
+            })
+    }
+}
+
+impl CompileDialog {
+    /// PDF 판형과 차례. 미리보기 창의 PDF 보기와 같은 값이다.
+    fn render_pdf_options(&self, cx: &mut Context<Self>, pal: Palette) -> impl IntoElement {
+        let chips = Paper::ALL.into_iter().map(|paper| {
+            let selected = self.paper == paper;
+            div()
+                .id(paper.short_title())
+                .px_2p5()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .text_xs()
+                .cursor_pointer()
+                .map(|this| {
+                    if selected {
+                        this.border_color(pal.accent).bg(pal.accent.opacity(0.08))
+                    } else {
+                        this.border_color(pal.border).hover(|s| s.bg(pal.hover))
+                    }
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.paper = paper;
+                    cx.notify();
+                }))
+                .child(paper.title())
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .child(div().font_medium().child("판형"))
+            .child(div().flex().flex_wrap().gap_1p5().children(chips))
+            .child(
+                Checkbox::new("compile-generate-toc")
+                    .label("목차 생성")
+                    .checked(self.generate_toc)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.generate_toc = *checked;
+                        cx.notify();
+                    })),
+            )
     }
 }
 
 impl WriterApp {
     /// 프로젝트 컴파일 대화상자를 연다. 열린 시트를 먼저 저장한다.
-    pub fn open_compile_dialog(
-        &mut self,
-        dir: &Path,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn open_compile_dialog(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(err) = self.save_open_sheet(cx) {
             self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
         }
@@ -344,15 +410,8 @@ impl WriterApp {
         let sheet_count = manuscript.len();
 
         let app = cx.entity().downgrade();
-        let dialog_view = cx.new(|_| {
-            CompileDialog::new(
-                app,
-                dir.to_path_buf(),
-                project_name,
-                book,
-                sheet_count,
-            )
-        });
+        let dialog_view =
+            cx.new(|_| CompileDialog::new(app, dir.to_path_buf(), project_name, book, sheet_count));
         self.show_compile_dialog(dialog_view, "프로젝트 컴파일", window, cx);
     }
 
@@ -376,7 +435,11 @@ impl WriterApp {
         let project = match crate::export::load_selection(&root, &selected) {
             Ok(project) => project,
             Err(err) => {
-                self.notify(format!("컴파일할 원고를 읽을 수 없습니다: {err}"), window, cx);
+                self.notify(
+                    format!("컴파일할 원고를 읽을 수 없습니다: {err}"),
+                    window,
+                    cx,
+                );
                 return;
             }
         };

@@ -86,7 +86,7 @@
 | Markdown(정규화) | P0 | AST → md writer | M7 | ⬜ |
 | HTML(+CSS 테마) | P0 | AST → html, assets 인라인/폴더 | M7 | ⬜ |
 | RTF | P1 | AST → rtf | M7 | ⬜ |
-| PDF | P1 | typst 우선(CJK 폰트 임베딩) | M7 | ⬜ |
+| PDF | P1 | 미리보기 배치를 krilla로 그대로(서체 subset·CJK 대체 서체), 미리보기·컴파일 대화상자에서 내보내기(ADR-0014) | M7 | ✅ |
 | DOCX | P2 | `docx` crate 또는 OOXML 직접 | M7 | ⬜ |
 | ePub | P2 | zip + XHTML + 목차 + 책 스타일 CSS | M7 | ✅ |
 | 프로젝트 미리보기(PDF·ePub, 별도 창) | P1 | 자체 배치 엔진: 판형/기기별 쪽 나눔·양쪽 정렬·제목 배치·표지·차례·쪽 번호, 폴더 감시로 자동 갱신(ADR-0013) | M7 | ✅ |
