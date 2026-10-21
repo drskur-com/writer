@@ -432,6 +432,8 @@ fn walk(node: &Node, text: &str, in_quote: bool, out: &mut Vec<Span>) {
                     push(range.start..range.start + end + 2, SpanKind::Marker);
                 }
             }
+            // 칸 내용 밖(`|`·구분 행·칸 여백)은 기호, 머리 행 내용은 굵게.
+            Node::Table(_) => push_table(node, range, out),
             Node::ThematicBreak(_)
             | Node::ImageReference(_)
             | Node::FootnoteReference(_)
@@ -461,6 +463,35 @@ fn children_range(node: &Node) -> Option<Range<usize>> {
 }
 
 /// 노드 범위에서 자식 범위를 뺀 앞뒤를 기호로 표시한다. 자식이 없으면 전체가 기호다(`#` 단독 등).
+fn push_table(table: &Node, range: Range<usize>, out: &mut Vec<Span>) {
+    let rows = table.children().map(Vec::as_slice).unwrap_or(&[]);
+    let mut contents = Vec::new();
+    for (row_ix, row) in rows.iter().enumerate() {
+        for cell in row.children().into_iter().flatten() {
+            let Some(content) = children_range(cell) else {
+                continue;
+            };
+            if row_ix == 0 {
+                out.push(Span {
+                    range: content.clone(),
+                    kind: SpanKind::Strong,
+                });
+            }
+            contents.push(content);
+        }
+    }
+    let mut start = range.start;
+    for content in contents.into_iter().chain([range.end..range.end]) {
+        if content.start > start {
+            out.push(Span {
+                range: start..content.start,
+                kind: SpanKind::Marker,
+            });
+        }
+        start = start.max(content.end);
+    }
+}
+
 fn push_around_children(node: &Node, range: Range<usize>, out: &mut Vec<Span>) {
     let inner = children_range(node).unwrap_or(range.end..range.end);
     for marker in [range.start..inner.start, inner.end..range.end] {
@@ -609,6 +640,23 @@ mod tests {
         ] {
             assert_eq!(image_line(line), None, "{line}");
         }
+    }
+
+    #[test]
+    fn table_pipes_and_delimiter_are_markers() {
+        let text = "| 이름 | *값* |\n|:--|--:|\n| a |  |\n";
+        let marked = |kind| {
+            spans(text)
+                .into_iter()
+                .filter(|span| span.kind == kind)
+                .map(|span| &text[span.range])
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(marked(SpanKind::Strong), ["이름", "*값*"]);
+        assert_eq!(
+            marked(SpanKind::Marker),
+            ["| ", " | ", " |\n|:--|--:|\n| ", " |  |", "*", "*"]
+        );
     }
 
     #[test]
