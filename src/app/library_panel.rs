@@ -223,8 +223,15 @@ impl WriterApp {
                         );
                     // 같은 범위의 다른 그룹 위로 끌어다 놓으면 그 그룹의 하위로 옮긴다.
                     let row = self.group_drag_handlers(row, &group.path, pal, cx);
-                    // 프로젝트는 우클릭으로 편집·삭제한다.
-                    if kind == library::SectionKind::Projects {
+                    // 프로젝트와 메모 그룹은 우클릭으로 편집·삭제한다. 받은 메모함(Inbox)은
+                    // 라이브러리가 늘 다시 만드는 기본 그룹이라 대상이 아니다.
+                    let is_project = kind == library::SectionKind::Projects;
+                    let editable = is_project
+                        || group
+                            .path
+                            .file_name()
+                            .is_none_or(|name| name != library::DEFAULT_INBOX);
+                    if editable {
                         let app = cx.entity().downgrade();
                         let dir = group.path.clone();
                         rows.push(
@@ -241,7 +248,15 @@ impl WriterApp {
                                             move |_, window, cx| {
                                                 edit_app
                                                     .update(cx, |app, cx| {
-                                                        app.open_edit_project(&edit_dir, window, cx)
+                                                        if is_project {
+                                                            app.open_edit_project(
+                                                                &edit_dir, window, cx,
+                                                            )
+                                                        } else {
+                                                            app.open_edit_group(
+                                                                &edit_dir, true, window, cx,
+                                                            )
+                                                        }
                                                     })
                                                     .ok();
                                             },
@@ -261,11 +276,19 @@ impl WriterApp {
                                             move |_, window, cx| {
                                                 delete_app
                                                     .update(cx, |app, cx| {
-                                                        app.confirm_delete_project(
-                                                            &delete_dir,
-                                                            window,
-                                                            cx,
-                                                        )
+                                                        if is_project {
+                                                            app.confirm_delete_project(
+                                                                &delete_dir,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        } else {
+                                                            app.confirm_delete_group(
+                                                                &delete_dir,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        }
                                                     })
                                                     .ok();
                                             },

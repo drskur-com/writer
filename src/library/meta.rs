@@ -490,8 +490,7 @@ pub fn create_group(
     }
     let dir = create_unique_dir(parent, &base)?;
     let order = write_group_meta(&dir, icon, color).and_then(|()| {
-        // 섹션(`Notes/`·`Projects/`) 바로 아래 그룹은 이름순이라 순서를 적지 않는다.
-        if parent.parent().is_some_and(super::layout::has_marker) {
+        if is_section_dir(parent) {
             return Ok(());
         }
         let mut order = group_order(parent)?;
@@ -505,6 +504,11 @@ pub fn create_group(
         return Err(err);
     }
     Ok(dir)
+}
+
+/// 섹션 폴더(`Notes/`·`Projects/`)인지. 섹션 바로 아래 그룹은 이름순이라 순서를 적지 않는다.
+fn is_section_dir(dir: &Path) -> bool {
+    dir.parent().is_some_and(super::layout::has_marker)
 }
 
 /// 그룹을 다른 그룹의 하위로 옮기고 새 경로를 돌려준다.
@@ -729,7 +733,7 @@ pub fn update_group(
     }
     let mut order = group_order(parent)?;
     let new_dir = update_project(dir, &name, icon, color)?;
-    if new_dir != dir {
+    if new_dir != dir && !is_section_dir(parent) {
         let old = file_name(dir);
         for entry in &mut order {
             if *entry == old {
@@ -803,9 +807,17 @@ mod tests {
             .iter()
             .find(|section| section.kind == SectionKind::Notes)
             .unwrap();
-        assert!(section.entries.iter().any(
-            |entry| matches!(entry, Entry::Group(group) if group.path == dir && group.icon.as_deref() == Some("files"))
-        ));
+        let found = section.entries.iter().any(|entry| match entry {
+            Entry::Group(group) => group.path == dir && group.icon.as_deref() == Some("files"),
+            Entry::Sheet(_) => false,
+        });
+        assert!(found);
+
+        // 이름을 바꿔도 섹션 폴더에 순서 메타를 쓰지 않는다.
+        let renamed = update_group(&dir, "책", Some("book"), Some("red")).unwrap();
+        assert_eq!(renamed, notes.join("책"));
+        assert!(!dir.exists());
+        assert!(!notes.join(GROUP_META_FILE).exists());
         std::fs::remove_dir_all(&root).ok();
     }
 

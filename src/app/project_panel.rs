@@ -527,7 +527,12 @@ impl WriterApp {
     }
 
     /// 확인을 받은 뒤 그룹(하위 그룹 포함)을 운영체제 휴지통으로 옮긴다.
-    fn confirm_delete_group(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn confirm_delete_group(
+        &mut self,
+        dir: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(group) = self.find_group(dir) else {
             return;
         };
