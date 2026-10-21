@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use super::BookSource;
 use crate::library::{self, Align, Placement, ResolvedStyle, StyleTarget, VerticalAlign};
-use crate::markdown::{self, Block, ImageAlign, ImageLine, Inline, Rich};
+use crate::markdown::{self, Block, ColumnAlign, ImageAlign, ImageLine, Inline, Rich, Table};
 
 /// 책 글자색.
 pub(super) const INK: Hsla = Hsla {
@@ -583,7 +583,7 @@ impl<'a> Flow<'a> {
                 );
                 self.space(self.em(1.));
             }
-            Block::Table(rows) => self.table(rows, ctx),
+            Block::Table(table) => self.table(table, ctx),
             Block::Footnotes(notes) => {
                 let scale = 0.85;
                 self.space(self.em(1.5));
@@ -820,54 +820,120 @@ impl<'a> Flow<'a> {
         self.space(style.after);
     }
 
-    fn table(&mut self, rows: &[Vec<Rich>], ctx: &Context) {
-        let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+    fn table(&mut self, table: &Table, ctx: &Context) {
+        let columns = table.columns();
         if columns == 0 {
             return;
         }
         let gap = self.em(0.8);
         let pad = self.em(0.35);
-        let column_width = (ctx.width - gap * (columns - 1) as f32) / columns as f32;
         let base = TextStyle {
             align: Align::Left,
             indent: px(0.),
             ..self.body_style().scaled(0.9 * ctx.scale)
         };
-        self.space(self.em(1.));
+        let header = TextStyle {
+            weight: FontWeight::BOLD,
+            ..base.clone()
+        };
+        let style_of = |row_ix: usize, column: usize| TextStyle {
+            align: match table.align(column) {
+                ColumnAlign::Left => Align::Left,
+                ColumnAlign::Center => Align::Center,
+                ColumnAlign::Right => Align::Right,
+            },
+            ..if row_ix == 0 { header.clone() } else { base.clone() }
+        };
+        // 열 너비는 칸 글자를 한 줄로 놓았을 때의 폭을 따른다.
+        let mut natural = vec![0f32; columns];
+        for (row_ix, row) in table.rows.iter().enumerate() {
+            for (column, cell) in row.iter().enumerate() {
+                let width = self.natural_width(cell, &style_of(row_ix, column));
+                natural[column] = natural[column].max(f32::from(width));
+            }
+        }
+        let available = f32::from(ctx.width - gap * (columns - 1) as f32);
+        let widths: Vec<Pixels> = column_widths(&natural, available).into_iter().map(px).collect();
+        let lefts: Vec<Pixels> = widths
+            .iter()
+            .scan(ctx.left, |left, width| {
+                let this = *left;
+                *left += *width + gap;
+                Some(this)
+            })
+            .collect();
+        let rows: Vec<_> = table
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(row_ix, row)| {
+                let cells: Vec<_> = (0..columns)
+                    .map(|column| {
+                        let style = style_of(row_ix, column);
+                        let empty = Rich::new();
+                        let cell = row.get(column).unwrap_or(&empty);
+                        let (text, runs) = self.runs(cell, &style);
+                        let lines = self.break_lines(&text, &runs, &style, widths[column], px(0.));
+                        (style, text, runs, lines)
+                    })
+                    .collect();
+                let lines = cells.iter().map(|(_, _, _, lines)| lines.len()).max();
+                let height = base.line_height * lines.unwrap_or(1).max(1) as f32 + pad * 2.;
+                (cells, height)
+            })
+            .collect();
         let rule = |top: Pixels| Item::Rule {
             bounds: Bounds::new(point(ctx.left, top), size(ctx.width, px(0.5))),
             color: RULE_INK,
         };
-        for (row_ix, row) in rows.iter().enumerate() {
-            let style = if row_ix == 0 {
-                TextStyle {
-                    weight: FontWeight::BOLD,
-                    ..base.clone()
-                }
-            } else {
-                base.clone()
-            };
-            let cells: Vec<_> = row
-                .iter()
-                .map(|cell| {
-                    let (text, runs) = self.runs(cell, &style);
-                    let lines = self.break_lines(&text, &runs, &style, column_width, px(0.));
-                    (text, runs, lines)
-                })
-                .collect();
-            let row_lines = cells.iter().map(|(_, _, lines)| lines.len()).max();
-            let height = style.line_height * row_lines.unwrap_or(1).max(1) as f32 + pad * 2.;
-            let top = self.reserve(height, px(0.));
-            if row_ix == 0 || top == self.setup.margin.top {
+        let place_row = |this: &mut Self, row_ix: usize, top: Pixels| {
+            let (cells, height) = &rows[row_ix];
+            for (column, (style, text, runs, lines)) in cells.iter().enumerate() {
+                this.place_lines(lines, text, runs, style, lefts[column], top + pad);
+            }
+            this.page.items.push(rule(top + *height));
+        };
+        self.space(self.em(1.));
+        for row_ix in 0..rows.len() {
+            let height = rows[row_ix].1;
+            // 머리 행은 첫 본문 행과 같은 쪽에 둔다.
+            let keep = if row_ix == 0 { rows.get(1).map_or(px(0.), |row| row.1) } else { px(0.) };
+            let mut top = self.reserve(height, keep);
+            let new_page = top == self.setup.margin.top;
+            if row_ix == 0 || new_page {
                 self.page.items.push(rule(top));
             }
-            for (ix, (text, runs, lines)) in cells.iter().enumerate() {
-                let left = ctx.left + (column_width + gap) * ix as f32;
-                self.place_lines(lines, text, runs, &style, left, top + pad);
+            // 다음 쪽으로 넘어간 표는 머리 행을 다시 그린다.
+            if row_ix > 0 && new_page {
+                place_row(self, 0, top);
+                top += rows[0].1;
+                self.y += rows[0].1;
             }
-            self.page.items.push(rule(top + height));
+            place_row(self, row_ix, top);
         }
         self.space(self.em(1.));
+    }
+
+    /// 글자를 줄바꿈하지 않고 놓았을 때 가장 긴 줄의 폭(`\n`은 강제 줄바꿈).
+    fn natural_width(&self, rich: &[Inline], style: &TextStyle) -> Pixels {
+        let (text, runs) = self.runs(rich, style);
+        let mut start = 0;
+        let mut widest = px(0.);
+        for segment in text.split('\n') {
+            let range = start..start + segment.len();
+            start = range.end + 1;
+            if segment.is_empty() {
+                continue;
+            }
+            let layout = self.text_system.layout_line(
+                segment,
+                style.size,
+                &slice_runs(&runs, range),
+                None,
+            );
+            widest = widest.max(layout.x_for_index(segment.len()));
+        }
+        widest
     }
 
     fn image(&mut self, image: &ImageLine, ctx: &Context) {
@@ -1298,6 +1364,40 @@ fn tokens(text: &str) -> Vec<Token> {
     out
 }
 
+/// 표 열 너비. `natural`은 칸 글자를 한 줄로 놓은 폭의 열별 최댓값이다.
+/// 모두 들어가면 남는 폭을 열마다 똑같이 더한다. 넘치면 몫(남은 폭 ÷ 남은 열)보다 좁은 열은 제 폭을
+/// 쓰고, 나머지 열이 남은 폭을 제 폭에 비례해 나눈다.
+fn column_widths(natural: &[f32], available: f32) -> Vec<f32> {
+    let count = natural.len();
+    if count == 0 {
+        return Vec::new();
+    }
+    let total: f32 = natural.iter().sum();
+    if total <= available {
+        let extra = (available - total) / count as f32;
+        return natural.iter().map(|width| width + extra).collect();
+    }
+    let mut fixed = vec![false; count];
+    let mut rest = available;
+    loop {
+        let open = fixed.iter().filter(|fixed| !**fixed).count();
+        let share = rest / open as f32;
+        let narrow: Vec<usize> =
+            (0..count).filter(|&ix| !fixed[ix] && natural[ix] <= share).collect();
+        if narrow.is_empty() || narrow.len() == open {
+            break;
+        }
+        for ix in narrow {
+            fixed[ix] = true;
+            rest -= natural[ix];
+        }
+    }
+    let wide: f32 = (0..count).filter(|&ix| !fixed[ix]).map(|ix| natural[ix]).sum();
+    (0..count)
+        .map(|ix| if fixed[ix] { natural[ix] } else { rest * natural[ix] / wide })
+        .collect()
+}
+
 /// 한 문단 조각(강제 줄바꿈 사이)을 줄로 나눈다. `x`는 바이트 위치의 가로 위치다.
 fn break_segment(
     text: &str,
@@ -1420,7 +1520,7 @@ fn align_line(
 #[cfg(test)]
 mod tests {
     // `gpui::*`의 `test` 매크로와 겹치지 않도록 하나씩 가져온다.
-    use super::{Align, INK, break_segment, slice_runs};
+    use super::{Align, INK, break_segment, column_widths, slice_runs};
     use gpui_kit::gpui::{TextRun, font, px};
 
     /// 글자마다 폭 10인 가짜 측정.
@@ -1526,5 +1626,17 @@ mod tests {
         let runs = vec![run(3), run(4), run(2)];
         let lens: Vec<_> = slice_runs(&runs, 2..8).iter().map(|r| r.len).collect();
         assert_eq!(lens, vec![1, 4, 1]);
+    }
+
+    #[test]
+    fn column_widths_follow_content() {
+        // 다 들어가면 남는 폭을 똑같이 더한다.
+        assert_eq!(column_widths(&[10., 50.], 100.), [30., 70.]);
+        // 넘치면 좁은 열은 제 폭, 넓은 열이 나머지를 비례해 나눈다.
+        assert_eq!(column_widths(&[20., 300., 150.], 170.), [20., 100., 50.]);
+        // 모두 몫보다 넓으면 전부 비례한다.
+        assert_eq!(column_widths(&[200., 200.], 100.), [50., 50.]);
+        // 좁은 열을 빼면 몫이 커져 다음 열도 제 폭에 들어간다.
+        assert_eq!(column_widths(&[10., 45., 200.], 120.), [10., 45., 65.]);
     }
 }

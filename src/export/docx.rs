@@ -22,7 +22,7 @@ use zip::write::SimpleFileOptions;
 
 use super::{ExportError, ExportProject};
 use crate::library::{Align, Placement, ResolvedStyle, StyleTarget, VerticalAlign};
-use crate::markdown::{Block, ImageAlign, ImageLine, Inline, Rich};
+use crate::markdown::{Block, ColumnAlign, ImageAlign, ImageLine, Inline, Rich, Table};
 
 /// 판형과 서체(컴파일 대화상자에서 정한다). 길이는 pt.
 #[derive(Clone, Debug)]
@@ -459,7 +459,7 @@ impl<'a> DocBuilder<'a> {
                     &text_run("", "*\u{2003}*\u{2003}*"),
                 );
             }
-            Block::Table(rows) => self.table(rows),
+            Block::Table(table) => self.table(table),
             // 각주는 참조 자리에서 Word 각주로 넣었다.
             Block::Footnotes(_) => {}
         }
@@ -676,8 +676,8 @@ impl<'a> DocBuilder<'a> {
         )
     }
 
-    fn table(&mut self, rows: &[Vec<Rich>]) {
-        let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+    fn table(&mut self, table: &Table) {
+        let columns = table.columns();
         if columns == 0 {
             return;
         }
@@ -690,7 +690,7 @@ impl<'a> DocBuilder<'a> {
             xml.push_str(&format!(r#"<w:gridCol w:w="{column}"/>"#));
         }
         xml.push_str("</w:tblGrid>");
-        for (row_ix, row) in rows.iter().enumerate() {
+        for (row_ix, row) in table.rows.iter().enumerate() {
             xml.push_str("<w:tr>");
             if row_ix == 0 {
                 xml.push_str("<w:trPr><w:tblHeader/></w:trPr>");
@@ -701,8 +701,13 @@ impl<'a> DocBuilder<'a> {
                     .get(col)
                     .map(|cell| self.runs_with(cell, row_ix == 0))
                     .unwrap_or_default();
+                let jc = match table.align(col) {
+                    ColumnAlign::Left => "",
+                    ColumnAlign::Center => r#"<w:jc w:val="center"/>"#,
+                    ColumnAlign::Right => r#"<w:jc w:val="right"/>"#,
+                };
                 xml.push_str(&format!(
-                    r#"<w:tc><w:tcPr><w:tcW w:w="{column}" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:pStyle w:val="TableText"/></w:pPr>{runs}</w:p></w:tc>"#
+                    r#"<w:tc><w:tcPr><w:tcW w:w="{column}" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:pStyle w:val="TableText"/>{jc}</w:pPr>{runs}</w:p></w:tc>"#
                 ));
             }
             xml.push_str("</w:tr>");

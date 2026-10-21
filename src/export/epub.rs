@@ -18,7 +18,7 @@ use zip::CompressionMethod;
 
 use super::{ExportError, ExportProject, load_project};
 use crate::library::{Align, Placement, ResolvedStyle, StyleTarget, VerticalAlign};
-use crate::markdown::{Block, Inline, Marks, Rich};
+use crate::markdown::{Block, ColumnAlign, Inline, Marks, Rich};
 
 /// XML 특수문자를 이스케이프한다.
 fn escape_xml(s: &str) -> String {
@@ -444,19 +444,29 @@ impl<'a> EpubBuilder<'a> {
                 let sec = self.ensure_section(&self.project.name);
                 sec.html_body.push_str("<hr/>\n");
             }
-            Block::Table(rows) => {
+            Block::Table(table) => {
                 let mut html = String::from("<table>\n");
-                for (r_ix, row) in rows.iter().enumerate() {
+                for (r_ix, row) in table.rows.iter().enumerate() {
+                    if r_ix <= 1 {
+                        html.push_str(if r_ix == 0 { "<thead>\n" } else { "</thead>\n<tbody>\n" });
+                    }
                     html.push_str("<tr>\n");
                     let cell_tag = if r_ix == 0 { "th" } else { "td" };
-                    for cell in row {
+                    for (c_ix, cell) in row.iter().enumerate() {
+                        // 왼쪽은 스타일시트 기본값이라 따로 적지 않는다.
+                        let align = match table.align(c_ix) {
+                            ColumnAlign::Left => "",
+                            ColumnAlign::Center => " style=\"text-align: center\"",
+                            ColumnAlign::Right => " style=\"text-align: right\"",
+                        };
                         html.push_str(&format!(
-                            "  <{cell_tag}>{}</{cell_tag}>\n",
+                            "  <{cell_tag}{align}>{}</{cell_tag}>\n",
                             render_rich(cell, &mut self.notes)
                         ));
                     }
                     html.push_str("</tr>\n");
                 }
+                html.push_str(if table.rows.len() > 1 { "</tbody>\n" } else { "</thead>\n" });
                 html.push_str("</table>\n");
                 self.ensure_section(&self.project.name).html_body.push_str(&html);
             }

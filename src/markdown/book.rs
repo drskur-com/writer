@@ -46,6 +46,35 @@ pub fn rich_text(rich: &[Inline]) -> String {
     rich.iter().map(|inline| inline.text.as_str()).collect()
 }
 
+/// 표 열의 가로 정렬(구분 행의 `:---`·`:---:`·`---:`). 지정이 없으면 왼쪽이다.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColumnAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+/// 표. 첫 행이 머리 행이다. 행마다 칸 수가 다를 수 있다(모자란 칸은 빈 칸).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Table {
+    /// 열마다 정렬. 머리 행의 칸 수만큼 있다.
+    pub align: Vec<ColumnAlign>,
+    pub rows: Vec<Vec<Rich>>,
+}
+
+impl Table {
+    /// 열 수(가장 긴 행 기준).
+    pub fn columns(&self) -> usize {
+        self.rows.iter().map(Vec::len).max().unwrap_or(0).max(self.align.len())
+    }
+
+    /// 열의 정렬. 구분 행보다 칸이 많은 행의 남는 열은 왼쪽이다.
+    pub fn align(&self, column: usize) -> ColumnAlign {
+        self.align.get(column).copied().unwrap_or_default()
+    }
+}
+
 /// 책 블록.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
@@ -70,8 +99,7 @@ pub enum Block {
     Image(ImageLine),
     /// 구분선.
     Rule,
-    /// 표. 첫 행이 머리 행이다.
-    Table(Vec<Vec<Rich>>),
+    Table(Table),
     /// 시트 끝에 모은 각주(번호, 내용).
     Footnotes(Vec<(usize, Vec<Block>)>),
 }
@@ -315,6 +343,17 @@ impl Walk<'_> {
             Node::Math(math) => out.push(Block::Code(math.value.clone())),
             Node::ThematicBreak(_) => out.push(Block::Rule),
             Node::Table(table) => {
+                let align = table
+                    .align
+                    .iter()
+                    .map(|align| match align {
+                        markdown::mdast::AlignKind::Center => ColumnAlign::Center,
+                        markdown::mdast::AlignKind::Right => ColumnAlign::Right,
+                        markdown::mdast::AlignKind::Left | markdown::mdast::AlignKind::None => {
+                            ColumnAlign::Left
+                        }
+                    })
+                    .collect();
                 let rows = table
                     .children
                     .iter()
@@ -325,7 +364,7 @@ impl Walk<'_> {
                             .collect()
                     })
                     .collect();
-                out.push(Block::Table(rows));
+                out.push(Block::Table(Table { align, rows }));
             }
             Node::FootnoteDefinition(definition) => {
                 let body = self.blocks(&definition.children);
@@ -624,7 +663,7 @@ mod tests {
 
     #[test]
     fn lists_quotes_code_rules_and_tables() {
-        let text = "> 인용\n\n3. 셋\n4. 넷\n\n```\nlet a = 1;\n```\n\n---\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let text = "> 인용\n\n3. 셋\n4. 넷\n\n```\nlet a = 1;\n```\n\n---\n\n| a | b | c |\n|---|:-:|--:|\n| 1 | 2 | 3 |\n";
         let blocks = blocks(text);
         assert_eq!(
             blocks[0],
@@ -645,10 +684,13 @@ mod tests {
         assert_eq!(blocks[3], Block::Rule);
         assert_eq!(
             blocks[4],
-            Block::Table(vec![
-                vec![plain("a"), plain("b")],
-                vec![plain("1"), plain("2")],
-            ])
+            Block::Table(Table {
+                align: vec![ColumnAlign::Left, ColumnAlign::Center, ColumnAlign::Right],
+                rows: vec![
+                    vec![plain("a"), plain("b"), plain("c")],
+                    vec![plain("1"), plain("2"), plain("3")],
+                ],
+            })
         );
     }
 
