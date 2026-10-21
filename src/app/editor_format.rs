@@ -50,16 +50,23 @@ fn block_format(line: &str) -> (BlockFormat, usize) {
     let body = line.trim_start_matches([' ', '\t']);
     let indent = line.len() - body.len();
     if let Some(level) = markdown::heading_level(body) {
-        return (BlockFormat::Heading(level), indent + markdown::heading_marker_len(body));
+        return (
+            BlockFormat::Heading(level),
+            indent + markdown::heading_marker_len(body),
+        );
     }
     if body.starts_with("> ") || body == ">" {
         return (BlockFormat::Quote, indent + body.len().min(2));
     }
-    if ["- ", "* ", "+ "].iter().any(|prefix| body.starts_with(prefix)) {
+    if ["- ", "* ", "+ "]
+        .iter()
+        .any(|prefix| body.starts_with(prefix))
+    {
         return (BlockFormat::Bullet, indent + 2);
     }
     let digits = body.bytes().take_while(u8::is_ascii_digit).count();
-    if digits > 0 && digits <= 9
+    if digits > 0
+        && digits <= 9
         && (body[digits..].starts_with(". ") || body[digits..].starts_with(") "))
     {
         return (BlockFormat::Numbered, indent + digits + 2);
@@ -74,7 +81,11 @@ fn line_range(text: &str, at: usize) -> Range<usize> {
 }
 
 /// 파서가 확인한 인라인 서식만 해제한다. 표 머리 행의 굵기는 Markdown 기호가 아니다.
-fn inline_range(text: &str, selection: &Range<usize>, kind: markdown::SpanKind) -> Option<Range<usize>> {
+fn inline_range(
+    text: &str,
+    selection: &Range<usize>,
+    kind: markdown::SpanKind,
+) -> Option<Range<usize>> {
     markdown::spans(text).into_iter().rev().find_map(|span| {
         let source = &text[span.range.clone()];
         let marked = match kind {
@@ -86,8 +97,10 @@ fn inline_range(text: &str, selection: &Range<usize>, kind: markdown::SpanKind) 
             }),
             _ => false,
         };
-        (span.kind == kind && span.range.start <= selection.start
-            && selection.end <= span.range.end && marked)
+        (span.kind == kind
+            && span.range.start <= selection.start
+            && selection.end <= span.range.end
+            && marked)
             .then_some(span.range)
     })
 }
@@ -104,7 +117,9 @@ impl WriterApp {
         tool_group(pal)
             .child(
                 icon_button("format-bold", icons::bold(), enabled, pal)
-                    .when(active(markdown::SpanKind::Strong), |this| this.bg(pal.hover))
+                    .when(active(markdown::SpanKind::Strong), |this| {
+                        this.bg(pal.hover)
+                    })
                     .tooltip(|window, cx| Tooltip::new(bold_shortcut()).build(window, cx))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_inline(markdown::SpanKind::Strong, "**", window, cx);
@@ -112,21 +127,26 @@ impl WriterApp {
             )
             .child(
                 icon_button("format-italic", icons::italic(), enabled, pal)
-                    .when(active(markdown::SpanKind::Emphasis), |this| this.bg(pal.hover))
+                    .when(active(markdown::SpanKind::Emphasis), |this| {
+                        this.bg(pal.hover)
+                    })
                     .tooltip(|window, cx| Tooltip::new(italic_shortcut()).build(window, cx))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_inline(markdown::SpanKind::Emphasis, "_", window, cx);
                     })),
             )
             .child(
-                icon_button("format-link", icons::link(), enabled, pal)
-                    .on_click(cx.listener(|this, _, window, cx| {
+                icon_button("format-link", icons::link(), enabled, pal).on_click(cx.listener(
+                    |this, _, window, cx| {
                         this.open_link_dialog(window, cx);
-                    })),
+                    },
+                )),
             )
             .child(
                 icon_button("format-special-char", icons::by_name("smile"), enabled, pal)
-                    .tooltip(|window, cx| Tooltip::new("특수 문자 및 이모지 (Ctrl+Alt+Space)").build(window, cx))
+                    .tooltip(|window, cx| {
+                        Tooltip::new("특수 문자 및 이모지 (Ctrl+Alt+Space)").build(window, cx)
+                    })
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.on_insert_special_char(&crate::InsertSpecialChar, window, cx);
                     })),
@@ -146,23 +166,36 @@ impl WriterApp {
         editor.state().update(cx, |state, cx| {
             let text = state.value();
             let selected = state.selected_range();
-            let (range, replacement, selection) = if let Some(range) = inline_range(&text, &selected, kind) {
-                let source = &text[range.clone()];
-                let width = if kind == markdown::SpanKind::Strong { 2 } else { 1 };
-                let body = source[width..source.len() - width].to_string();
-                let end = range.start + body.len();
-                let selection = if selected.is_empty() {
-                    let cursor = selected.start.saturating_sub(width).clamp(range.start, end);
-                    cursor..cursor
+            let (range, replacement, selection) =
+                if let Some(range) = inline_range(&text, &selected, kind) {
+                    let source = &text[range.clone()];
+                    let width = if kind == markdown::SpanKind::Strong {
+                        2
+                    } else {
+                        1
+                    };
+                    let body = source[width..source.len() - width].to_string();
+                    let end = range.start + body.len();
+                    let selection = if selected.is_empty() {
+                        let cursor = selected.start.saturating_sub(width).clamp(range.start, end);
+                        cursor..cursor
+                    } else {
+                        range.start..end
+                    };
+                    (range, body, selection)
                 } else {
-                    range.start..end
+                    let body = if selected.is_empty() {
+                        "텍스트"
+                    } else {
+                        &text[selected.clone()]
+                    };
+                    let start = selected.start + marker.len();
+                    (
+                        selected,
+                        format!("{marker}{body}{marker}"),
+                        start..start + body.len(),
+                    )
                 };
-                (range, body, selection)
-            } else {
-                let body = if selected.is_empty() { "텍스트" } else { &text[selected.clone()] };
-                let start = selected.start + marker.len();
-                (selected, format!("{marker}{body}{marker}"), start..start + body.len())
-            };
             state.set_selected_range(range, cx);
             state.replace(replacement, window, cx);
             state.set_selected_range(selection, cx);
@@ -173,7 +206,8 @@ impl WriterApp {
 
     fn block_format_button(&self, cx: &mut Context<Self>, pal: Palette) -> AnyElement {
         let Some(editor) = &self.editor else {
-            return icon_button("format-paragraph", icons::paragraph(), false, pal).into_any_element();
+            return icon_button("format-paragraph", icons::paragraph(), false, pal)
+                .into_any_element();
         };
         let state = editor.state().clone();
         let book = editor.has_book_styles();
@@ -196,17 +230,37 @@ impl WriterApp {
                         (true, 3) => "절 제목".to_string(),
                         _ => format!("제목 {level}"),
                     };
-                    items.push((BlockFormat::Heading(level), format!("H{level}  {title}"), None));
+                    items.push((
+                        BlockFormat::Heading(level),
+                        format!("H{level}  {title}"),
+                        None,
+                    ));
                 }
                 items.extend([
-                    (BlockFormat::Bullet, "순서없는 목록".to_string(), Some(icons::bullet_list())),
-                    (BlockFormat::Numbered, "순서있는 목록".to_string(), Some(icons::numbered_list())),
-                    (BlockFormat::Quote, "블록 인용".to_string(), Some(icons::quote())),
+                    (
+                        BlockFormat::Bullet,
+                        "순서없는 목록".to_string(),
+                        Some(icons::bullet_list()),
+                    ),
+                    (
+                        BlockFormat::Numbered,
+                        "순서있는 목록".to_string(),
+                        Some(icons::numbered_list()),
+                    ),
+                    (
+                        BlockFormat::Quote,
+                        "블록 인용".to_string(),
+                        Some(icons::quote()),
+                    ),
                 ]);
                 // 체크를 오른쪽에 둔다. 왼쪽이면 고른 항목의 아이콘을 체크가 가린다.
                 let menu = menu.min_w(px(180.)).check_side(Side::Right);
                 items.into_iter().fold(menu, |menu, (format, title, icon)| {
-                    let menu = if format == BlockFormat::Bullet { menu.separator() } else { menu };
+                    let menu = if format == BlockFormat::Bullet {
+                        menu.separator()
+                    } else {
+                        menu
+                    };
                     let app = app.clone();
                     let target = state.clone();
                     let selection = selection.clone();
@@ -216,8 +270,15 @@ impl WriterApp {
                             .checked(format == current)
                             .on_click(move |_, window, cx| {
                                 app.update(cx, |app, cx| {
-                                    app.set_block_format(&target, selection.clone(), format, window, cx);
-                                }).ok();
+                                    app.set_block_format(
+                                        &target,
+                                        selection.clone(),
+                                        format,
+                                        window,
+                                        cx,
+                                    );
+                                })
+                                .ok();
                             }),
                     )
                 })
@@ -234,32 +295,50 @@ impl WriterApp {
         cx: &mut Context<Self>,
     ) {
         let Some(editor) = &self.editor else { return };
-        if editor.state() != target { return; }
+        if editor.state() != target {
+            return;
+        }
         editor.state().update(cx, |state, cx| {
             let text = state.value();
             let last = if !selection.is_empty() && text[..selection.end].ends_with('\n') {
                 selection.end - 1
-            } else { selection.end };
+            } else {
+                selection.end
+            };
             let range = line_range(&text, selection.start).start..line_range(&text, last).end;
             let mut cursor = range.start;
-            let replacement = text[range.clone()].split('\n').enumerate().map(|(index, line)| {
-                let (_, marker_end) = block_format(line);
-                let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
-                let prefix = match format {
-                    BlockFormat::Paragraph => String::new(),
-                    BlockFormat::Heading(level) => format!("{} ", "#".repeat(usize::from(level))),
-                    BlockFormat::Bullet => "- ".to_string(),
-                    BlockFormat::Numbered => format!("{}. ", index + 1),
-                    BlockFormat::Quote => "> ".to_string(),
-                };
-                if index == 0 {
-                    cursor += indent + prefix.len() + selection.start
-                        .saturating_sub(range.start + marker_end).min(line.len() - marker_end);
-                }
-                format!("{}{prefix}{}", &line[..indent], &line[marker_end..])
-            }).collect::<Vec<_>>().join("\n");
-            let next_selection = if selection.is_empty() { cursor..cursor }
-                else { range.start..range.start + replacement.len() };
+            let replacement = text[range.clone()]
+                .split('\n')
+                .enumerate()
+                .map(|(index, line)| {
+                    let (_, marker_end) = block_format(line);
+                    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+                    let prefix = match format {
+                        BlockFormat::Paragraph => String::new(),
+                        BlockFormat::Heading(level) => {
+                            format!("{} ", "#".repeat(usize::from(level)))
+                        }
+                        BlockFormat::Bullet => "- ".to_string(),
+                        BlockFormat::Numbered => format!("{}. ", index + 1),
+                        BlockFormat::Quote => "> ".to_string(),
+                    };
+                    if index == 0 {
+                        cursor += indent
+                            + prefix.len()
+                            + selection
+                                .start
+                                .saturating_sub(range.start + marker_end)
+                                .min(line.len() - marker_end);
+                    }
+                    format!("{}{prefix}{}", &line[..indent], &line[marker_end..])
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let next_selection = if selection.is_empty() {
+                cursor..cursor
+            } else {
+                range.start..range.start + replacement.len()
+            };
             state.set_selected_range(range, cx);
             state.replace(replacement, window, cx);
             state.set_selected_range(next_selection, cx);
@@ -282,18 +361,30 @@ impl WriterApp {
             let url = url.clone();
             Rc::new(move |window: &mut Window, cx: &mut App| {
                 let url = url.read(cx).value().trim().to_string();
-                if url.is_empty() { return false; }
+                if url.is_empty() {
+                    return false;
+                }
                 let label = label.read(cx).value().to_string();
-                let label = if label.trim().is_empty() { url.clone() } else { label };
+                let label = if label.trim().is_empty() {
+                    url.clone()
+                } else {
+                    label
+                };
                 app.update(cx, |app, cx| {
                     let Some(editor) = &app.editor else { return };
                     if editor.state() != &target {
                         app.notify("링크를 넣을 시트가 닫혔습니다.", window, cx);
                         return;
                     }
-                    let label = label.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]")
+                    let label = label
+                        .replace('\\', "\\\\")
+                        .replace('[', "\\[")
+                        .replace(']', "\\]")
                         .replace(['\n', '\r'], " ");
-                    let url = url.replace('\\', "%5C").replace('<', "%3C").replace('>', "%3E")
+                    let url = url
+                        .replace('\\', "%5C")
+                        .replace('<', "%3C")
+                        .replace('>', "%3E")
                         .replace(['\n', '\r'], "");
                     let replacement = format!("[{label}](<{url}>)");
                     editor.state().update(cx, |state, cx| {
@@ -304,7 +395,8 @@ impl WriterApp {
                         state.focus(window, cx);
                     });
                     app.on_editor_changed(window, cx);
-                }).ok();
+                })
+                .ok();
                 true
             })
         };
@@ -314,17 +406,31 @@ impl WriterApp {
                 url.update(cx, |state, cx| state.focus(window, cx));
             }
             let (enter, ok) = (submit.clone(), submit.clone());
-            dialog.w(px(440.)).title("링크 삽입").close_button(false)
+            dialog
+                .w(px(440.))
+                .title("링크 삽입")
+                .close_button(false)
                 .on_ok(move |_, window, cx| enter(window, cx))
                 .child(Input::new(&label).focus_ring(false))
                 .child(Input::new(&url).focus_ring(false))
-                .footer(DialogFooter::new()
-                    .child(Button::new("insert-link-cancel").label("취소")
-                        .on_click(|_, window, cx| window.close_dialog(cx)))
-                    .child(Button::new("insert-link-ok").primary().label("삽입")
-                        .on_click(move |_, window, cx| {
-                            if ok(window, cx) { window.close_dialog(cx); }
-                        })))
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("insert-link-cancel")
+                                .label("취소")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("insert-link-ok")
+                                .primary()
+                                .label("삽입")
+                                .on_click(move |_, window, cx| {
+                                    if ok(window, cx) {
+                                        window.close_dialog(cx);
+                                    }
+                                }),
+                        ),
+                )
         });
     }
 }

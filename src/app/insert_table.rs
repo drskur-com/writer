@@ -34,7 +34,11 @@ impl WriterApp {
                     if value.trim().is_empty() {
                         Some(default)
                     } else {
-                        value.trim().parse::<usize>().ok().filter(|n| (1..=100).contains(n))
+                        value
+                            .trim()
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|n| (1..=100).contains(n))
                     }
                 };
                 let (Some(columns), Some(rows)) = (
@@ -43,12 +47,14 @@ impl WriterApp {
                 ) else {
                     app.update(cx, |app, cx| {
                         app.notify("열과 행 수는 1~100 사이의 정수로 입력하세요.", window, cx);
-                    }).ok();
+                    })
+                    .ok();
                     return false;
                 };
                 app.update(cx, |app, cx| {
                     app.insert_table(&target, columns, rows, window, cx);
-                }).ok();
+                })
+                .ok();
                 true
             })
         };

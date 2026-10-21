@@ -173,7 +173,11 @@ fn fill_blank_table_rows(text: &str) -> Option<String> {
             }
         } else if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             fence = Some(&trimmed[..3]);
-        } else if trimmed.len() > 1 && trimmed.bytes().all(|b| b == b'|' || b == b' ' || b == b'\t') {
+        } else if trimmed.len() > 1
+            && trimmed
+                .bytes()
+                .all(|b| b == b'|' || b == b' ' || b == b'\t')
+        {
             // 첫 `|` 뒤 공백, 없으면(`||`) 첫 `|` 자리에 넣는다.
             let pipe = start + line.find('|').unwrap_or(0);
             let at = if text.as_bytes().get(pipe + 1) == Some(&b' ') {
@@ -264,7 +268,9 @@ mod tests {
         let filled = fill_blank_table_rows(text).unwrap();
         assert_eq!(filled.len(), text.len());
         let mut highlighter = CodeFenceHighlighter::new();
-        highlighter.inner.update(None, &Rope::from(filled.as_str()), None);
+        highlighter
+            .inner
+            .update(None, &Rope::from(filled.as_str()), None);
         highlighter.collect_fences();
         let start = text.find("const").unwrap();
         let end = text.rfind("```").unwrap();

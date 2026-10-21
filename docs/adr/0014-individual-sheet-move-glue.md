@@ -2,7 +2,7 @@
 
 - 상태: Proposed
 - 날짜: 2026-10-21
-- 관련: ADR-0012, ADR-0013 · `src/library/meta.rs`, `src/app/sheet_list.rs`, `src/app/library_ops.rs`
+- 관련: ADR-0012, ADR-0013, ADR-0019 · `src/library/meta.rs`, `src/app/sheet_list.rs`, `src/app/library_ops.rs`
 - Supersedes ADR-0012의 이동 단위·드래그 미리보기·놓일 자리 표시 결정
 
 ## 배경 (Context)
@@ -24,6 +24,7 @@ ADR-0012는 접합한 시트를 묶음째 옮기고, 접합 내부에는 놓을 
 - 복수 선택된 시트는 이동 후 목록 순서로 다시 정렬한다. 이후 미리보기·컴파일에서도 그 순서를 쓴다.
 - 접합 소속은 이동 중에만 임시 번호로 보존한다. 저장 형식은 기존 그룹 `.writer.toml`의 `sheets`·`glued`를 유지하고, 저장 실패 시 순서와 접합을 함께 되돌린다.
 - 수동 정렬 그룹에서만 이동·접합을 다룬다는 제한, 접합·해제 메뉴, 미리보기·컴파일의 범위 규칙은 ADR-0012를 따른다.
+- 다른 그룹으로 옮기는 동작과 그룹 사이의 파일·메타 갱신은 ADR-0019를 따른다.
 
 예시에서 대괄호는 접합 묶음이다.
 

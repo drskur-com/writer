@@ -366,9 +366,10 @@ impl Render for CompileDialog {
                             })),
                     ),
             )
-            .when(matches!(self.format, CompileFormat::Pdf | CompileFormat::Docx), |this| {
-                this.child(self.render_pdf_options(cx, pal))
-            })
+            .when(
+                matches!(self.format, CompileFormat::Pdf | CompileFormat::Docx),
+                |this| this.child(self.render_pdf_options(cx, pal)),
+            )
     }
 }
 

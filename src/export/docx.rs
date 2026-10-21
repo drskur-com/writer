@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 
 use super::{ExportError, ExportProject};
-use crate::library::{Align, Placement, ResolvedStyle, StyleTarget, VerticalAlign};
+use crate::library::{Align, HeadingNumbers, Placement, ResolvedStyle, StyleTarget, VerticalAlign};
 use crate::markdown::{Block, ColumnAlign, ImageAlign, ImageLine, Inline, Rich, Table};
 
 /// 판형과 서체(컴파일 대화상자에서 정한다). 길이는 pt.
@@ -138,7 +138,10 @@ pub fn build<W: Write + Seek>(
     put("docProps/core.xml", core_xml(project).as_bytes())?;
     put("word/document.xml", body.as_bytes())?;
     put("word/styles.xml", doc.styles_xml().as_bytes())?;
-    put("word/settings.xml", settings_xml(options.generate_toc).as_bytes())?;
+    put(
+        "word/settings.xml",
+        settings_xml(options.generate_toc).as_bytes(),
+    )?;
     put("word/footnotes.xml", doc.footnotes_xml().as_bytes())?;
     put("word/footer1.xml", FOOTER_XML.as_bytes())?;
     put(
@@ -214,7 +217,7 @@ struct DocBuilder<'a> {
     /// 다음 단락을 새 페이지에서 시작한다(시트 경계·앞 부속 뒤·별도 제목 페이지 뒤).
     pending_break: bool,
     /// 부(0)·장(1)·절(2) 번호.
-    numbers: [usize; 3],
+    numbers: HeadingNumbers,
     dir: PathBuf,
     sheet_notes: Vec<(usize, Vec<Block>)>,
     /// Word 각주(id, 내용 XML). id는 1부터.
@@ -232,7 +235,7 @@ impl<'a> DocBuilder<'a> {
             options,
             body: String::new(),
             pending_break: false,
-            numbers: [0; 3],
+            numbers: HeadingNumbers::default(),
             dir: project.dir.clone(),
             sheet_notes: Vec::new(),
             footnotes: Vec::new(),
@@ -512,21 +515,16 @@ impl<'a> DocBuilder<'a> {
             return;
         };
         let resolved = self.project.styles.resolve(target);
-        let depth = match target {
-            StyleTarget::Part => 0,
-            StyleTarget::Chapter => 1,
-            _ => 2,
-        };
         // 번호는 ePub과 같게: 그리지도 않고 목차에도 없는 제목만 번호를 쓰지 않는다.
         // `{unnumbered}` 제목(시트 첫 줄만)은 번호를 소비하지 않고 접두사도 붙지 않는다(ADR-0018).
         let numbered = !unnumbered && (resolved.placement != Placement::Hidden || resolved.in_toc);
+        let number = self.numbers.count(&self.project.styles, target, numbered);
         let prefix = if numbered {
-            self.numbers[depth] += 1;
-            resolved.prefix_text(self.numbers[depth])
+            resolved.prefix_text(number)
         } else {
             String::new()
         };
-        let style = format!("Heading{}", depth + 1);
+        let style = format!("Heading{}", target.depth() + 1);
         // 목차에서 뺀 제목은 개요 수준을 본문으로 내려 목차·탐색 창에서 뺀다.
         let ppr = if resolved.in_toc {
             ""
@@ -582,7 +580,10 @@ impl<'a> DocBuilder<'a> {
             self.paragraph(
                 "Caption",
                 "",
-                &text_run("", &format!("[이미지를 넣을 수 없음: {}]", image.destination)),
+                &text_run(
+                    "",
+                    &format!("[이미지를 넣을 수 없음: {}]", image.destination),
+                ),
             );
             return;
         };
@@ -850,10 +851,16 @@ impl<'a> DocBuilder<'a> {
             r#"<w:docDefaults><w:rPrDefault><w:rPr>{body_rpr}<w:lang w:val="{lang}" w:eastAsia="{lang}"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:widowControl/><w:wordWrap w:val="0"/></w:pPr></w:pPrDefault></w:docDefaults>"#,
             lang = escape(language(self.project)),
         ));
-        out.push_str(&paragraph_style("Normal", "Normal", None, &body_ppr, &body_rpr, true));
-        for (ix, target) in [StyleTarget::Part, StyleTarget::Chapter, StyleTarget::Section]
-            .into_iter()
-            .enumerate()
+        out.push_str(&paragraph_style(
+            "Normal", "Normal", None, &body_ppr, &body_rpr, true,
+        ));
+        for (ix, target) in [
+            StyleTarget::Part,
+            StyleTarget::Chapter,
+            StyleTarget::Section,
+        ]
+        .into_iter()
+        .enumerate()
         {
             let resolved = styles.resolve(target);
             let (ppr, rpr) = self.style_props(&resolved, Some(ix));
@@ -1015,7 +1022,10 @@ impl<'a> DocBuilder<'a> {
 <w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:footnote w:type="separator" w:id="-1"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>"#,
         );
         for (ix, content) in self.footnotes.iter().enumerate() {
-            out.push_str(&format!(r#"<w:footnote w:id="{}">{content}</w:footnote>"#, ix + 1));
+            out.push_str(&format!(
+                r#"<w:footnote w:id="{}">{content}</w:footnote>"#,
+                ix + 1
+            ));
         }
         out.push_str("</w:footnotes>");
         out
@@ -1066,7 +1076,11 @@ fn paragraph_style(
 
 fn language(project: &ExportProject) -> &str {
     let language = project.book.language.trim();
-    if language.is_empty() { "ko-KR" } else { language }
+    if language.is_empty() {
+        "ko-KR"
+    } else {
+        language
+    }
 }
 
 /// 이미지 경로 → 파일(시트 폴더 → 프로젝트 폴더 → 첨부파일 순). 웹 주소는 `None`.
@@ -1196,7 +1210,10 @@ mod tests {
     fn read(bytes: &[u8], name: &str) -> String {
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         let mut text = String::new();
-        zip.by_name(name).unwrap().read_to_string(&mut text).unwrap();
+        zip.by_name(name)
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
         text
     }
 
@@ -1214,10 +1231,16 @@ mod tests {
         let bytes = bytes.into_inner();
 
         let document = read(&bytes, "word/document.xml");
-        assert!(document.contains(r#"<w:pStyle w:val="Heading1"/>"#), "{document}");
+        assert!(
+            document.contains(r#"<w:pStyle w:val="Heading1"/>"#),
+            "{document}"
+        );
         assert!(document.contains(r#"<w:vAlign w:val="center"/>"#));
         // 접두사 개행은 줄바꿈, 번호는 계산한 글자.
-        assert!(document.contains("제1장</w:t></w:r><w:r><w:br/></w:r>"), "{document}");
+        assert!(
+            document.contains("제1장</w:t></w:r><w:r><w:br/></w:r>"),
+            "{document}"
+        );
         assert!(document.contains(r#"<w:footnoteReference w:id="1"/>"#));
         assert!(document.contains("&amp; &lt;꺾쇠&gt;"));
         assert!(document.contains(r#"TOC \o "1-3""#));
@@ -1231,4 +1254,3 @@ mod tests {
         assert!(read(&bytes, "word/settings.xml").contains("updateFields"));
     }
 }
-

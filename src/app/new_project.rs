@@ -574,6 +574,12 @@ impl WriterApp {
                 if let Some(Selection::Group(path)) = &self.selected {
                     self.selected = Some(Selection::Group(rebase(path)));
                 }
+                self.group_anchor = self.group_anchor.as_deref().map(rebase);
+                self.selected_groups = self
+                    .selected_groups
+                    .iter()
+                    .map(|path| rebase(path))
+                    .collect();
                 self.open_project = self.open_project.as_deref().map(rebase);
                 self.expanded_groups = self.expanded_groups.iter().map(|p| rebase(p)).collect();
                 if renamed && let Some(relative) = open_inside {
@@ -646,6 +652,14 @@ impl WriterApp {
                 self.library = Some(scanned);
                 if matches!(&self.selected, Some(Selection::Group(path)) if path.starts_with(dir)) {
                     self.selected = None;
+                }
+                self.selected_groups.retain(|path| !path.starts_with(dir));
+                if self
+                    .group_anchor
+                    .as_ref()
+                    .is_some_and(|path| path.starts_with(dir))
+                {
+                    self.group_anchor = None;
                 }
                 if self.open_project.as_deref() == Some(dir) {
                     self.open_project = None;

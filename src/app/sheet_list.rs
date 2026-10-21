@@ -47,17 +47,27 @@ pub(super) fn sheet_label(preview: Option<&library::Preview>) -> String {
 /// 파일 그룹의 파일을 끌 때도 같은 모양을 쓴다.
 #[derive(Clone)]
 pub(super) struct DraggedSheet {
-    /// 그룹 안에서의 원래 위치.
-    pub(super) index: usize,
-    /// 옮기는 시트 또는 파일 하나의 이름.
+    /// 끌기 시작한 그룹. 다른 그룹 줄에 놓으면 그 그룹으로 옮긴다(ADR-0019).
+    pub(super) group: std::path::PathBuf,
+    /// 파일 그룹의 파일을 끄는 중인지. 시트 그룹으로는 놓을 수 없다.
+    pub(super) files: bool,
+    /// 끈 카드의 목록 위치. 놓일 자리(위/아래)를 정한다.
+    pub(super) anchor: usize,
+    /// 함께 옮기는 항목의 목록 위치(목록 순서). 단일 선택이면 `anchor` 하나다.
+    pub(super) indices: Vec<usize>,
+    /// 함께 옮기는 시트 파일 경로(다른 그룹으로 옮길 때 쓴다).
+    pub(super) paths: Vec<std::path::PathBuf>,
+    /// 미리보기에 보일 이름들. 여러 개면 첫 이름과 개수를 보여 준다.
     pub(super) labels: Vec<SharedString>,
     pub(super) pal: Palette,
 }
 
 impl Render for DraggedSheet {
-    /// 끄는 시트 하나의 이름을 보여 준다.
+    /// 끄는 시트의 이름을 보여 준다. 여러 개를 고르면 “첫 시트 외 N개”로 줄인다.
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let pal = self.pal;
+        let label = self.labels.first().cloned().unwrap_or_default();
+        let extra = self.labels.len().saturating_sub(1);
         div()
             .px_3()
             .py_2()
@@ -69,9 +79,24 @@ impl Render for DraggedSheet {
             .shadow_md()
             .text_sm()
             .text_color(pal.foreground)
-            .truncate()
             .font_semibold()
-            .children(self.labels.first().cloned())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .child(div().truncate().child(label))
+                    .when(extra > 0, |this| {
+                        this.child(
+                            div()
+                                .flex_shrink_0()
+                                .font_normal()
+                                .text_color(pal.muted)
+                                .child(format!("외 {extra}개")),
+                        )
+                    }),
+            )
     }
 }
 
@@ -220,11 +245,13 @@ impl WriterApp {
                 .child("시트 없음")
                 .into_any_element()
         } else {
-            // 수동 정렬인 그룹을 볼 때만 끌어서 순서를 바꾼다("모두"는 수정순 고정).
+            // 순서 바꾸기는 수동 정렬일 때만 하고, 다른 그룹으로 옮기는 끌기는 정렬 방법과
+            // 관계없이 할 수 있다(ADR-0019). "모두"(섹션)는 여러 그룹이 섞여 있어 끌지 않는다.
             let group_path = match &sort {
                 Some((path, sort)) if sort.mode == library::SortMode::Manual => Some(path.clone()),
                 _ => None,
             };
+            let drag_group = sort.as_ref().map(|(path, _)| path.clone());
             // 다른 목록으로 바꿨을 때 같은 시트가 옛 자리에서 날아오지 않도록 목록별로 키를 나눈다.
             let list_key = match &current {
                 Some(Selection::Group(path)) => path.display().to_string(),
@@ -271,9 +298,9 @@ impl WriterApp {
                 let level = preview.map_or(1, |preview| preview.level);
                 let has_title = is_empty || (1..=3).contains(&level);
                 let excerpt = match preview {
-                    Some(preview) if !has_title => {
-                        format!("{} {}", preview.title, preview.excerpt).trim().to_string()
-                    }
+                    Some(preview) if !has_title => format!("{} {}", preview.title, preview.excerpt)
+                        .trim()
+                        .to_string(),
                     Some(preview) => preview.excerpt.clone(),
                     None => String::new(),
                 };
@@ -385,13 +412,33 @@ impl WriterApp {
                         }
                     }))
                     .child(card);
-                let row = match &group_path {
-                    Some(group_path) => {
-                        let group_path = group_path.clone();
-                        // 접합 여부와 무관하게 끄는 시트 하나만 옮긴다.
+                let row = match &drag_group {
+                    Some(sheet_group) => {
+                        let sheet_group = sheet_group.clone();
+                        let same_list = group_path.as_ref() == Some(&sheet_group);
+                        let hover_group = sheet_group.clone();
+                        let drop_group = sheet_group.clone();
+                        // 선택한 시트가 여럿이면 함께 옮긴다. 아니면 끈 시트 하나만 옮긴다.
+                        let indices: Vec<usize> = if self.selected_sheets.is_empty() {
+                            vec![index]
+                        } else {
+                            paths
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, path)| {
+                                    **path == sheet.path || self.selected_sheets.contains(path)
+                                })
+                                .map(|(index, _)| index)
+                                .collect()
+                        };
+                        // 접합 여부와 무관하게 끄는 시트(들)을 옮긴다.
                         let dragged = DraggedSheet {
-                            index,
-                            labels: vec![labels[index].clone()],
+                            group: sheet_group.clone(),
+                            files: false,
+                            anchor: index,
+                            labels: indices.iter().map(|index| labels[*index].clone()).collect(),
+                            paths: indices.iter().map(|index| paths[*index].clone()).collect(),
+                            indices,
                             pal,
                         };
                         row.on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
@@ -400,7 +447,13 @@ impl WriterApp {
                                     if !event.bounds.contains(&event.event.position) {
                                         return;
                                     }
-                                    let drop = Some((event.drag(cx).index, index));
+                                    let dragged = event.drag(cx);
+                                    // 같은 목록의 다른 카드 위에서만 놓일 자리를 그린다.
+                                    let drop = (same_list
+                                        && !dragged.files
+                                        && dragged.group == hover_group
+                                        && !dragged.indices.contains(&index))
+                                    .then_some((dragged.anchor, index));
                                     if this.sheet_drop != drop {
                                         this.sheet_drop = drop;
                                         cx.notify();
@@ -419,7 +472,17 @@ impl WriterApp {
                             .on_drop(cx.listener(
                                 move |this, dragged: &DraggedSheet, window, cx| {
                                     this.sheet_drop = None;
-                                    this.move_sheet(&group_path, dragged.index, index, window, cx);
+                                    if !same_list || dragged.files || dragged.group != drop_group {
+                                        return;
+                                    }
+                                    this.move_selected_sheets(
+                                        &drop_group,
+                                        &dragged.indices,
+                                        dragged.anchor,
+                                        index,
+                                        window,
+                                        cx,
+                                    );
                                 },
                             ))
                     }

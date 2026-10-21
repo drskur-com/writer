@@ -170,17 +170,9 @@ impl InsertImageForm {
         let height = size_input(window, cx);
         let caption =
             cx.new(|cx| InputState::new(window, cx).placeholder("이미지 아래에 표시할 설명(선택)"));
-        let mut subscriptions: Vec<Subscription> = [&url, &caption]
-            .into_iter()
-            .map(|input| {
-                // 입력 칸에서 Enter를 누르면 바로 넣는다.
-                cx.subscribe_in(input, window, |this, _, event, window, cx| {
-                    if let InputEvent::PressEnter { .. } = event {
-                        this.submit(window, cx);
-                    }
-                })
-            })
-            .collect();
+        // 입력 칸의 Enter는 대화상자의 확인(Confirm)으로 올라가 `.on_ok`가 맡는다. 여기서 따로
+        // 구독하면 확인과 겹쳐 이미지가 두 번 들어갈 수 있다.
+        let mut subscriptions: Vec<Subscription> = Vec::new();
         // 비율을 지키면 한쪽을 고칠 때 다른 쪽을 맞춘다. `set_value`는 이벤트를 내지 않아 되돌아오지 않는다.
         for (changed, other, horizontal) in [(&width, &height, true), (&height, &width, false)] {
             let other = other.clone();
@@ -325,10 +317,11 @@ impl InsertImageForm {
     /// 지금 탭에서 고른 이미지. 아직 없으면 `None`.
     fn image(&self, cx: &App) -> Option<ImageSource> {
         if let Some(edit) = &self.edit {
-            let unchanged = self.source == edit.source && match self.source {
-                Source::Url => self.url.read(cx).value().trim() == edit.destination,
-                _ => self.local_path() == edit.path.as_ref(),
-            };
+            let unchanged = self.source == edit.source
+                && match self.source {
+                    Source::Url => self.url.read(cx).value().trim() == edit.destination,
+                    _ => self.local_path() == edit.path.as_ref(),
+                };
             if unchanged {
                 return Some(ImageSource::Existing(edit.destination.clone()));
             }
@@ -379,7 +372,15 @@ impl InsertImageForm {
         let options = self.options(cx);
         let sheet = self.sheet.clone();
         let done = self.app.update(cx, |app, cx| {
-            app.insert_image(&sheet, image, &caption, &options, self.edit.as_ref(), window, cx)
+            app.insert_image(
+                &sheet,
+                image,
+                &caption,
+                &options,
+                self.edit.as_ref(),
+                window,
+                cx,
+            )
         });
         if done.unwrap_or(false) {
             window.close_dialog(cx);
@@ -714,7 +715,11 @@ impl Render for InsertImageForm {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(form_row(pal, "주소", Input::new(&self.url).focus_ring(false)))
+                    .child(form_row(
+                        pal,
+                        "주소",
+                        Input::new(&self.url).focus_ring(false),
+                    ))
                     .when_some(note, |this, (note, color)| {
                         this.child(div().text_xs().text_color(color).child(note))
                     })
@@ -784,11 +789,15 @@ impl WriterApp {
             return;
         }
         let text = editor.state().read(cx).value();
-        let Some((start, current)) = text.split('\n').scan(0, |offset, line| {
-            let start = *offset;
-            *offset += line.len() + 1;
-            Some((start, line))
-        }).nth(line) else {
+        let Some((start, current)) = text
+            .split('\n')
+            .scan(0, |offset, line| {
+                let start = *offset;
+                *offset += line.len() + 1;
+                Some((start, line))
+            })
+            .nth(line)
+        else {
             return;
         };
         if current != original {
@@ -798,15 +807,24 @@ impl WriterApp {
             return;
         };
         let source = if image.destination.starts_with("http://")
-            || image.destination.starts_with("https://") {
+            || image.destination.starts_with("https://")
+        {
             Source::Url
         } else {
             Source::File
         };
         let path = (source == Source::File).then(|| {
-            let path = Path::new(image.destination.strip_prefix("file://").unwrap_or(&image.destination));
-            if path.is_absolute() { path.to_path_buf() }
-            else { sheet.parent().unwrap_or(Path::new("")).join(path) }
+            let path = Path::new(
+                image
+                    .destination
+                    .strip_prefix("file://")
+                    .unwrap_or(&image.destination),
+            );
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                sheet.parent().unwrap_or(Path::new("")).join(path)
+            }
         });
         let edit = EditImage {
             state: editor.state().clone(),
@@ -848,13 +866,38 @@ impl WriterApp {
                 let image = markdown::image_line(&edit.original).unwrap();
                 form.source = edit.source;
                 form.file = edit.path.clone();
-                form.file_modified = form.file.as_deref().map(library::modified_nanos).unwrap_or(0);
-                form.url.update(cx, |state, cx| state.set_value(image.destination, window, cx));
-                form.caption.update(cx, |state, cx| state.set_value(image.alt, window, cx));
-                form.width.update(cx, |state, cx| state.set_value(
-                    image.options.width.map(|v| v.to_string()).unwrap_or_default(), window, cx));
-                form.height.update(cx, |state, cx| state.set_value(
-                    image.options.height.map(|v| v.to_string()).unwrap_or_default(), window, cx));
+                form.file_modified = form
+                    .file
+                    .as_deref()
+                    .map(library::modified_nanos)
+                    .unwrap_or(0);
+                form.url.update(cx, |state, cx| {
+                    state.set_value(image.destination, window, cx)
+                });
+                form.caption
+                    .update(cx, |state, cx| state.set_value(image.alt, window, cx));
+                form.width.update(cx, |state, cx| {
+                    state.set_value(
+                        image
+                            .options
+                            .width
+                            .map(|v| v.to_string())
+                            .unwrap_or_default(),
+                        window,
+                        cx,
+                    )
+                });
+                form.height.update(cx, |state, cx| {
+                    state.set_value(
+                        image
+                            .options
+                            .height
+                            .map(|v| v.to_string())
+                            .unwrap_or_default(),
+                        window,
+                        cx,
+                    )
+                });
                 form.align = image.options.align;
                 form.full_page = image.options.full_page;
                 form.edit = Some(edit);
@@ -868,11 +911,22 @@ impl WriterApp {
                 let caption = form.read(cx).caption.clone();
                 caption.update(cx, |state, cx| state.focus(window, cx));
             }
-            let ok_form = form.clone();
+            let ok_enter = form.clone();
+            let ok_button = form.clone();
             dialog
                 .w(px(DIALOG_WIDTH))
-                .title(if editing { "이미지 수정" } else { "이미지 삽입" })
+                .title(if editing {
+                    "이미지 수정"
+                } else {
+                    "이미지 삽입"
+                })
                 .close_button(false)
+                // Enter는 대화상자의 확인(Confirm)이다. 넣었거나 내려받기를 시작했으면 `submit`이
+                // 대화상자를 닫고, 아직 고른 이미지가 없으면 열어 둔다.
+                .on_ok(move |_, window, cx| {
+                    ok_enter.update(cx, |form, cx| form.submit(window, cx));
+                    false
+                })
                 .child(form.clone())
                 .footer(
                     DialogFooter::new()
@@ -886,7 +940,7 @@ impl WriterApp {
                                 .primary()
                                 .label(if editing { "저장" } else { "삽입" })
                                 .on_click(move |_, window, cx| {
-                                    ok_form.update(cx, |form, cx| form.submit(window, cx));
+                                    ok_button.update(cx, |form, cx| form.submit(window, cx));
                                 }),
                         ),
                 )
@@ -914,8 +968,13 @@ impl WriterApp {
             let editor = self.editor.as_ref().unwrap();
             let text = editor.state().read(cx).value();
             if editor.state() != &edit.state
-                || text.get(edit.range.clone()) != Some(edit.original.as_str()) {
-                self.notify("수정할 이미지가 변경되었습니다. 이미지를 다시 열어 주세요.", window, cx);
+                || text.get(edit.range.clone()) != Some(edit.original.as_str())
+            {
+                self.notify(
+                    "수정할 이미지가 변경되었습니다. 이미지를 다시 열어 주세요.",
+                    window,
+                    cx,
+                );
                 return false;
             }
         }

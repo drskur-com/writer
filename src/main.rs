@@ -6,9 +6,9 @@ use gpui_kit::gpui::*;
 
 mod app;
 mod assets;
-pub mod export;
 mod config;
 mod dock_icon;
+pub mod export;
 mod icons;
 mod library;
 mod markdown;

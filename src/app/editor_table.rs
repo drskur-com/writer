@@ -156,7 +156,9 @@ impl TableBlocks {
 
     /// 표 마지막 행 아래에 격자를 그린다. 표가 아니면 `None`이다.
     pub(super) fn render(&self, row: usize, size: Size<Pixels>, cx: &App) -> Option<AnyElement> {
-        let table = self.table_at(row).filter(|table| table.rows.end == row + 1)?;
+        let table = self
+            .table_at(row)
+            .filter(|table| table.rows.end == row + 1)?;
         let grid = self.grid(&table, size.width);
         let pal = Palette::from_theme(cx.theme());
         let line_height = self.font_size.get() * LINE_HEIGHT;
@@ -186,7 +188,11 @@ impl TableBlocks {
                     .top(row.top)
                     .w(size.width)
                     .h(row.height)
-                    .bg(if row_ix % 2 == 1 { pal.tint } else { pal.background }),
+                    .bg(if row_ix % 2 == 1 {
+                        pal.tint
+                    } else {
+                        pal.background
+                    }),
             );
         }
         if let Some(first) = grid.rows.first() {
@@ -319,7 +325,11 @@ impl TableBlocks {
             .enumerate()
             .map(|(row_ix, row)| {
                 let mut wrapper = self.text_system.line_wrapper(
-                    if row_ix == 0 { bold.clone() } else { regular.clone() },
+                    if row_ix == 0 {
+                        bold.clone()
+                    } else {
+                        regular.clone()
+                    },
                     self.font_size.get(),
                 );
                 let cells: Vec<Vec<SharedString>> = row
@@ -410,8 +420,15 @@ mod tests {
             [0..2, 3..5, 1..3, 4..6]
         );
         // 그대로면 다시 배치할 줄이 없다.
-        assert!(blocks.sync("새 줄\n| a |\n|---|\n\n| c |\n|---|").is_empty());
+        assert!(
+            blocks
+                .sync("새 줄\n| a |\n|---|\n\n| c |\n|---|")
+                .is_empty()
+        );
         // 표가 깨지면 그 줄을 다시 배치한다(줄이 줄어 둘째 표도 당겨졌다).
-        assert_eq!(blocks.sync("새 줄\n| a |\n\n| c |\n|---|"), [1..3, 4..6, 3..5]);
+        assert_eq!(
+            blocks.sync("새 줄\n| a |\n\n| c |\n|---|"),
+            [1..3, 4..6, 3..5]
+        );
     }
 }

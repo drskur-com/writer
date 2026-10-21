@@ -338,7 +338,10 @@ mod tests {
         let relative = attach_bytes_to_sheet(&dir, &sheet, b"png", "png").unwrap();
         let name = relative.strip_prefix("../Extras/Attachments/").unwrap();
         assert!(name.ends_with(".png"), "{relative}");
-        assert_eq!(std::fs::read(sheet.parent().unwrap().join(&relative)).unwrap(), b"png");
+        assert_eq!(
+            std::fs::read(sheet.parent().unwrap().join(&relative)).unwrap(),
+            b"png"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }

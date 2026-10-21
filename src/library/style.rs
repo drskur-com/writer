@@ -67,6 +67,15 @@ impl StyleTarget {
         }
     }
 
+    /// 번호 깊이. 부 0, 장 1, 절 2. 본문은 번호가 없다.
+    pub fn depth(self) -> usize {
+        match self {
+            StyleTarget::Body | StyleTarget::Part => 0,
+            StyleTarget::Chapter => 1,
+            StyleTarget::Section => 2,
+        }
+    }
+
     /// 대상의 기본 스타일. 파일에 없는 값은 이것으로 채운다.
     /// 부·장·절 제목은 기본적으로 앞 내용에 이어서 놓고 페이지를 나누지 않는다.
     pub fn defaults(self) -> ResolvedStyle {
@@ -85,6 +94,7 @@ impl StyleTarget {
             page_break: false,
             prefix: String::new(),
             numbering: Numbering::Arabic,
+            restart_on_parent: false,
             in_toc: true,
             vertical_align: VerticalAlign::Center,
         };
@@ -294,6 +304,9 @@ pub struct StyleSpec {
     /// 제목 번호를 적는 방식(제목만). `{n}` 자리에 들어간다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub numbering: Option<Numbering>,
+    /// 상위 제목이 바뀌면 번호를 1부터 다시 세는지(장·절만). 없으면 이어서 센다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_on_parent: Option<bool>,
     /// 별도 제목 페이지 안 세로 위치(제목만).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vertical_align: Option<VerticalAlign>,
@@ -321,11 +334,14 @@ impl StyleSpec {
             first_line_indent: self.first_line_indent.unwrap_or(defaults.first_line_indent),
             space_before: self.space_before.unwrap_or(defaults.space_before),
             space_after: self.space_after.unwrap_or(defaults.space_after),
-            preserve_line_breaks: self.preserve_line_breaks.unwrap_or(defaults.preserve_line_breaks),
+            preserve_line_breaks: self
+                .preserve_line_breaks
+                .unwrap_or(defaults.preserve_line_breaks),
             placement: self.placement.unwrap_or(defaults.placement),
             page_break: self.page_break.unwrap_or(defaults.page_break),
             prefix: self.prefix.clone().unwrap_or(defaults.prefix),
             numbering: self.numbering.unwrap_or(defaults.numbering),
+            restart_on_parent: self.restart_on_parent.unwrap_or(defaults.restart_on_parent),
             in_toc: self.in_toc.unwrap_or(defaults.in_toc),
             vertical_align: self.vertical_align.unwrap_or(defaults.vertical_align),
         }
@@ -362,8 +378,37 @@ pub struct ResolvedStyle {
     pub page_break: bool,
     pub prefix: String,
     pub numbering: Numbering,
+    pub restart_on_parent: bool,
     pub vertical_align: VerticalAlign,
     pub in_toc: bool,
+}
+
+/// 제목 번호 상태. 깊이는 부(0)·장(1)·절(2) 순서다.
+///
+/// 번호를 붙인 제목이 나오면 그보다 깊은 제목 중 `restart_on_parent`를 켠 것의 번호를
+/// 0으로 되돌린다. 그래서 다음 하위 제목이 1부터 시작한다. 번호가 없는 제목(`{unnumbered}`,
+/// 숨김+목차 제외)은 번호를 세지도, 하위 번호를 되돌리지도 않는다.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeadingNumbers {
+    counts: [usize; 3],
+}
+
+impl HeadingNumbers {
+    /// 제목 하나를 세고 그 번호를 돌려준다. 번호를 쓰지 않는 제목이면 0.
+    pub fn count(&mut self, styles: &Styles, target: StyleTarget, numbered: bool) -> usize {
+        if !numbered {
+            return 0;
+        }
+        let depth = target.depth();
+        self.counts[depth] += 1;
+        for child in [StyleTarget::Chapter, StyleTarget::Section] {
+            let child_depth = child.depth();
+            if child_depth > depth && styles.resolve(child).restart_on_parent {
+                self.counts[child_depth] = 0;
+            }
+        }
+        self.counts[depth]
+    }
 }
 
 impl ResolvedStyle {
@@ -505,6 +550,7 @@ mod tests {
         styles.body.line_height = Some(1.6500001);
         styles.chapter.align = Some(Align::Left);
         styles.chapter.prefix = Some("제{n}장\n".into());
+        styles.chapter.restart_on_parent = Some(true);
         write_styles(&dir, &styles).unwrap();
 
         let text = std::fs::read_to_string(dir.join(GROUP_META_FILE)).unwrap();
@@ -512,12 +558,14 @@ mod tests {
         assert!(text.contains("[styles.\"title:chapter\"]"), "{text}");
         assert!(!text.contains("title:part"), "{text}");
         assert!(text.contains("line_height = 1.65"), "{text}");
+        assert!(text.contains("restart_on_parent = true"), "{text}");
 
         let read = read_styles(&dir);
         assert_eq!(read.body.font.as_deref(), Some("Noto Serif KR"));
         assert_eq!(read.body.line_height, Some(1.65));
         assert_eq!(read.resolve(StyleTarget::Chapter).align, Align::Left);
         assert_eq!(read.chapter.prefix.as_deref(), Some("제{n}장\n"));
+        assert!(read.resolve(StyleTarget::Chapter).restart_on_parent);
         // 쓰지 않은 값은 기본값.
         assert_eq!(read.resolve(StyleTarget::Chapter).font_size, 1.4);
         let project = scan(&root).unwrap().find_project(&dir).cloned().unwrap();
@@ -576,7 +624,10 @@ mod tests {
         assert_eq!(part.placement, Placement::Inline);
         assert!(!part.page_break);
         assert_eq!(part.font_weight, 700);
-        assert_eq!(styles.resolve(StyleTarget::Chapter).placement, Placement::Inline);
+        assert_eq!(
+            styles.resolve(StyleTarget::Chapter).placement,
+            Placement::Inline
+        );
         assert!(!styles.resolve(StyleTarget::Chapter).page_break);
         assert!(!styles.resolve(StyleTarget::Section).page_break);
         assert_eq!(styles.resolve(StyleTarget::Body).font_weight, 400);
@@ -648,6 +699,44 @@ mod tests {
                 .title_text(4, "시라 강 건너"),
             "제IV장 시라 강 건너"
         );
+    }
+
+    #[test]
+    fn heading_numbers_restart_at_parent_when_configured() {
+        // 기본은 이어서 센다.
+        let mut styles = Styles::default();
+        let mut numbers = HeadingNumbers::default();
+        assert_eq!(numbers.count(&styles, StyleTarget::Part, true), 1);
+        assert_eq!(numbers.count(&styles, StyleTarget::Chapter, true), 1);
+        assert_eq!(numbers.count(&styles, StyleTarget::Section, true), 1);
+        assert_eq!(numbers.count(&styles, StyleTarget::Chapter, true), 2);
+        assert_eq!(numbers.count(&styles, StyleTarget::Section, true), 2);
+        assert_eq!(numbers.count(&styles, StyleTarget::Part, true), 2);
+        assert_eq!(numbers.count(&styles, StyleTarget::Chapter, true), 3);
+        assert_eq!(numbers.count(&styles, StyleTarget::Section, true), 3);
+
+        // 장·절 모두 상위 제목이 바뀔 때 1부터.
+        styles.chapter.restart_on_parent = Some(true);
+        styles.section.restart_on_parent = Some(true);
+        let mut numbers = HeadingNumbers::default();
+        assert_eq!(numbers.count(&styles, StyleTarget::Part, true), 1);
+        assert_eq!(numbers.count(&styles, StyleTarget::Chapter, true), 1);
+        assert_eq!(numbers.count(&styles, StyleTarget::Section, true), 1);
+        assert_eq!(numbers.count(&styles, StyleTarget::Section, true), 2);
+        // 새 장이 나오면 절이 1부터.
+        assert_eq!(numbers.count(&styles, StyleTarget::Chapter, true), 2);
+        assert_eq!(numbers.count(&styles, StyleTarget::Section, true), 1);
+        // 새 부가 나오면 장·절이 1부터.
+        assert_eq!(numbers.count(&styles, StyleTarget::Part, true), 2);
+        assert_eq!(numbers.count(&styles, StyleTarget::Chapter, true), 1);
+        assert_eq!(numbers.count(&styles, StyleTarget::Section, true), 1);
+
+        // 번호 없는 제목(`{unnumbered}`)은 세지도, 하위 번호를 되돌리지도 않는다.
+        let mut numbers = HeadingNumbers::default();
+        assert_eq!(numbers.count(&styles, StyleTarget::Chapter, true), 1);
+        assert_eq!(numbers.count(&styles, StyleTarget::Chapter, true), 2);
+        assert_eq!(numbers.count(&styles, StyleTarget::Chapter, false), 0);
+        assert_eq!(numbers.count(&styles, StyleTarget::Chapter, true), 3);
     }
 
     #[test]

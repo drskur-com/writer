@@ -1,10 +1,10 @@
 //! 에디터 영역: 떠 있는 툴바 + 본문, 열린 시트의 편집·자동 저장.
 
 use gpui_base::input::{LineContext, LineStyle};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::input::{
     Editor, EditorState, InputEvent, TextDecoration, TextDecorationCollection,
 };
-use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::gpui::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::gpui::*;
 use std::cell::{Cell, RefCell};
@@ -151,7 +151,10 @@ fn sync_line_groups(editor: &mut OpenSheet, text: &str, cx: &mut App) {
     if *new == old {
         return;
     }
-    let spans = old.iter().chain(new.iter()).map(|group| group.lines.clone());
+    let spans = old
+        .iter()
+        .chain(new.iter())
+        .map(|group| group.lines.clone());
     let start = spans.clone().map(|rows| rows.start).min().unwrap_or(0);
     let end = spans.map(|rows| rows.end).max().unwrap_or(0) + shift;
     drop(new);
@@ -330,7 +333,9 @@ impl WriterApp {
         };
         let font_size = crate::settings::Prefs::editor_font_size(cx);
         editor.tables.set_font_size(px(font_size));
-        editor.tables.set_family(&editor_font(editor.styles.as_ref(), cx));
+        editor
+            .tables
+            .set_family(&editor_font(editor.styles.as_ref(), cx));
         let style = line_style(
             editor.styles.as_ref(),
             editor.line_groups.clone(),
@@ -383,26 +388,31 @@ impl WriterApp {
             Some(file) => this.child(self.file_actions(file, pal)),
             // 책 스타일 화면에는 편집 도구가 없다.
             None if self.book_style.is_some() => this,
-            None => this
-                .child(
-                    self.formatting_tools(cx, pal),
-                )
-                .child(
-                    tool_group(pal)
-                        .child(
-                            icon_button("editor-compile", icons::build(), self.editor_selection().is_some(), pal).on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.open_selection_compile_dialog(window, cx);
-                                }),
-                            ),
+            None => this.child(self.formatting_tools(cx, pal)).child(
+                tool_group(pal)
+                    .child(
+                        icon_button(
+                            "editor-compile",
+                            icons::build(),
+                            self.editor_selection().is_some(),
+                            pal,
                         )
-                        .child(
-                            icon_button("toggle-preview", icons::book_preview(), self.editor_selection().is_some(), pal)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.on_toggle_preview(&TogglePreview, window, cx)
-                                })),
-                        ),
-                ),
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_selection_compile_dialog(window, cx);
+                        })),
+                    )
+                    .child(
+                        icon_button(
+                            "toggle-preview",
+                            icons::book_preview(),
+                            self.editor_selection().is_some(),
+                            pal,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.on_toggle_preview(&TogglePreview, window, cx)
+                        })),
+                    ),
+            ),
         });
 
         let body: AnyElement = match &self.editor {
@@ -538,6 +548,10 @@ impl WriterApp {
         }
         self.selected_sheet = path;
         self.selected_sheets.clear();
+        if self.selected_sheet.is_some() {
+            self.selected_groups.clear();
+            self.group_anchor = None;
+        }
         self.open_file = None;
         self.book_style = None;
         if focus && let Some(editor) = &self.editor {
@@ -621,9 +635,11 @@ impl WriterApp {
                         return div()
                             .flex()
                             .flex_col()
-                            .children(
-                                render_tables.render(block.line, size(block.size.width, grid), cx),
-                            )
+                            .children(render_tables.render(
+                                block.line,
+                                size(block.size.width, grid),
+                                cx,
+                            ))
                             .when(mark >= px(PAGE_BREAK_HEIGHT), |this| {
                                 this.child(page_break_mark(size(block.size.width, mark), cx))
                             })
@@ -808,12 +824,10 @@ impl WriterApp {
                 );
                 editor.markup.heading_weights = heading_weights(styles.as_ref());
                 editor.styles = styles;
-                editor
-                    .state
-                    .update(cx, |state, cx| {
-                        state.set_line_style(Some(line_style), cx);
-                        configure_text_transform(state, editor.styles.as_ref());
-                    });
+                editor.state.update(cx, |state, cx| {
+                    state.set_line_style(Some(line_style), cx);
+                    configure_text_transform(state, editor.styles.as_ref());
+                });
                 let text = editor.state.read(cx).value();
                 editor.markup.apply_headings(&text, cx);
             }
@@ -842,5 +856,46 @@ impl WriterApp {
         editor.markup.apply_headings(&text, cx);
         editor.markup.apply(markdown::spans(&text), cx);
     }
-}
 
+    /// 열린 시트 파일이 다른 그룹으로 옮겨졌을 때 경로와 책 스타일을 새 위치에 맞춘다.
+    ///
+    /// 옮기기 전에 저장했으므로 본문·커서는 그대로 둔다. 프로젝트가 바뀌면 그 프로젝트의
+    /// 스타일을 다시 입히고, 프로젝트 밖으로 나가면 기본 배치로 돌린다.
+    pub(super) fn relocate_open_sheet(
+        &mut self,
+        old: &std::path::Path,
+        new: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editor.as_ref().is_none_or(|editor| editor.path != old) {
+            return;
+        }
+        let project = self.library.as_ref().and_then(|lib| lib.project_of(new));
+        let styles = project.as_deref().map(library::read_styles);
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        editor.path = new.to_path_buf();
+        editor.project = project;
+        editor.disk_modified = library::modified_nanos(new);
+        if styles == editor.styles {
+            return;
+        }
+
+        let style = line_style(
+            styles.as_ref(),
+            editor.line_groups.clone(),
+            editor.tables.clone(),
+            crate::settings::Prefs::editor_font_size(cx),
+        );
+        editor.markup.heading_weights = heading_weights(styles.as_ref());
+        let transform_styles = styles.clone();
+        editor.styles = styles;
+        editor.state.update(cx, |state, cx| {
+            state.set_line_style(Some(style), cx);
+            configure_text_transform(state, transform_styles.as_ref());
+        });
+        let text = editor.state.read(cx).value();
+        editor.markup.apply_headings(&text, cx);
+    }
+}

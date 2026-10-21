@@ -66,7 +66,12 @@ pub struct Table {
 impl Table {
     /// 열 수(가장 긴 행 기준).
     pub fn columns(&self) -> usize {
-        self.rows.iter().map(Vec::len).max().unwrap_or(0).max(self.align.len())
+        self.rows
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0)
+            .max(self.align.len())
     }
 
     /// 열의 정렬. 구분 행보다 칸이 많은 행의 남는 열은 왼쪽이다.
@@ -123,7 +128,9 @@ pub fn table(source: &str) -> Option<Table> {
 pub fn manuscript_blocks(text: &str, preserve_line_breaks: bool) -> Vec<Block> {
     let mut out = blocks_with_line_breaks(text, preserve_line_breaks);
     // 시트 첫 줄 제목의 `{unnumbered}` 속성만 참조한다. 본문 중간 제목의 속성은 원문 그대로 둔다.
-    if let Some(Block::Heading { text, unnumbered, .. }) = out
+    if let Some(Block::Heading {
+        text, unnumbered, ..
+    }) = out
         .iter_mut()
         .find(|block| !matches!(block, Block::BlankLines(_)))
         && strip_unnumbered(text)
@@ -170,8 +177,15 @@ pub fn blocks_with_line_breaks(text: &str, preserve_line_breaks: bool) -> Vec<Bl
     };
     let mut out = cx.blocks(children(&root));
     if preserve_line_breaks {
-        let leading = text.lines().take_while(|line| line.trim().is_empty()).count();
-        let trailing = text.lines().rev().take_while(|line| line.trim().is_empty()).count();
+        let leading = text
+            .lines()
+            .take_while(|line| line.trim().is_empty())
+            .count();
+        let trailing = text
+            .lines()
+            .rev()
+            .take_while(|line| line.trim().is_empty())
+            .count();
         if leading > 0 {
             out.insert(0, Block::BlankLines(leading));
         }
@@ -241,7 +255,13 @@ fn literal_line(line: &str) -> String {
         // 줄바꿈 없는 공백은 들여쓴 코드·목록으로 읽히지 않는다.
         let spaces: String = indent
             .chars()
-            .map(|c| if c == '\t' { "\u{a0}".repeat(4) } else { "\u{a0}".to_string() })
+            .map(|c| {
+                if c == '\t' {
+                    "\u{a0}".repeat(4)
+                } else {
+                    "\u{a0}".to_string()
+                }
+            })
             .collect();
         return format!("{spaces}{rest}");
     }
@@ -262,7 +282,10 @@ fn literal_line(line: &str) -> String {
 fn block_marker(line: &str) -> Option<usize> {
     let first = line.chars().next()?;
     let after = |marker: usize| line[marker..].starts_with([' ', '\t']) || line.len() == marker;
-    let only = |chars: &[char]| line.chars().all(|c| chars.contains(&c) || c == ' ' || c == '\t');
+    let only = |chars: &[char]| {
+        line.chars()
+            .all(|c| chars.contains(&c) || c == ' ' || c == '\t')
+    };
     let escape = match first {
         '#' => super::heading_level(line).is_some(),
         '>' | '<' | '|' => true,
@@ -275,9 +298,7 @@ fn block_marker(line: &str) -> Option<usize> {
         '[' => line.find("]:").is_some_and(|ix| !line[1..ix].contains(']')),
         '0'..='9' => {
             let digits = line.bytes().take_while(u8::is_ascii_digit).count();
-            return (digits <= 9
-                && line[digits..].starts_with(['.', ')'])
-                && after(digits + 1))
+            return (digits <= 9 && line[digits..].starts_with(['.', ')']) && after(digits + 1))
                 .then_some(digits);
         }
         _ => false,
@@ -331,7 +352,9 @@ impl Walk<'_> {
             self.groups
                 .iter()
                 .find(|group| group.lines.contains(&(start - 1)))
-                .map_or((start, end), |group| (group.lines.start + 1, group.lines.end.max(end))),
+                .map_or((start, end), |group| {
+                    (group.lines.start + 1, group.lines.end.max(end))
+                }),
         )
     }
 
@@ -360,9 +383,15 @@ impl Walk<'_> {
                     return;
                 }
                 let grouped = paragraph.position.as_ref().is_some_and(|pos| {
-                    self.groups.iter().any(|group| group.lines.contains(&(pos.start.line - 1)))
+                    self.groups
+                        .iter()
+                        .any(|group| group.lines.contains(&(pos.start.line - 1)))
                 });
-                out.push(if grouped { Block::Lines(text) } else { Block::Paragraph(text) });
+                out.push(if grouped {
+                    Block::Lines(text)
+                } else {
+                    Block::Paragraph(text)
+                });
             }
             Node::Blockquote(quote) => {
                 let inner = self.blocks(&quote.children);
@@ -570,7 +599,11 @@ mod tests {
             rich_text(group),
             "# 제목 아님\n- 목록 아님\n굵게\n\n\u{a0}\u{a0}들여쓰기\n1. 번호 아님\n---"
         );
-        assert!(group.iter().any(|inline| inline.text == "굵게" && inline.marks.strong));
+        assert!(
+            group
+                .iter()
+                .any(|inline| inline.text == "굵게" && inline.marks.strong)
+        );
         // 각주 참조, 묶음 끝의 빈 줄, 닫지 않은 묶음.
         let parsed = blocks(":::\n하나[^1]\n둘\n\n:::\n\n[^1]: 주석\n\n::: 시\n[셋]: 정의 아님");
         let Block::Lines(lines) = &parsed[0] else {
@@ -758,10 +791,16 @@ mod tests {
             ])
         );
         // 이어 붙은 참조도 따로 남는다(¹²가 12가 되지 않게).
-        let Block::Paragraph(rich) = &super::blocks("가[^a][^b]\n\n[^a]: 에이\n[^b]: 비\n")[0] else {
+        let Block::Paragraph(rich) = &super::blocks("가[^a][^b]\n\n[^a]: 에이\n[^b]: 비\n")[0]
+        else {
             panic!();
         };
-        assert_eq!(rich.iter().filter_map(|inline| inline.footnote).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(
+            rich.iter()
+                .filter_map(|inline| inline.footnote)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
         assert_eq!(
             blocks[1],
             Block::Footnotes(vec![

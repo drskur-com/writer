@@ -6,15 +6,15 @@ mod book_style;
 mod code_highlight;
 mod compile_dialog;
 mod editor;
-mod editor_image;
 mod editor_format;
+mod editor_image;
 mod editor_layout;
 mod editor_table;
 mod file_view;
 mod insert_footnote;
-mod insert_table;
 mod insert_image;
 mod insert_special_char;
+mod insert_table;
 mod library_ops;
 mod library_panel;
 mod new_project;
@@ -35,8 +35,8 @@ use gpui_kit::component::menu::AppMenuBar;
 use crate::menus::install_menus;
 use crate::{
     APP_NAME, CloseLibrary, CompileProject, OpenLibrary, QuitApp, SaveSheet, SetTheme, ShowAbout,
-    ToggleBold, ToggleItalic, ToggleLineGroup, TogglePreview, ToggleSidebar, ToggleTheme,
-    config, icons, library, markdown, theme,
+    ToggleBold, ToggleItalic, ToggleLineGroup, TogglePreview, ToggleSidebar, ToggleTheme, config,
+    icons, library, markdown, theme,
 };
 use style::*;
 
@@ -55,6 +55,19 @@ enum Selection {
     Group(PathBuf),
 }
 
+/// 그룹을 옮길 수 있는 범위. 같은 범위 안의 그룹끼리만 하위로 옮길 수 있다.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) enum GroupFamily {
+    /// 메모 섹션의 그룹.
+    Notes,
+    /// 프로젝트의 원고 그룹(빌드 대상).
+    Manuscript(PathBuf),
+    /// 프로젝트의 추가자료 그룹(빌드에서 빠짐).
+    Extras(PathBuf),
+    /// `Projects/` 바로 아래의 프로젝트. 그룹을 담는 대상이 아니며 끌 수 없다.
+    Project(PathBuf),
+}
+
 pub(crate) struct WriterApp {
     /// 사이드바 1단(섹션+그룹) 표시 여부. 2단(시트 목록)은 항상 보인다.
     sidebar_visible: bool,
@@ -71,6 +84,10 @@ pub(crate) struct WriterApp {
     selected_sheet: Option<PathBuf>,
     /// Shift+클릭으로 넓힌 시트 선택(연 시트 포함, 목록 순서). 비면 `selected_sheet`만 선택이다.
     selected_sheets: Vec<PathBuf>,
+    /// Shift+클릭으로 넓힌 그룹 선택(목록 순서). 비면 `selected`의 그룹 하나만 선택이다.
+    selected_groups: Vec<PathBuf>,
+    /// Shift+클릭으로 그룹을 넓힐 때 기준이 되는 그룹(마지막으로 그냥 누른 그룹).
+    group_anchor: Option<PathBuf>,
     /// 시트를 끄는 중: (끄는 시트, 지금 올라가 있는 시트)의 목록 위치. 놓일 자리 표시에 쓴다.
     /// 끌기가 끝났는지는 `has_active_drag`로 본다.
     sheet_drop: Option<(usize, usize)>,
@@ -131,6 +148,8 @@ impl WriterApp {
             selected: None,
             selected_sheet: None,
             selected_sheets: Vec::new(),
+            selected_groups: Vec::new(),
+            group_anchor: None,
             sheet_drop: None,
             previews: std::collections::HashMap::new(),
             preview_task: None,
@@ -173,7 +192,12 @@ impl WriterApp {
     }
 
     /// 선택한 줄을 줄 묶음으로 감싸거나 푼다(ADR-0016). 한 번에 되돌릴 수 있게 한 편집으로 바꾼다.
-    fn on_toggle_line_group(&mut self, _: &ToggleLineGroup, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_line_group(
+        &mut self,
+        _: &ToggleLineGroup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(editor) = &self.editor else {
             self.notify("먼저 시트를 여세요.", window, cx);
             return;
@@ -190,7 +214,12 @@ impl WriterApp {
         self.on_editor_changed(window, cx);
     }
 
-    fn on_compile_project(&mut self, _: &CompileProject, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_compile_project(
+        &mut self,
+        _: &CompileProject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(project_dir) = self.active_project() {
             self.open_compile_dialog(&project_dir, window, cx);
         } else {
@@ -232,6 +261,9 @@ impl WriterApp {
         self.expanded_groups.clear();
         self.selected = None;
         self.selected_sheet = None;
+        self.selected_sheets.clear();
+        self.selected_groups.clear();
+        self.group_anchor = None;
         self.open_file = None;
         self.book_style = None;
         cx.notify();
@@ -277,7 +309,12 @@ impl WriterApp {
         cx.notify();
     }
 
-    fn on_toggle_preview(&mut self, _: &TogglePreview, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_preview(
+        &mut self,
+        _: &TogglePreview,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(selected) = self.editor_selection() else {
             self.notify("미리보기할 그룹이나 시트를 선택하세요.", window, cx);
             return;
@@ -297,12 +334,13 @@ impl WriterApp {
         if !self.selected_sheets.is_empty() {
             return Some(self.selected_sheets.clone());
         }
-        self.selected_sheet.clone().map(|path| vec![path]).or_else(|| {
-            match self.effective_selection() {
+        self.selected_sheet
+            .clone()
+            .map(|path| vec![path])
+            .or_else(|| match self.effective_selection() {
                 Some(Selection::Group(path)) if !self.viewing_file_group() => Some(vec![path]),
                 _ => None,
-            }
-        })
+            })
     }
 
     fn on_set_theme(&mut self, action: &SetTheme, _: &mut Window, cx: &mut Context<Self>) {

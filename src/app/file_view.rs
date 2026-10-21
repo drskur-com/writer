@@ -243,15 +243,19 @@ impl WriterApp {
                 Some(group_path) => {
                     let group_path = group_path.clone();
                     let dragged = DraggedSheet {
-                        index,
+                        group: group_path.clone(),
+                        files: true,
+                        anchor: index,
+                        indices: vec![index],
+                        paths: Vec::new(),
                         labels: vec![label],
                         pal,
                     };
                     row.on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
                         .drag_over::<DraggedSheet>(move |style, dragged, _, _| {
-                            if dragged.index < index {
+                            if dragged.anchor < index {
                                 style.border_b_2().border_color(pal.accent)
-                            } else if dragged.index > index {
+                            } else if dragged.anchor > index {
                                 style.border_t_2().border_color(pal.accent)
                             } else {
                                 style
@@ -259,7 +263,10 @@ impl WriterApp {
                         })
                         .on_drop(
                             cx.listener(move |this, dragged: &DraggedSheet, window, cx| {
-                                this.move_file(&group_path, dragged.index, index, window, cx);
+                                if !dragged.files {
+                                    return;
+                                }
+                                this.move_file(&group_path, dragged.anchor, index, window, cx);
                             }),
                         )
                 }

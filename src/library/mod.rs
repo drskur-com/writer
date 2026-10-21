@@ -31,13 +31,14 @@ pub use files::{FileItem, FileKind, GroupKind, format_size, move_file};
 pub use layout::{FolderKind, initialize, inspect};
 pub use manuscript::{ManuscriptSheet, manuscript_sheets};
 pub use meta::{
-    create_group, create_project, create_sheet, glue_sheets, move_sheet, move_to_trash, set_sort,
+    append_sheet, create_group, create_project, create_sheet, glue_sheets, move_group,
+    move_selected_sheets, move_sheet, move_sheets_between, move_to_trash, set_sort,
     set_sort_descending, unglue_sheets, update_group, update_project,
 };
 pub use preview::{Preview, read_preview};
 pub use style::{
-    Align, FONT_WEIGHTS, Numbering, PREFIX_NUMBER, Placement, ResolvedStyle, StyleSpec,
-    StyleTarget, Styles, VerticalAlign, import_styles, read_styles, write_styles,
+    Align, FONT_WEIGHTS, HeadingNumbers, Numbering, PREFIX_NUMBER, Placement, ResolvedStyle,
+    StyleSpec, StyleTarget, Styles, VerticalAlign, import_styles, read_styles, write_styles,
 };
 
 use std::io;

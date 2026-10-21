@@ -40,8 +40,10 @@ impl WriterApp {
                 if content.is_empty() {
                     return false;
                 }
-                app.update(cx, |app, cx| app.insert_footnote(&target, &content, window, cx))
-                    .ok();
+                app.update(cx, |app, cx| {
+                    app.insert_footnote(&target, &content, window, cx)
+                })
+                .ok();
                 true
             })
         };

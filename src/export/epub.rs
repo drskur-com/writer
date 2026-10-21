@@ -13,11 +13,11 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
 
-use zip::write::SimpleFileOptions;
 use zip::CompressionMethod;
+use zip::write::SimpleFileOptions;
 
 use super::{ExportError, ExportProject, load_project};
-use crate::library::{Align, Placement, ResolvedStyle, StyleTarget, VerticalAlign};
+use crate::library::{Align, HeadingNumbers, Placement, ResolvedStyle, StyleTarget, VerticalAlign};
 use crate::markdown::{Block, ColumnAlign, Inline, Marks, Rich};
 
 /// XML 특수문자를 이스케이프한다.
@@ -91,7 +91,7 @@ struct EpubBuilder<'a> {
     image_dest_map: HashMap<String, String>,
     toc_items: Vec<TocItem>,
     /// 부(0), 장(1), 절(2) 카운터.
-    numbers: [usize; 3],
+    numbers: HeadingNumbers,
     /// 지금 시트의 각주 참조 상태.
     notes: Notes,
 }
@@ -146,7 +146,7 @@ impl<'a> EpubBuilder<'a> {
             images: Vec::new(),
             image_dest_map: HashMap::new(),
             toc_items: Vec::new(),
-            numbers: [0; 3],
+            numbers: HeadingNumbers::default(),
             notes: Notes::default(),
         }
     }
@@ -185,23 +185,18 @@ impl<'a> EpubBuilder<'a> {
 
         if let Some(target) = target {
             let resolved = self.project.styles.resolve(target);
-            let depth = match target {
-                StyleTarget::Part => 0,
-                StyleTarget::Chapter => 1,
-                _ => 2,
-            };
 
             // 번호와 접두사는 목차 포함 여부와 무관하게 붙인다. 다만 아예 그리지도 않고
-            // 목차에도 넣지 않는 제목(숨김 + 목차 제외)은 번호를 쓰지 않는다.
+            // 목차에도 넣지 않는 제목(숨김·목차 제외)은 번호를 쓰지 않는다.
             // `{unnumbered}` 제목(시트 첫 줄만)은 번호를 소비하지 않고 접두사도 붙지 않는다(ADR-0018).
             let numbered =
                 !unnumbered && (resolved.placement != Placement::Hidden || resolved.in_toc);
+            let number = self.numbers.count(&self.project.styles, target, numbered);
             // 본문 제목과 목차 제목을 따로 만든다. 목차에서는 접두사의 개행을 스페이스로 바꾼다.
             let (display_title, toc_title) = if numbered {
-                self.numbers[depth] += 1;
                 (
-                    resolved.title_text(self.numbers[depth], &raw_title),
-                    resolved.toc_title_text(self.numbers[depth], &raw_title),
+                    resolved.title_text(number, &raw_title),
+                    resolved.toc_title_text(number, &raw_title),
                 )
             } else {
                 (raw_title.clone(), raw_title.clone())
@@ -225,7 +220,9 @@ impl<'a> EpubBuilder<'a> {
                             title: toc_title,
                             href,
                         });
-                        self.ensure_section("").html_body.push_str(&format!("<span id=\"{anchor_id}\"></span>\n"));
+                        self.ensure_section("")
+                            .html_body
+                            .push_str(&format!("<span id=\"{anchor_id}\"></span>\n"));
                     }
                 }
                 Placement::Page => {
@@ -243,12 +240,7 @@ impl<'a> EpubBuilder<'a> {
                     };
 
                     let heading_html = if numbered {
-                        render_rich_with_prefix(
-                            text,
-                            &resolved,
-                            self.numbers[depth],
-                            &mut self.notes,
-                        )
+                        render_rich_with_prefix(text, &resolved, number, &mut self.notes)
                     } else {
                         render_rich(text, &mut self.notes)
                     };
@@ -280,12 +272,7 @@ impl<'a> EpubBuilder<'a> {
                     }
 
                     let heading_html = if numbered {
-                        render_rich_with_prefix(
-                            text,
-                            &resolved,
-                            self.numbers[depth],
-                            &mut self.notes,
-                        )
+                        render_rich_with_prefix(text, &resolved, number, &mut self.notes)
                     } else {
                         render_rich(text, &mut self.notes)
                     };
@@ -313,9 +300,9 @@ impl<'a> EpubBuilder<'a> {
                 href,
             });
             let html = render_rich(text, &mut self.notes);
-            self.ensure_section("").html_body.push_str(&format!(
-                "<h{level} id=\"{anchor_id}\">{html}</h{level}>\n"
-            ));
+            self.ensure_section("")
+                .html_body
+                .push_str(&format!("<h{level} id=\"{anchor_id}\">{html}</h{level}>\n"));
         }
     }
 
@@ -346,7 +333,8 @@ impl<'a> EpubBuilder<'a> {
             Block::BlankLines(count) => {
                 let sec = self.ensure_section(&self.project.name);
                 for _ in 0..*count {
-                    sec.html_body.push_str("<div class=\"blank-line\" aria-hidden=\"true\">&#160;</div>\n");
+                    sec.html_body
+                        .push_str("<div class=\"blank-line\" aria-hidden=\"true\">&#160;</div>\n");
                 }
             }
             Block::Quote(blocks) => {
@@ -366,7 +354,8 @@ impl<'a> EpubBuilder<'a> {
                 let tag = if *ordered { "ol" } else { "ul" };
                 let sec = self.ensure_section(&self.project.name);
                 if *ordered && *start != 1 {
-                    sec.html_body.push_str(&format!("<{tag} start=\"{start}\">\n"));
+                    sec.html_body
+                        .push_str(&format!("<{tag} start=\"{start}\">\n"));
                 } else {
                     sec.html_body.push_str(&format!("<{tag}>\n"));
                 }
@@ -389,7 +378,8 @@ impl<'a> EpubBuilder<'a> {
                 sec.html_body.push_str("</code></pre>\n");
             }
             Block::Image(img) => {
-                let resolved_path = resolve_image_path(sheet_dir, &self.project.dir, &img.destination);
+                let resolved_path =
+                    resolve_image_path(sheet_dir, &self.project.dir, &img.destination);
                 let mut img_class = "image".to_string();
                 match img.options.align {
                     crate::markdown::ImageAlign::Left => img_class.push_str(" align-left"),
@@ -439,7 +429,8 @@ impl<'a> EpubBuilder<'a> {
                 }
 
                 let sec = self.ensure_section(&self.project.name);
-                sec.html_body.push_str(&format!("<figure class=\"{img_class}\">\n"));
+                sec.html_body
+                    .push_str(&format!("<figure class=\"{img_class}\">\n"));
                 if style_attr.is_empty() {
                     sec.html_body.push_str(&format!(
                         "  <img src=\"{}\" alt=\"{}\"/>\n",
@@ -470,7 +461,11 @@ impl<'a> EpubBuilder<'a> {
                 let mut html = String::from("<table>\n");
                 for (r_ix, row) in table.rows.iter().enumerate() {
                     if r_ix <= 1 {
-                        html.push_str(if r_ix == 0 { "<thead>\n" } else { "</thead>\n<tbody>\n" });
+                        html.push_str(if r_ix == 0 {
+                            "<thead>\n"
+                        } else {
+                            "</thead>\n<tbody>\n"
+                        });
                     }
                     html.push_str("<tr>\n");
                     let cell_tag = if r_ix == 0 { "th" } else { "td" };
@@ -488,9 +483,15 @@ impl<'a> EpubBuilder<'a> {
                     }
                     html.push_str("</tr>\n");
                 }
-                html.push_str(if table.rows.len() > 1 { "</tbody>\n" } else { "</thead>\n" });
+                html.push_str(if table.rows.len() > 1 {
+                    "</tbody>\n"
+                } else {
+                    "</thead>\n"
+                });
                 html.push_str("</table>\n");
-                self.ensure_section(&self.project.name).html_body.push_str(&html);
+                self.ensure_section(&self.project.name)
+                    .html_body
+                    .push_str(&html);
             }
             // 각주마다 `aside`(EPUB 3 footnote). 팝업을 지원하는 리더는 본문 흐름에서 감추고 참조를
             // 누르면 띄운다. 그 밖의 리더는 시트 끝에 보여 준다. 번호는 본문으로 돌아가는 링크다.
@@ -546,7 +547,10 @@ fn save_to_file(project: &ExportProject, output_path: &Path) -> Result<(), Expor
         .unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)?;
     let temporary = parent.join(format!(".writer-export-{}.tmp", ulid::Ulid::generate()));
-    let file = OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
     let result = (|| {
         let mut writer = BufWriter::new(file);
         build(project, &mut writer)?;
@@ -571,7 +575,8 @@ pub fn build<W: Write + Seek>(project: &ExportProject, writer: &mut W) -> Result
     zip.start_file("mimetype", stored_options)?;
     zip.write_all(b"application/epub+zip")?;
 
-    let deflated_options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    let deflated_options =
+        SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
     // 2. META-INF/container.xml
     zip.start_file("META-INF/container.xml", deflated_options)?;
@@ -580,7 +585,10 @@ pub fn build<W: Write + Seek>(project: &ExportProject, writer: &mut W) -> Result
     // 3. 생성 상태 초기화 및 표지 확인
     let mut builder = EpubBuilder::new(project);
 
-    let cover_path = project.book.cover_path(&project.dir).filter(|p| p.is_file());
+    let cover_path = project
+        .book
+        .cover_path(&project.dir)
+        .filter(|p| p.is_file());
     let has_cover = if let Some(path) = cover_path {
         let ext = path
             .extension()
@@ -606,7 +614,10 @@ pub fn build<W: Write + Seek>(project: &ExportProject, writer: &mut W) -> Result
         let sheet_dir = sheet.path.parent().unwrap_or(&project.dir);
         let blocks = crate::markdown::manuscript_blocks(
             &sheet.content,
-            project.styles.resolve(StyleTarget::Body).preserve_line_breaks,
+            project
+                .styles
+                .resolve(StyleTarget::Body)
+                .preserve_line_breaks,
         );
 
         // 앞 시트와 접합되지 않은 새 시트라면 이전 섹션을 마감하여 새 파일에서 시작
@@ -679,7 +690,12 @@ pub fn build<W: Write + Seek>(project: &ExportProject, writer: &mut W) -> Result
     zip.write_all(toc_ncx.as_bytes())?;
 
     // 10. OEBPS/content.opf (패키지 문서)
-    let content_opf = generate_content_opf(project, has_cover.is_some(), &builder.sections, &builder.images);
+    let content_opf = generate_content_opf(
+        project,
+        has_cover.is_some(),
+        &builder.sections,
+        &builder.images,
+    );
     zip.start_file("OEBPS/content.opf", deflated_options)?;
     zip.write_all(content_opf.as_bytes())?;
 
@@ -810,7 +826,12 @@ fn render_rich(rich: &[Inline], notes: &mut Notes) -> String {
 fn link_notes_across_sections(sections: &mut [Section]) {
     let mut owner: HashMap<String, String> = HashMap::new();
     for sec in sections.iter() {
-        let file = sec.filename.rsplit('/').next().unwrap_or(&sec.filename).to_string();
+        let file = sec
+            .filename
+            .rsplit('/')
+            .next()
+            .unwrap_or(&sec.filename)
+            .to_string();
         for (ix, _) in sec.html_body.match_indices(" id=\"fn") {
             let rest = &sec.html_body[ix + 5..];
             if let Some(end) = rest.find('"') {
@@ -819,7 +840,12 @@ fn link_notes_across_sections(sections: &mut [Section]) {
         }
     }
     for sec in sections.iter_mut() {
-        let file = sec.filename.rsplit('/').next().unwrap_or(&sec.filename).to_string();
+        let file = sec
+            .filename
+            .rsplit('/')
+            .next()
+            .unwrap_or(&sec.filename)
+            .to_string();
         let mut out = String::with_capacity(sec.html_body.len());
         let mut rest = sec.html_body.as_str();
         while let Some(ix) = rest.find("href=\"#fn") {
@@ -1090,7 +1116,6 @@ a.noteref, a.footnote-back {{
         body_indent = body_style.first_line_indent,
         body_space_before = body_style.space_before,
         body_space_after = body_style.space_after,
-
         part_font = font_decl(&part_style.font),
         part_font_size = part_style.font_size * 1.6,
         part_font_weight = part_style.font_weight,
@@ -1098,7 +1123,6 @@ a.noteref, a.footnote-back {{
         part_align = align_str(part_style.align),
         part_space_before = part_style.space_before,
         part_space_after = part_style.space_after,
-
         chapter_font = font_decl(&chapter_style.font),
         chapter_font_size = chapter_style.font_size * 1.3,
         chapter_font_weight = chapter_style.font_weight,
@@ -1106,7 +1130,6 @@ a.noteref, a.footnote-back {{
         chapter_align = align_str(chapter_style.align),
         chapter_space_before = chapter_style.space_before,
         chapter_space_after = chapter_style.space_after,
-
         section_font = font_decl(&section_style.font),
         section_font_size = section_style.font_size * 1.1,
         section_font_weight = section_style.font_weight,
@@ -1118,7 +1141,11 @@ a.noteref, a.footnote-back {{
 }
 
 /// EPUB NCX (`toc.ncx`) 생성.
-fn generate_toc_ncx(project: &ExportProject, sections: &[Section], toc_items: &[TocItem]) -> String {
+fn generate_toc_ncx(
+    project: &ExportProject,
+    sections: &[Section],
+    toc_items: &[TocItem],
+) -> String {
     let title = if project.book.title.is_empty() {
         &project.name
     } else {
@@ -1234,10 +1261,14 @@ fn generate_content_opf(
     // manifest 생성
     let mut manifest = String::new();
     manifest.push_str("    <item id=\"style\" href=\"style.css\" media-type=\"text/css\"/>\n");
-    manifest.push_str("    <item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n");
+    manifest.push_str(
+        "    <item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n",
+    );
 
     if has_cover {
-        manifest.push_str("    <item id=\"cover\" href=\"cover.xhtml\" media-type=\"application/xhtml+xml\"/>\n");
+        manifest.push_str(
+            "    <item id=\"cover\" href=\"cover.xhtml\" media-type=\"application/xhtml+xml\"/>\n",
+        );
     }
 
     for sec in sections {
@@ -1268,7 +1299,10 @@ fn generate_content_opf(
         spine.push_str("    <itemref idref=\"cover\"/>\n");
     }
     for sec in sections {
-        spine.push_str(&format!("    <itemref idref=\"{}\"/>\n", escape_xml(&sec.id)));
+        spine.push_str(&format!(
+            "    <itemref idref=\"{}\"/>\n",
+            escape_xml(&sec.id)
+        ));
     }
 
     format!(
@@ -1322,7 +1356,8 @@ mod tests {
                 ExportSheet {
                     path: PathBuf::from("fake/project/01.md"),
                     glued: false,
-                    content: "# 1부 시작\n\n부 제목을 별도 제목 페이지(도비라)로 둔다.\n".to_string(),
+                    content: "# 1부 시작\n\n부 제목을 별도 제목 페이지(도비라)로 둔다.\n"
+                        .to_string(),
                 },
                 ExportSheet {
                     path: PathBuf::from("fake/project/02.md"),
@@ -1460,11 +1495,18 @@ mod tests {
         let mut styles = Styles::default();
         styles.chapter.page_break = Some(true);
         // 참조는 장 제목 앞 파일에, 각주 목록은 시트 끝(장 제목 뒤 파일)에 놓인다.
-        let sections = sections_of(&[("본문[^a]\n\n## 장\n\n다음\n\n[^a]: 내용\n", false)], styles);
+        let sections = sections_of(
+            &[("본문[^a]\n\n## 장\n\n다음\n\n[^a]: 내용\n", false)],
+            styles,
+        );
         assert_eq!(sections.len(), 2);
         let (first, second) = (&sections[0], &sections[1]);
         assert!(first.1.contains(&format!(r#"href="{}#fn-1-1""#, second.0)));
-        assert!(second.1.contains(&format!(r#"href="{}#fnref-1-1""#, first.0)));
+        assert!(
+            second
+                .1
+                .contains(&format!(r#"href="{}#fnref-1-1""#, first.0))
+        );
     }
 
     #[test]
@@ -1499,7 +1541,10 @@ mod tests {
         let mut ncx = reader.by_name("OEBPS/toc.ncx").unwrap();
         let mut content = String::new();
         std::io::Read::read_to_string(&mut ncx, &mut content).unwrap();
-        assert!(content.contains("<text>제1장 첫 이야기</text>"), "{content}");
+        assert!(
+            content.contains("<text>제1장 첫 이야기</text>"),
+            "{content}"
+        );
     }
 
     #[test]
@@ -1535,6 +1580,34 @@ mod tests {
         let style = styles.resolve(StyleTarget::Chapter);
         let html = render_rich_with_prefix(&Rich::new(), &style, 4, &mut Notes::default());
         assert_eq!(html, "제IV장 ");
+    }
+
+    #[test]
+    fn restart_on_parent_resets_child_numbers_in_export() {
+        let mut styles = Styles::default();
+        styles.chapter.prefix = Some("제{n}장 ".to_string());
+        styles.section.prefix = Some("{n}절 ".to_string());
+        styles.chapter.restart_on_parent = Some(true);
+        styles.section.restart_on_parent = Some(true);
+        let sections = sections_of(
+            &[(
+                "# 1부\n\n## 첫째\n\n### 하나\n\n## 둘째\n\n### 둘\n\n# 2부\n\n## 다시\n\n### 다시 하나\n",
+                false,
+            )],
+            styles,
+        );
+        let html = sections
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect::<String>();
+        // 새 부 뒤 장은 1부터. 첫째와 다시가 모두 "제1장".
+        assert_eq!(html.matches("제1장 ").count(), 2, "{html}");
+        assert!(html.contains("제2장 둘째"), "{html}");
+        // 새 장 뒤 절도 1부터.
+        assert!(html.contains("1절 하나"), "{html}");
+        assert!(html.contains("1절 둘"), "{html}");
+        assert!(html.contains("1절 다시 하나"), "{html}");
+        assert!(!html.contains("2절"), "{html}");
     }
 
     #[test]

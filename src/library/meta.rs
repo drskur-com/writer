@@ -5,8 +5,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use super::{
-    ATTACHMENTS_GROUP, EXTRAS_DIR, GROUP_META_FILE, Group, SortMode, TEMPLATES_GROUP, file_name,
-    sheet_file_name,
+    ATTACHMENTS_GROUP, EXTRAS_DIR, GROUP_META_FILE, Group, GroupKind, Sheet, SortMode,
+    TEMPLATES_GROUP, file_name, sheet_file_name,
 };
 
 /// 그룹 폴더의 `.writer.toml` 스키마.
@@ -72,12 +72,42 @@ pub(super) fn write_group_meta_if_absent(
 /// 옮긴 시트만 해제한다. 다른 접합의 두 시트 사이에 넣으면 그 접합에 들어간다.
 /// `to`는 이동 후 시트 위치다. 위로 옮기면 대상 앞, 아래로 옮기면 대상 뒤에 놓는다.
 pub fn move_sheet(group: &mut Group, from: usize, to: usize) -> io::Result<()> {
-    if from >= group.sheets.len() || to >= group.sheets.len() || from == to {
+    move_selected_sheets(group, &[from], from, to)
+}
+
+/// 그룹 안에서 선택한 시트들을 한 번에 옮긴다(ADR-0014, ADR-0019).
+///
+/// `indices`는 그룹 목록에서의 위치(정렬 전)이고 `anchor`는 끈 카드의 위치다.
+/// `to`는 놓을 대상 카드의 위치이며, 위로 옮기면 그 앞, 아래로 옮기면 그 뒤에 놓는다.
+/// 선택한 시트는 목록 순서대로 한 묶음으로 움직이고, 서로 이어져 있던 접합은 유지한다.
+pub fn move_selected_sheets(
+    group: &mut Group,
+    indices: &[usize],
+    anchor: usize,
+    to: usize,
+) -> io::Result<()> {
+    let len = group.sheets.len();
+    if anchor >= len || to >= len || anchor == to {
         return Ok(());
     }
-    let before = group.sheets.clone();
+    let mut selected: Vec<usize> = indices
+        .iter()
+        .copied()
+        .filter(|index| *index < len)
+        .collect();
+    selected.sort_unstable();
+    selected.dedup();
+    if !selected.contains(&anchor) {
+        selected.push(anchor);
+        selected.sort_unstable();
+    }
+    // 대상 카드가 선택 안에 있으면(선택을 자기 위에 놓으면) 그대로 둔다.
+    if selected.is_empty() || selected.contains(&to) {
+        return Ok(());
+    }
+
     // 이동 전 접합 소속을 임시 번호로 보존한다. 메타에는 앞 시트에 이어짐만 저장한다.
-    let mut membership = Vec::with_capacity(group.sheets.len());
+    let mut membership = Vec::with_capacity(len);
     let mut block = 0;
     for (index, sheet) in group.sheets.iter().enumerate() {
         if index > 0 && !sheet.glued {
@@ -85,25 +115,199 @@ pub fn move_sheet(group: &mut Group, from: usize, to: usize) -> io::Result<()> {
         }
         membership.push(block);
     }
-    let source = membership[from];
+    let source = membership[anchor];
     let same_block = source == membership[to];
-    let moved = group.sheets.remove(from);
-    membership.remove(from);
+
+    let remaining: Vec<(Sheet, usize)> = group
+        .sheets
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !selected.contains(index))
+        .map(|(index, sheet)| (sheet.clone(), membership[index]))
+        .collect();
+    // 선택을 뺀 목록에서의 삽입 위치. 아래로 옮기면 대상 뒤, 위로 옮기면 대상 앞이다.
+    let before_target = selected.iter().filter(|index| **index < to).count();
+    let insert = if anchor < to {
+        to - before_target + 1
+    } else {
+        to - before_target
+    };
+
+    let mut next_block = membership.iter().max().copied().unwrap_or(0) + 1;
     let destination = if same_block {
         source
+    } else if insert > 0
+        && insert < remaining.len()
+        && remaining[insert - 1].1 == remaining[insert].1
+    {
+        // 대상 접합의 두 시트 사이에 놓이면 그 접합에 합류한다.
+        remaining[insert - 1].1
     } else {
-        // 양쪽 이웃이 같은 접합에 속할 때만 접합 내부에 놓인 것이다.
-        match (to.checked_sub(1).and_then(|index| membership.get(index)), membership.get(to)) {
-            (Some(left), Some(right)) if left == right => *left,
-            _ => block + 1,
-        }
+        next_block
     };
-    group.sheets.insert(to, moved);
-    membership.insert(to, destination);
-    for (index, sheet) in group.sheets.iter_mut().enumerate() {
-        sheet.glued = index > 0 && membership[index - 1] == membership[index];
+
+    // 선택한 시트를 목록 순서대로 한 묶음으로 만든다. 원래 붙어 있던 시트만 이어 붙인다.
+    let mut moved: Vec<(Sheet, usize)> = Vec::with_capacity(selected.len());
+    let mut previous: Option<usize> = None;
+    let mut run_block = destination;
+    for &index in &selected {
+        let continues = previous.is_some_and(|previous| previous + 1 == index)
+            && membership[previous.unwrap()] == membership[index];
+        if previous.is_some() && !continues {
+            next_block += 1;
+            run_block = next_block;
+        }
+        moved.push((group.sheets[index].clone(), run_block));
+        previous = Some(index);
     }
+
+    let mut sheets = Vec::with_capacity(len);
+    let mut blocks = Vec::with_capacity(len);
+    for (sheet, block) in remaining[..insert].iter().cloned() {
+        sheets.push(sheet);
+        blocks.push(block);
+    }
+    for (sheet, block) in moved {
+        sheets.push(sheet);
+        blocks.push(block);
+    }
+    for (sheet, block) in remaining[insert..].iter().cloned() {
+        sheets.push(sheet);
+        blocks.push(block);
+    }
+    for (index, sheet) in sheets.iter_mut().enumerate() {
+        sheet.glued = index > 0 && blocks[index - 1] == blocks[index];
+    }
+
+    let before = group.sheets.clone();
+    group.sheets = sheets;
     write_order_and_glue(group, before)
+}
+
+/// 선택한 시트를 다른 그룹의 끝으로 옮긴다(ADR-0019).
+///
+/// 파일을 실제로 옮기고 두 그룹의 순서·접합을 저장한다. 원본에 남은 시트의 접합은 유지하고,
+/// 옮긴 묶음 안에서 원래 붙어 있던 시트의 접합도 유지한다. 대상 그룹에 같은 파일명이 있으면
+/// `이름 2.md`처럼 비어 있는 이름을 쓴다. 성공하면 (옛 경로, 새 경로) 목록을 돌려준다.
+///
+/// 쓰기에 실패하면 옮긴 파일과 대상 메타를 되돌린다. 원본·대상 모델은 성공했을 때만 바뀐다.
+pub fn move_sheets_between(
+    source: &mut Group,
+    target: &mut Group,
+    indices: &[usize],
+) -> io::Result<Vec<(PathBuf, PathBuf)>> {
+    if source.path == target.path || target.kind == GroupKind::Files {
+        return Ok(Vec::new());
+    }
+    let mut selected: Vec<usize> = indices
+        .iter()
+        .copied()
+        .filter(|index| *index < source.sheets.len())
+        .collect();
+    // 넘어온 순서를 대상 그룹의 순서로 쓴다. 표시 목록 순서와 그룹의 실제 순서가 다를 수 있다.
+    selected.dedup();
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let original_source = source.sheets.clone();
+    let original_target = target.sheets.clone();
+
+    // 원본의 접합 소속. 선택을 빼도 같은 묶음에 남은 시트끼리는 이어진다(ADR-0014).
+    let mut membership = Vec::with_capacity(original_source.len());
+    let mut block = 0;
+    for (index, sheet) in original_source.iter().enumerate() {
+        if index > 0 && !sheet.glued {
+            block += 1;
+        }
+        membership.push(block);
+    }
+    let mut remaining: Vec<(Sheet, usize)> = original_source
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !selected.contains(index))
+        .map(|(index, sheet)| (sheet.clone(), membership[index]))
+        .collect();
+    for index in 1..remaining.len() {
+        remaining[index].0.glued = remaining[index - 1].1 == remaining[index].1;
+    }
+    if let Some((first, _)) = remaining.first_mut() {
+        first.glued = false;
+    }
+    let remaining: Vec<Sheet> = remaining.into_iter().map(|(sheet, _)| sheet).collect();
+
+    let mut moved: Vec<Sheet> = Vec::with_capacity(selected.len());
+    let mut previous: Option<usize> = None;
+    for &index in &selected {
+        let mut sheet = original_source[index].clone();
+        sheet.glued = previous.is_some_and(|previous| {
+            previous + 1 == index && membership[previous] == membership[index]
+        });
+        moved.push(sheet);
+        previous = Some(index);
+    }
+
+    // 파일명 충돌을 피해 새 경로를 정하고, 실제 파일을 옮긴다.
+    let mut taken = std::collections::HashSet::new();
+    let mut moves = Vec::with_capacity(moved.len());
+    for sheet in &mut moved {
+        let to = unique_sheet_path(&target.path, &sheet.path, &mut taken);
+        moves.push((sheet.path.clone(), to.clone()));
+        sheet.path = to;
+    }
+    let mut renamed: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for (from, to) in &moves {
+        if let Err(err) = std::fs::rename(from, to) {
+            for (from, to) in renamed.iter().rev() {
+                let _ = std::fs::rename(to, from);
+            }
+            return Err(err);
+        }
+        renamed.push((from.clone(), to.clone()));
+    }
+
+    let mut destination = original_target;
+    destination.extend(moved);
+    if let Err(err) = write_sheet_order_and_glue(&target.path, &destination) {
+        for (from, to) in renamed.iter().rev() {
+            let _ = std::fs::rename(to, from);
+        }
+        return Err(err);
+    }
+    if let Err(err) = write_sheet_order_and_glue(&source.path, &remaining) {
+        let _ = write_sheet_order_and_glue(&target.path, &target.sheets);
+        for (from, to) in renamed.iter().rev() {
+            let _ = std::fs::rename(to, from);
+        }
+        return Err(err);
+    }
+    source.sheets = remaining;
+    target.sheets = destination;
+    Ok(moves)
+}
+
+/// `dir` 안에서 `source`와 겹치지 않는 시트 파일 경로를 찾는다.
+fn unique_sheet_path(
+    dir: &Path,
+    source: &Path,
+    taken: &mut std::collections::HashSet<String>,
+) -> PathBuf {
+    let stem = source
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "무제".to_string());
+    let extension = source
+        .extension()
+        .map(|extension| format!(".{}", extension.to_string_lossy()))
+        .unwrap_or_default();
+    let mut name = format!("{stem}{extension}");
+    let mut n = 2;
+    while taken.contains(&name) || dir.join(&name).exists() {
+        name = format!("{stem} {n}{extension}");
+        n += 1;
+    }
+    taken.insert(name.clone());
+    dir.join(name)
 }
 
 /// `range`의 시트를 하나로 잇는다: 첫 시트 뒤의 시트를 모두 앞 시트에 접합한다.
@@ -137,9 +341,17 @@ pub fn unglue_sheets(group: &mut Group, range: Range<usize>) -> io::Result<()> {
 
 /// 시트 순서와 접합을 메타에 쓴다. 실패하면 `before`로 되돌린다.
 fn write_order_and_glue(group: &mut Group, before: Vec<super::Sheet>) -> io::Result<()> {
+    if let Err(err) = write_sheet_order_and_glue(&group.path, &group.sheets) {
+        group.sheets = before;
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// 시트 목록의 순서와 접합을 그룹 메타에 쓴다.
+fn write_sheet_order_and_glue(dir: &Path, sheets: &[Sheet]) -> io::Result<()> {
     let names = |glued_only: bool| -> Vec<toml::Value> {
-        group
-            .sheets
+        sheets
             .iter()
             .enumerate()
             .filter(|(index, sheet)| !glued_only || (*index > 0 && sheet.glued))
@@ -149,17 +361,13 @@ fn write_order_and_glue(group: &mut Group, before: Vec<super::Sheet>) -> io::Res
     let order = names(false);
     let glued = names(true);
     let glued = (!glued.is_empty()).then_some(toml::Value::Array(glued));
-    if let Err(err) = write_meta_values(
-        &group.path,
+    write_meta_values(
+        dir,
         [
             ("sheets", Some(toml::Value::Array(order))),
             ("glued", glued),
         ],
-    ) {
-        group.sheets = before;
-        return Err(err);
-    }
-    Ok(())
+    )
 }
 
 /// 그룹의 정렬 방법을 바꾸고 `.writer.toml`의 `sort`에 쓴다. 쓰기에 실패하면 메모리 값도 그대로 둔다.
@@ -293,6 +501,81 @@ pub fn create_group(
         return Err(err);
     }
     Ok(dir)
+}
+
+/// 그룹을 다른 그룹의 하위로 옮기고 새 경로를 돌려준다.
+///
+/// 폴더를 통째로 옮기므로 시트·파일·하위 그룹이 함께 간다. 원래 부모의 `groups`에서 빼고
+/// 대상 그룹의 `groups` 맨 뒤에 붙인다. 같은 이름이 있으면 " 2", " 3"…을 붙인다.
+/// 대상이 원본의 하위이거나 원본의 조상이면 옮기지 않는다(순환·제자리 이동 방지).
+pub fn move_group(source: &Path, target: &Path) -> io::Result<PathBuf> {
+    if !source.is_dir() || !target.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "그룹 폴더를 찾을 수 없습니다",
+        ));
+    }
+    if source == target || target.starts_with(source) || source.starts_with(target) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "그룹을 자기 자신이나 자기 안으로 옮길 수 없습니다",
+        ));
+    }
+    let parent = source
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "상위 폴더가 없습니다"))?;
+
+    let source_name = file_name(source);
+    let mut source_order = group_order(parent)?;
+    source_order.retain(|name| *name != source_name);
+    let mut target_order = group_order(target)?;
+    let dest = unique_dir_path(target, &source_name);
+    let dest_name = file_name(&dest);
+    target_order.retain(|name| *name != dest_name);
+    target_order.push(dest_name);
+
+    // 메타 쓰기가 실패하면 폴더와 두 메타 파일을 원래대로 되돌린다.
+    let source_meta = std::fs::read(parent.join(GROUP_META_FILE)).ok();
+    let target_meta = std::fs::read(target.join(GROUP_META_FILE)).ok();
+    std::fs::rename(source, &dest)?;
+    let written = write_meta_list(target, "groups", &target_order)
+        .and_then(|()| write_meta_list(parent, "groups", &source_order));
+    if let Err(err) = written {
+        let _ = std::fs::rename(&dest, source);
+        restore_meta(parent, source_meta);
+        restore_meta(target, target_meta);
+        return Err(err);
+    }
+    Ok(dest)
+}
+
+/// `parent/base` 중 아직 없는 경로. 같은 이름이 있으면 " 2", " 3"…을 붙인다.
+fn unique_dir_path(parent: &Path, base: &str) -> PathBuf {
+    let mut n = 1;
+    loop {
+        let candidate = if n == 1 {
+            parent.join(base)
+        } else {
+            parent.join(format!("{base} {n}"))
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// 메타 파일을 미리 읽어 둔 내용으로 되돌린다(`None`이면 원래 없던 파일).
+fn restore_meta(dir: &Path, contents: Option<Vec<u8>>) {
+    let path = dir.join(GROUP_META_FILE);
+    match contents {
+        Some(contents) => {
+            let _ = std::fs::write(&path, contents);
+        }
+        None => {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// `parent` 바로 아래 그룹 폴더 이름을 화면 순서(메타 `groups` → 이름순)로 돌려준다.
@@ -481,6 +764,18 @@ pub fn create_sheet(dir: &Path) -> io::Result<PathBuf> {
         .create_new(true)
         .open(&path)?;
     Ok(path)
+}
+
+/// 새 시트를 그룹의 수동 순서 마지막에 붙이고 `.writer.toml`의 `sheets`에 쓴다.
+///
+/// 수동 정렬 그룹(프로젝트 원고 등)은 순서가 곧 원고 구조라서 새 시트가 늘 끝에 와야 한다.
+/// 메타에 아직 없는 시트는 최근 수정순으로 뒤에 붙으므로, 그것들을 포함한 지금 목록을 그대로
+/// 적어 새 시트만 맨 뒤로 옮긴다. 쓰기에 실패하면 메모리의 순서도 되돌린다.
+pub fn append_sheet(group: &mut Group, path: &Path) -> io::Result<()> {
+    let before = group.sheets.clone();
+    group.sheets.retain(|sheet| sheet.path != path);
+    group.sheets.push(super::sheet_from_path(path));
+    write_order_and_glue(group, before)
 }
 
 #[cfg(test)]
@@ -801,6 +1096,126 @@ mod tests {
     }
 
     #[test]
+    fn move_selected_sheets_keeps_glue_and_writes_order() {
+        let root = temp_dir("move-selected");
+        initialize(&root).unwrap();
+        let inbox = root.join("Notes").join(DEFAULT_INBOX);
+        for stem in ["a", "b", "c", "d"] {
+            std::fs::write(inbox.join(format!("{stem}.md")), stem).unwrap();
+        }
+        std::fs::write(
+            inbox.join(GROUP_META_FILE),
+            "sheets = [\"a.md\", \"b.md\", \"c.md\", \"d.md\"]\n",
+        )
+        .unwrap();
+
+        let mut group = scan_group(&inbox, false).unwrap();
+        glue_sheets(&mut group, 0..3).unwrap(); // [a b c] d
+        move_selected_sheets(&mut group, &[0, 1], 0, 3).unwrap();
+
+        let titles: Vec<_> = group.sheets.iter().map(stem).collect();
+        assert_eq!(titles, vec!["c", "d", "a", "b"]);
+        let glued: Vec<_> = group.sheets.iter().map(|sheet| sheet.glued).collect();
+        assert_eq!(glued, vec![false, false, false, true]);
+
+        let rescanned = scan_group(&inbox, false).unwrap();
+        assert_eq!(
+            rescanned.sheets.iter().map(stem).collect::<Vec<_>>(),
+            titles
+        );
+        assert_eq!(
+            rescanned
+                .sheets
+                .iter()
+                .map(|sheet| sheet.glued)
+                .collect::<Vec<_>>(),
+            glued
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn move_sheets_between_groups_moves_files_and_keeps_glue() {
+        let root = temp_dir("move-between");
+        initialize(&root).unwrap();
+        let inbox = root.join("Notes").join(DEFAULT_INBOX);
+        for stem in ["a", "b", "c", "d"] {
+            std::fs::write(inbox.join(format!("{stem}.md")), stem).unwrap();
+        }
+        std::fs::write(
+            inbox.join(GROUP_META_FILE),
+            "sheets = [\"a.md\", \"b.md\", \"c.md\", \"d.md\"]\n",
+        )
+        .unwrap();
+
+        let other = root.join("Notes").join("Other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("x.md"), "x").unwrap();
+        // 같은 이름의 파일이 있으면 번호를 붙여 옮긴다.
+        std::fs::write(other.join("b.md"), "다른 b").unwrap();
+        std::fs::write(
+            other.join(GROUP_META_FILE),
+            "sheets = [\"x.md\", \"b.md\"]\n",
+        )
+        .unwrap();
+
+        let library = scan(&root).unwrap();
+        let mut source = library.find_group(&inbox).unwrap().clone();
+        let mut target = library.find_group(&other).unwrap().clone();
+        // [a b c] d 에서 b, c를 옮긴다.
+        source.sheets[1].glued = true;
+        source.sheets[2].glued = true;
+
+        let moves = move_sheets_between(&mut source, &mut target, &[1, 2]).unwrap();
+        assert_eq!(moves.len(), 2);
+        assert_eq!(
+            source.sheets.iter().map(stem).collect::<Vec<_>>(),
+            vec!["a", "d"]
+        );
+        assert_eq!(
+            target.sheets.iter().map(stem).collect::<Vec<_>>(),
+            vec!["x", "b", "b 2", "c"]
+        );
+        assert!(source.sheets.iter().all(|sheet| !sheet.glued));
+        assert_eq!(
+            target
+                .sheets
+                .iter()
+                .map(|sheet| sheet.glued)
+                .collect::<Vec<_>>(),
+            vec![false, false, false, true]
+        );
+        assert!(!inbox.join("b.md").exists());
+        assert!(!inbox.join("c.md").exists());
+        assert!(other.join("b 2.md").is_file());
+        assert!(other.join("c.md").is_file());
+
+        // 다시 읽어도 파일과 메타가 같은 순서·접합을 가리킨다.
+        let rescanned = scan(&root).unwrap();
+        let source = rescanned.find_group(&inbox).unwrap();
+        let target = rescanned.find_group(&other).unwrap();
+        assert_eq!(
+            source.sheets.iter().map(stem).collect::<Vec<_>>(),
+            vec!["a", "d"]
+        );
+        assert_eq!(
+            target.sheets.iter().map(stem).collect::<Vec<_>>(),
+            vec!["x", "b", "b 2", "c"]
+        );
+        assert_eq!(
+            target
+                .sheets
+                .iter()
+                .map(|sheet| sheet.glued)
+                .collect::<Vec<_>>(),
+            vec![false, false, false, true]
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn set_sort_persists_and_keeps_other_keys() {
         let root = temp_dir("sort");
         initialize(&root).unwrap();
@@ -821,6 +1236,99 @@ mod tests {
         // 방법을 바꾸면 방향은 그 방법의 기본으로 돌아간다.
         set_sort(&mut group, SortMode::Created).unwrap();
         assert_eq!(scan_group(&inbox, false).unwrap().descending, None);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn move_group_moves_folder_and_updates_orders() {
+        let root = temp_dir("move-group");
+        initialize(&root).unwrap();
+        let projects = root.join(SectionKind::Projects.dir());
+        let project = create_project(&projects, "소설", None, None).unwrap();
+        let target = create_group(&project, "1부", None, None).unwrap();
+        let source = create_group(&project, "장면", None, None).unwrap();
+        let sheet = create_sheet(&source).unwrap();
+        std::fs::write(&sheet, "본문").unwrap();
+
+        let moved = move_group(&source, &target).unwrap();
+        assert_eq!(moved, target.join("장면"));
+        assert!(!source.exists());
+        assert!(moved.join(sheet.file_name().unwrap()).is_file());
+
+        // 원래 부모의 순서에서 빠지고, 대상 그룹의 순서 끝에 붙는다.
+        assert_eq!(read_group_meta(&project).groups, vec!["1부"]);
+        assert_eq!(read_group_meta(&target).groups, vec!["장면"]);
+
+        let library = scan(&root).unwrap();
+        let project = library.find_project(&project).unwrap();
+        assert_eq!(project.groups.len(), 1);
+        let target = library.find_group(&target).unwrap();
+        assert_eq!(target.groups.len(), 1);
+        assert_eq!(target.groups[0].name, "장면");
+        assert_eq!(target.groups[0].sheets.len(), 1);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn move_group_avoids_name_clash_and_cycles() {
+        let root = temp_dir("move-group-clash");
+        initialize(&root).unwrap();
+        let projects = root.join(SectionKind::Projects.dir());
+        let project = create_project(&projects, "소설", None, None).unwrap();
+        let target = create_group(&project, "1부", None, None).unwrap();
+        let source = create_group(&project, "장면", None, None).unwrap();
+        create_group(&target, "장면", None, None).unwrap();
+
+        let moved = move_group(&source, &target).unwrap();
+        assert_eq!(moved, target.join("장면 2"));
+
+        // 자기 자신이나 자기 하위로는 옮길 수 없다.
+        assert!(move_group(&target, &target).is_err());
+        assert!(move_group(&target, &moved).is_err());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn append_sheet_puts_new_sheet_last_and_keeps_glue() {
+        let root = temp_dir("append-sheet");
+        initialize(&root).unwrap();
+        let inbox = root.join("Notes").join(DEFAULT_INBOX);
+        let name = |path: &Path| path.file_stem().unwrap().to_string_lossy().into_owned();
+
+        // 메타 순서가 없는 수동 그룹은 최근 수정순이라 나중에 만든 시트가 앞에 온다.
+        // append_sheet는 그 시트를 목록 끝으로 옮기고 순서를 메타에 적는다.
+        let first = create_sheet(&inbox).unwrap();
+        let second = create_sheet(&inbox).unwrap();
+        let mut group = scan_group(&inbox, false).unwrap();
+        assert_eq!(group.sheets[0].path, second);
+        append_sheet(&mut group, &second).unwrap();
+        let titles: Vec<_> = group.sheets.iter().map(stem).collect();
+        assert_eq!(titles, vec![name(&first), name(&second)]);
+
+        // 접합이 있는 그룹에 붙인 시트는 맨 뒤에서 새 묶음으로 시작한다.
+        glue_sheets(&mut group, 0..2).unwrap();
+        let third = create_sheet(&inbox).unwrap();
+        let mut group = scan_group(&inbox, false).unwrap();
+        append_sheet(&mut group, &third).unwrap();
+        let titles: Vec<_> = group.sheets.iter().map(stem).collect();
+        assert_eq!(titles, vec![name(&first), name(&second), name(&third)]);
+        assert_eq!(
+            group
+                .sheets
+                .iter()
+                .map(|sheet| sheet.glued)
+                .collect::<Vec<_>>(),
+            vec![false, true, false]
+        );
+
+        // 다시 읽어도 같은 순서·접합이고, 다른 메타 키는 그대로다.
+        let rescanned = scan_group(&inbox, false).unwrap();
+        let titles: Vec<_> = rescanned.sheets.iter().map(stem).collect();
+        assert_eq!(titles, vec![name(&first), name(&second), name(&third)]);
+        assert_eq!(rescanned.icon.as_deref(), Some("inbox"));
 
         std::fs::remove_dir_all(&root).ok();
     }

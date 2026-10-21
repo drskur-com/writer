@@ -248,7 +248,7 @@ struct Flow<'a> {
     toc: Vec<TocEntry>,
     no_folio: Vec<usize>,
     /// 대상별 제목 번호.
-    numbers: [usize; 3],
+    numbers: library::HeadingNumbers,
     /// 상대 경로 이미지의 기준(시트 폴더).
     dir: PathBuf,
 }
@@ -271,7 +271,7 @@ impl<'a> Flow<'a> {
             pending: px(0.),
             toc: Vec::new(),
             no_folio: Vec::new(),
-            numbers: [0; 3],
+            numbers: library::HeadingNumbers::default(),
             dir: PathBuf::new(),
         }
     }
@@ -721,11 +721,9 @@ impl<'a> Flow<'a> {
         // 다만 그리지도 않고 목차에도 넣지 않는 제목은 번호를 쓰지 않는다.
         // `{unnumbered}` 제목(시트 첫 줄만)은 번호를 소비하지 않고 접두사도 붙지 않는다(ADR-0018).
         let numbered = !unnumbered && (resolved.placement != Placement::Hidden || resolved.in_toc);
-        if numbered {
-            self.numbers[depth] += 1;
-        }
+        let number = self.numbers.count(self.styles, target, numbered);
         let prefix = if numbered {
-            resolved.prefix_text(self.numbers[depth])
+            resolved.prefix_text(number)
         } else {
             String::new()
         };
@@ -740,7 +738,7 @@ impl<'a> Flow<'a> {
         if resolved.in_toc {
             // 차례에서는 접두사(번호)와 제목의 개행(`<br>`)을 스페이스로 바꾼다.
             let toc_prefix = if numbered {
-                resolved.toc_prefix_text(self.numbers[depth])
+                resolved.toc_prefix_text(number)
             } else {
                 String::new()
             };
@@ -847,7 +845,11 @@ impl<'a> Flow<'a> {
                 ColumnAlign::Center => Align::Center,
                 ColumnAlign::Right => Align::Right,
             },
-            ..if row_ix == 0 { header.clone() } else { base.clone() }
+            ..if row_ix == 0 {
+                header.clone()
+            } else {
+                base.clone()
+            }
         };
         // 열 너비는 칸 글자를 한 줄로 놓았을 때의 폭을 따른다.
         let mut natural = vec![0f32; columns];
@@ -858,7 +860,10 @@ impl<'a> Flow<'a> {
             }
         }
         let available = f32::from(ctx.width - gap * (columns - 1) as f32);
-        let widths: Vec<Pixels> = column_widths(&natural, available).into_iter().map(px).collect();
+        let widths: Vec<Pixels> = column_widths(&natural, available)
+            .into_iter()
+            .map(px)
+            .collect();
         let lefts: Vec<Pixels> = widths
             .iter()
             .scan(ctx.left, |left, width| {
@@ -902,7 +907,11 @@ impl<'a> Flow<'a> {
         for row_ix in 0..rows.len() {
             let height = rows[row_ix].1;
             // 머리 행은 첫 본문 행과 같은 쪽에 둔다.
-            let keep = if row_ix == 0 { rows.get(1).map_or(px(0.), |row| row.1) } else { px(0.) };
+            let keep = if row_ix == 0 {
+                rows.get(1).map_or(px(0.), |row| row.1)
+            } else {
+                px(0.)
+            };
             let mut top = self.reserve(height, keep);
             let new_page = top == self.setup.margin.top;
             if row_ix == 0 || new_page {
@@ -930,12 +939,9 @@ impl<'a> Flow<'a> {
             if segment.is_empty() {
                 continue;
             }
-            let layout = self.text_system.layout_line(
-                segment,
-                style.size,
-                &slice_runs(&runs, range),
-                None,
-            );
+            let layout =
+                self.text_system
+                    .layout_line(segment, style.size, &slice_runs(&runs, range), None);
             widest = widest.max(layout.x_for_index(segment.len()));
         }
         widest
@@ -1387,8 +1393,9 @@ pub(in crate::app) fn column_widths(natural: &[f32], available: f32) -> Vec<f32>
     loop {
         let open = fixed.iter().filter(|fixed| !**fixed).count();
         let share = rest / open as f32;
-        let narrow: Vec<usize> =
-            (0..count).filter(|&ix| !fixed[ix] && natural[ix] <= share).collect();
+        let narrow: Vec<usize> = (0..count)
+            .filter(|&ix| !fixed[ix] && natural[ix] <= share)
+            .collect();
         if narrow.is_empty() || narrow.len() == open {
             break;
         }
@@ -1397,9 +1404,18 @@ pub(in crate::app) fn column_widths(natural: &[f32], available: f32) -> Vec<f32>
             rest -= natural[ix];
         }
     }
-    let wide: f32 = (0..count).filter(|&ix| !fixed[ix]).map(|ix| natural[ix]).sum();
+    let wide: f32 = (0..count)
+        .filter(|&ix| !fixed[ix])
+        .map(|ix| natural[ix])
+        .sum();
     (0..count)
-        .map(|ix| if fixed[ix] { natural[ix] } else { rest * natural[ix] / wide })
+        .map(|ix| {
+            if fixed[ix] {
+                natural[ix]
+            } else {
+                rest * natural[ix] / wide
+            }
+        })
         .collect()
 }
 

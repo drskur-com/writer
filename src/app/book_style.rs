@@ -228,7 +228,8 @@ impl BookStyleView {
 
     fn open_transform(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let before = cx.new(|cx| InputState::new(window, cx).placeholder("바꿀 텍스트"));
-        let after = cx.new(|cx| InputState::new(window, cx).placeholder("바꾼 후 텍스트 (비우면 삭제)"));
+        let after =
+            cx.new(|cx| InputState::new(window, cx).placeholder("바꾼 후 텍스트 (비우면 삭제)"));
         let mut subscriptions = Vec::new();
         for input in [&before, &after] {
             subscriptions.push(cx.subscribe(input, |_, _, event: &InputEvent, cx| {
@@ -246,74 +247,145 @@ impl BookStyleView {
     }
 
     fn add_replacement(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = &self.transform_form else { return };
+        let Some(form) = &self.transform_form else {
+            return;
+        };
         let before = form.before.read(cx).value().to_string();
         let after = form.after.read(cx).value().to_string();
         if before.is_empty() {
             return;
         }
-        if self.styles.input_transform.replacements.iter().any(|rule| rule.before == before) {
-            window.push_notification(Notification::info("같은 텍스트의 치환 규칙이 이미 있습니다."), cx);
+        if self
+            .styles
+            .input_transform
+            .replacements
+            .iter()
+            .any(|rule| rule.before == before)
+        {
+            window.push_notification(
+                Notification::info("같은 텍스트의 치환 규칙이 이미 있습니다."),
+                cx,
+            );
             return;
         }
-        self.styles.input_transform.replacements.push(crate::text_transform::Replacement {
-            before,
-            after,
-            enabled: true,
-        });
-        form.before.update(cx, |input, cx| input.set_value("", window, cx));
-        form.after.update(cx, |input, cx| input.set_value("", window, cx));
+        self.styles
+            .input_transform
+            .replacements
+            .push(crate::text_transform::Replacement {
+                before,
+                after,
+                enabled: true,
+            });
+        form.before
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        form.after
+            .update(cx, |input, cx| input.set_value("", window, cx));
         self.save(window, cx);
     }
 
-    fn render_transform(&self, form: &TransformForm, cx: &mut Context<Self>, pal: Palette) -> AnyElement {
+    fn render_transform(
+        &self,
+        form: &TransformForm,
+        cx: &mut Context<Self>,
+        pal: Palette,
+    ) -> AnyElement {
         let options = &self.styles.input_transform;
         let controls = [
-            ("transform-quotes", "스마트 따옴표", "직선 따옴표를 “곡선 따옴표”로 바꾸고 아포스트로피를 처리합니다.", options.smart_quotes),
-            ("transform-ellipsis", "줄임표 자동 변환", "... → …", options.ellipsis),
+            (
+                "transform-quotes",
+                "스마트 따옴표",
+                "직선 따옴표를 “곡선 따옴표”로 바꾸고 아포스트로피를 처리합니다.",
+                options.smart_quotes,
+            ),
+            (
+                "transform-ellipsis",
+                "줄임표 자동 변환",
+                "... → …",
+                options.ellipsis,
+            ),
             ("transform-dash", "대시 자동 변환", "-- → —", options.dash),
-        ].into_iter().enumerate().map(|(index, (id, label, description, checked))| {
-            div().flex().flex_col().gap_1()
-                .child(Checkbox::new(id).label(label).checked(checked)
-                    .on_click(cx.listener(move |this, checked: &bool, window, cx| {
-                        let options = &mut this.styles.input_transform;
-                        match index {
-                            0 => options.smart_quotes = *checked,
-                            1 => options.ellipsis = *checked,
-                            _ => options.dash = *checked,
-                        }
-                        this.save(window, cx);
-                    })))
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, label, description, checked))| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    Checkbox::new(id)
+                        .label(label)
+                        .checked(checked)
+                        .on_click(cx.listener(move |this, checked: &bool, window, cx| {
+                            let options = &mut this.styles.input_transform;
+                            match index {
+                                0 => options.smart_quotes = *checked,
+                                1 => options.ellipsis = *checked,
+                                _ => options.dash = *checked,
+                            }
+                            this.save(window, cx);
+                        })),
+                )
                 .child(div().text_xs().text_color(pal.muted).child(description))
         });
-        let rules = options.replacements.iter().enumerate().map(|(index, rule)| {
-            div().flex().items_center().gap_3()
-                .child(Checkbox::new(SharedString::from(format!("replacement-enabled-{index}")))
-                    .label("사용")
-                    .checked(rule.enabled)
-                    .on_click(cx.listener(move |this, checked: &bool, window, cx| {
-                        if let Some(rule) = this.styles.input_transform.replacements.get_mut(index) {
-                            rule.enabled = *checked;
-                            this.save(window, cx);
-                        }
-                    })))
-                .child(div().flex_1().whitespace_normal().child(rule.before.clone()))
-                .child(div().text_color(pal.muted).child("→"))
-                .child(div().flex_1().whitespace_normal().child(
-                    if rule.after.is_empty() { "(삭제)".to_string() } else { rule.after.clone() }
-                ))
-                .child(Button::new(SharedString::from(format!("replacement-remove-{index}")))
-                    .ghost().small().label("삭제")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if index < this.styles.input_transform.replacements.len() {
-                            this.styles.input_transform.replacements.remove(index);
-                            this.save(window, cx);
-                        }
-                    })))
-        });
+        let rules = options
+            .replacements
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        Checkbox::new(SharedString::from(format!("replacement-enabled-{index}")))
+                            .label("사용")
+                            .checked(rule.enabled)
+                            .on_click(cx.listener(move |this, checked: &bool, window, cx| {
+                                if let Some(rule) =
+                                    this.styles.input_transform.replacements.get_mut(index)
+                                {
+                                    rule.enabled = *checked;
+                                    this.save(window, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .whitespace_normal()
+                            .child(rule.before.clone()),
+                    )
+                    .child(div().text_color(pal.muted).child("→"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .whitespace_normal()
+                            .child(if rule.after.is_empty() {
+                                "(삭제)".to_string()
+                            } else {
+                                rule.after.clone()
+                            }),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("replacement-remove-{index}")))
+                            .ghost()
+                            .small()
+                            .label("삭제")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if index < this.styles.input_transform.replacements.len() {
+                                    this.styles.input_transform.replacements.remove(index);
+                                    this.save(window, cx);
+                                }
+                            })),
+                    )
+            });
         let can_add = !form.before.read(cx).value().is_empty();
-        let back = Button::new("transform-back").ghost().small()
-            .icon(Icon::new(icons::leave())).label("스타일 목록")
+        let back = Button::new("transform-back")
+            .ghost()
+            .small()
+            .icon(Icon::new(icons::leave()))
+            .label("스타일 목록")
             .on_click(cx.listener(|this, _, _, cx| {
                 this.transform_form = None;
                 cx.notify();
@@ -683,15 +755,34 @@ impl BookStyleView {
             ))
             .child(div().flex().flex_col().gap_3().children(cards))
             .child(
-                div().id("style-input-transform").px_5().py_4()
-                    .flex().items_center().gap_4()
-                    .rounded_xl().border_1().border_color(pal.panel_border).bg(pal.panel)
-                    .cursor_pointer().hover(move |style| style.bg(pal.hover))
+                div()
+                    .id("style-input-transform")
+                    .px_5()
+                    .py_4()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(pal.panel_border)
+                    .bg(pal.panel)
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(pal.hover))
                     .on_click(cx.listener(|this, _, window, cx| this.open_transform(window, cx)))
-                    .child(div().flex_1().flex().flex_col().gap_1()
-                        .child(div().font_semibold().child("입력 자동 변환"))
-                        .child(div().text_xs().text_color(pal.muted)
-                            .child("스마트 문장부호와 사용자 지정 치환 규칙")))
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().font_semibold().child("입력 자동 변환"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(pal.muted)
+                                    .child("스마트 문장부호와 사용자 지정 치환 규칙"),
+                            ),
+                    )
                     .child(Icon::new(icons::enter()).text_color(pal.muted)),
             )
             .child(import)
@@ -837,6 +928,21 @@ impl BookStyleView {
                     view.update_spec(target, window, cx, |spec| spec.numbering = Some(numbering))
                 },
             );
+            // 부에는 상위가 없으니 장·절만 고른다.
+            let restart = (target != StyleTarget::Part).then(|| {
+                choice(
+                    "style-restart-on-parent",
+                    &view,
+                    resolved.restart_on_parent,
+                    [(false, "이어서".into()), (true, "1부터".into())],
+                    160.0,
+                    move |view, restart, window, cx| {
+                        view.update_spec(target, window, cx, |spec| {
+                            spec.restart_on_parent = Some(restart)
+                        })
+                    },
+                )
+            });
             let in_toc = Checkbox::new("style-in-toc")
                 .label("목차에 포함")
                 .checked(resolved.in_toc)
@@ -855,6 +961,9 @@ impl BookStyleView {
                 .child(in_toc)
                 // 목차에 넣지 않아도 번호·접두사는 넣을 수 있다.
                 .child(field("번호 방식".into(), numbering.into_any_element()))
+                .children(restart.map(|restart| {
+                    field("상위 제목이 바뀌면 번호".into(), restart.into_any_element())
+                }))
                 .children(prefix)
                 .child(font)
                 .child(embed)
@@ -887,7 +996,9 @@ impl BookStyleView {
                         })),
                 )
                 .child(
-                    div().text_xs().text_color(pal.muted)
+                    div()
+                        .text_xs()
+                        .text_color(pal.muted)
                         .child("문단 안의 개행과 문단 사이의 빈 줄을 그대로 반영합니다."),
                 )
                 .child(font)
@@ -1014,7 +1125,8 @@ impl BookStyleView {
                     } else {
                         String::new()
                     };
-                    div().min_h(px(size * style.line_height as f32))
+                    div()
+                        .min_h(px(size * style.line_height as f32))
                         .child(format!("{lead}{line}"))
                 }))
         };
@@ -1050,7 +1162,10 @@ impl BookStyleView {
             for (index, text) in SAMPLE_BODY.into_iter().enumerate() {
                 if index > 0 && body.preserve_line_breaks {
                     blocks.push(
-                        div().h(px(PREVIEW_FONT_SIZE * body.font_size as f32 * body.line_height as f32))
+                        div()
+                            .h(px(PREVIEW_FONT_SIZE
+                                * body.font_size as f32
+                                * body.line_height as f32))
                             .into_any_element(),
                     );
                 }

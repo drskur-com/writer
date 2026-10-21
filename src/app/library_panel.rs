@@ -8,9 +8,60 @@ use gpui_kit::gpui::prelude::{
 };
 use gpui_kit::gpui::*;
 
+use super::sheet_list::DraggedSheet;
 use super::style::*;
-use super::{Selection, WriterApp};
+use super::{GroupFamily, Selection, WriterApp};
 use crate::{icons, library};
+
+/// 그룹 줄을 끌고 있는 중. 끄는 동안 커서를 따라다니는 미리보기로도 그린다.
+#[derive(Clone)]
+pub(super) struct DraggedGroups {
+    /// 끌기 시작한 그룹들이 속한 범위. 같은 범위의 그룹 줄에만 놓을 수 있다.
+    pub(super) family: GroupFamily,
+    /// 함께 옮길 그룹 폴더 경로(화면 순서).
+    pub(super) paths: Vec<std::path::PathBuf>,
+    /// 미리보기에 보일 이름들. 여러 개면 첫 이름과 개수를 보여 준다.
+    pub(super) labels: Vec<SharedString>,
+    pub(super) pal: Palette,
+}
+
+impl Render for DraggedGroups {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let pal = self.pal;
+        let label = self.labels.first().cloned().unwrap_or_default();
+        let extra = self.labels.len().saturating_sub(1);
+        div()
+            .px_3()
+            .py_2()
+            .max_w(px(PANEL_WIDTH - 32.0))
+            .rounded_md()
+            .border_1()
+            .border_color(pal.border)
+            .bg(pal.background)
+            .shadow_md()
+            .text_sm()
+            .text_color(pal.foreground)
+            .font_semibold()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .child(Icon::new(icons::group_icon(None)).small())
+                    .child(div().truncate().child(label))
+                    .when(extra > 0, |this| {
+                        this.child(
+                            div()
+                                .flex_shrink_0()
+                                .font_normal()
+                                .text_color(pal.muted)
+                                .child(format!("외 {extra}개")),
+                        )
+                    }),
+            )
+    }
+}
 
 impl WriterApp {
     /// 사이드바 1단: 창 안쪽에 떠 있는 라이브러리 패널(섹션 + 그룹).
@@ -103,7 +154,7 @@ impl WriterApp {
                     };
                     has_group = true;
                     let selection = Selection::Group(group.path.clone());
-                    let selected = current.as_ref() == Some(&selection);
+                    let selected = self.group_is_selected(&group.path, current.as_ref());
                     let row = self.library_row(
                         cx,
                         pal,
@@ -119,6 +170,34 @@ impl WriterApp {
                         0,
                         Disclosure::None,
                     );
+                    // 다른 그룹에서 끌어온 시트를 이 그룹 끝에 놓는다(ADR-0019).
+                    let drop_group = group.path.clone();
+                    let drag_group = group.path.clone();
+                    let accepts = group.kind == library::GroupKind::Sheets;
+                    let row = row
+                        .drag_over::<DraggedSheet>(move |style, dragged, _, _| {
+                            if accepts && !dragged.files && dragged.group != drag_group {
+                                style.bg(pal.active)
+                            } else {
+                                style
+                            }
+                        })
+                        .on_drop(
+                            cx.listener(move |this, dragged: &DraggedSheet, window, cx| {
+                                if dragged.files || dragged.group == drop_group {
+                                    return;
+                                }
+                                this.move_sheets_to_group(
+                                    &dragged.group,
+                                    &drop_group,
+                                    &dragged.paths,
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        );
+                    // 같은 범위의 다른 그룹 위로 끌어다 놓으면 그 그룹의 하위로 옮긴다.
+                    let row = self.group_drag_handlers(row, &group.path, pal, cx);
                     // 프로젝트는 우클릭으로 편집·삭제한다.
                     if kind == library::SectionKind::Projects {
                         let app = cx.entity().downgrade();
@@ -285,6 +364,72 @@ impl WriterApp {
             )
     }
 
+    /// 이 그룹 줄이 선택됐는지. Shift로 넓힌 그룹과 지금 목록의 기준 그룹을 함께 본다.
+    pub(super) fn group_is_selected(
+        &self,
+        path: &std::path::Path,
+        current: Option<&Selection>,
+    ) -> bool {
+        self.selected_groups.iter().any(|selected| selected == path)
+            || matches!(current, Some(Selection::Group(selected)) if selected == path)
+    }
+
+    /// 그룹 줄에 끌기·놓기 동작을 붙인다. 옮길 수 없는 줄(프로젝트 등)은 받기만 하지 않고,
+    /// 대상으로도 쓰지 않는다.
+    pub(super) fn group_drag_handlers(
+        &self,
+        row: Stateful<Div>,
+        path: &std::path::Path,
+        pal: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let target_family = self.group_family(path);
+        let accepts = target_family.is_some() && self.group_is_movable(path);
+        let hover_target = path.to_path_buf();
+        let drop_target = path.to_path_buf();
+        let mut row = row
+            .drag_over::<DraggedGroups>(move |style, dragged, _, _| {
+                let inside_source = dragged.paths.iter().any(|source| {
+                    hover_target.starts_with(source) || source.starts_with(&hover_target)
+                });
+                if accepts && target_family.as_ref() == Some(&dragged.family) && !inside_source {
+                    style.bg(pal.active)
+                } else {
+                    style
+                }
+            })
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedGroups, window, cx| {
+                    this.move_groups_to(&drop_target, dragged, window, cx);
+                }),
+            );
+        if !self.group_is_movable(path) {
+            return row;
+        }
+        let paths = self.drag_group_paths(path);
+        let family = self
+            .group_family(path)
+            .expect("옮길 수 있는 그룹은 이동 범위가 있다");
+        let labels: Vec<SharedString> = paths
+            .iter()
+            .map(|path| {
+                self.library
+                    .as_ref()
+                    .and_then(|lib| lib.find_group(path))
+                    .map(|group| SharedString::from(group.name.clone()))
+                    .unwrap_or_else(|| SharedString::from(path.display().to_string()))
+            })
+            .collect();
+        let dragged = DraggedGroups {
+            family,
+            paths,
+            labels,
+            pal,
+        };
+        row = row.on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()));
+        row
+    }
+
     /// 라이브러리 패널의 한 줄(“모두”, 그룹). `depth`만큼 들여 쓴다.
     ///
     /// 프로젝트를 누르면 사이드바를 그 프로젝트 화면으로 바꾼다.
@@ -364,16 +509,26 @@ impl WriterApp {
                 this.hover(move |style| style.bg(pal.hover))
             })
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _, window, cx| {
-                if let Selection::Group(dir) = &selection
-                    && this.open_project.is_none()
-                    && this
-                        .library
-                        .as_ref()
-                        .is_some_and(|lib| lib.find_project(dir).is_some())
-                {
-                    this.enter_project(dir, window, cx);
-                    return;
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if let Selection::Group(dir) = &selection {
+                    // Shift+클릭: 기준 그룹부터 누른 그룹까지 넓힌다.
+                    if event.modifiers().shift && this.select_group_range(dir, cx) {
+                        return;
+                    }
+                    if this.open_project.is_none()
+                        && this
+                            .library
+                            .as_ref()
+                            .is_some_and(|lib| lib.find_project(dir).is_some())
+                    {
+                        this.enter_project(dir, window, cx);
+                        return;
+                    }
+                    this.selected_groups.clear();
+                    this.group_anchor = Some(dir.clone());
+                } else {
+                    this.selected_groups.clear();
+                    this.group_anchor = None;
                 }
                 this.selected = Some(selection.clone());
                 this.select_sheet(None, false, window, cx);

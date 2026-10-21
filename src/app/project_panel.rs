@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use super::library_panel::{Disclosure, menu_row};
 use super::new_project::FormTarget;
+use super::sheet_list::DraggedSheet;
 use super::style::*;
 use super::{Selection, WriterApp};
 use crate::{icons, library};
@@ -37,6 +38,11 @@ impl WriterApp {
             return;
         };
         self.selected = Some(default_selection(project));
+        self.selected_groups.clear();
+        self.group_anchor = match &self.selected {
+            Some(Selection::Group(path)) => Some(path.clone()),
+            _ => None,
+        };
         self.open_project = Some(dir.to_path_buf());
         self.select_sheet(None, false, window, cx);
         self.load_previews(cx);
@@ -49,6 +55,11 @@ impl WriterApp {
             return;
         };
         self.selected = Some(Selection::Group(dir));
+        self.selected_groups.clear();
+        self.group_anchor = match &self.selected {
+            Some(Selection::Group(path)) => Some(path.clone()),
+            _ => None,
+        };
         self.select_sheet(None, false, window, cx);
         self.load_previews(cx);
         cx.notify();
@@ -72,6 +83,8 @@ impl WriterApp {
         let dir = project.path.clone();
         let preview_dir = project.path.clone();
         let compile_dir = project.path.clone();
+        let drop_dir = project.path.clone();
+        let drag_dir = project.path.clone();
         div()
             .flex_shrink_0()
             .px_2()
@@ -86,9 +99,33 @@ impl WriterApp {
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.selected = Some(Selection::Group(dir.clone()));
+                        this.selected_groups.clear();
+                        this.group_anchor = Some(dir.clone());
                         this.select_sheet(None, false, window, cx);
                         this.load_previews(cx);
                     }))
+                    // 프로젝트 바로 아래(그룹 루트)로 시트를 옮길 수 있다(ADR-0019).
+                    .drag_over::<DraggedSheet>(move |style, dragged, _, _| {
+                        if !dragged.files && dragged.group != drag_dir {
+                            style.bg(pal.active)
+                        } else {
+                            style
+                        }
+                    })
+                    .on_drop(
+                        cx.listener(move |this, dragged: &DraggedSheet, window, cx| {
+                            if dragged.files || dragged.group == drop_dir {
+                                return;
+                            }
+                            this.move_sheets_to_group(
+                                &dragged.group,
+                                &drop_dir,
+                                &dragged.paths,
+                                window,
+                                cx,
+                            );
+                        }),
+                    )
                     .child(project.name.clone()),
             )
             .child(
@@ -150,6 +187,7 @@ impl WriterApp {
                 let (edit_app, edit_dir) = (app.clone(), dir.clone());
                 let (book_app, book_dir) = (app.clone(), dir.clone());
                 let (style_app, style_dir) = (app.clone(), dir.clone());
+                let (export_app, export_dir) = (app.clone(), dir.clone());
                 menu.min_w(px(200.0))
                     .item(
                         PopupMenuItem::element(move |_, _| {
@@ -181,7 +219,65 @@ impl WriterApp {
                                 .ok();
                         }),
                     )
+                    .separator()
+                    .item(
+                        PopupMenuItem::element(move |_, _| {
+                            menu_row(icons::export(), "프로젝트 내보내기…", None)
+                        })
+                        .on_click(move |_, window, cx| {
+                            export_app
+                                .update(cx, |app, cx| app.export_project(&export_dir, window, cx))
+                                .ok();
+                        }),
+                    )
             })
+    }
+
+    /// 프로젝트 폴더 전체를 ZIP으로 묶어 `.writer` 파일 하나로 내보낸다.
+    fn export_project(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        // 지금 에디터에 보이는 내용이 파일에 있어야 한다.
+        if let Err(err) = self.save_open_sheet(cx) {
+            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+            return;
+        }
+
+        let name = dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "프로젝트".to_string());
+        let default_name = format!("{name}.writer");
+        let default_dir = dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| dir.to_path_buf());
+        let project_dir = dir.to_path_buf();
+
+        let receiver = cx.prompt_for_new_path(&default_dir, Some(&default_name));
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(output_path))) = receiver.await else {
+                return;
+            };
+            // 저장 대화상자에서 확장자를 지우거나 바꿔도 `.writer`로 맞춘다.
+            let output_path = crate::export::project::with_writer_extension(&output_path);
+            let display_name = output_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| default_name.clone());
+            let target_path = output_path.clone();
+            let result =
+                cx.background_executor()
+                    .spawn(async move {
+                        crate::export::project::export_to_file(&project_dir, &target_path)
+                    })
+                    .await;
+
+            this.update(cx, |app, cx| match result {
+                Ok(()) => app.set_notice(format!("프로젝트 내보내기 완료: {display_name}"), cx),
+                Err(err) => app.set_notice(format!("프로젝트 내보내기 실패: {err}"), cx),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// 프로젝트 화면의 줄들: 원고 그룹 트리(없으면 "새로운 그룹…"), 추가자료.
@@ -288,7 +384,7 @@ impl WriterApp {
                 .color
                 .as_deref()
                 .and_then(|color| project_color(color, cx.theme())),
-            current == Some(&selection),
+            self.group_is_selected(&group.path, current),
             selection,
             depth,
             disclosure,
@@ -296,6 +392,33 @@ impl WriterApp {
 
         let app = cx.entity().downgrade();
         let dir = group.path.clone();
+        let drop_dir = group.path.clone();
+        let drag_dir = group.path.clone();
+        let accepts = group.kind == library::GroupKind::Sheets;
+        let row = row
+            .drag_over::<DraggedSheet>(move |style, dragged, _, _| {
+                if accepts && !dragged.files && dragged.group != drag_dir {
+                    style.bg(pal.active)
+                } else {
+                    style
+                }
+            })
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedSheet, window, cx| {
+                    if dragged.files || dragged.group == drop_dir {
+                        return;
+                    }
+                    this.move_sheets_to_group(
+                        &dragged.group,
+                        &drop_dir,
+                        &dragged.paths,
+                        window,
+                        cx,
+                    );
+                }),
+            );
+        // 같은 범위의 다른 그룹 위로 끌어다 놓으면 그 그룹의 하위로 옮긴다.
+        let row = self.group_drag_handlers(row, &group.path, pal, cx);
         rows.push(
             row.context_menu(move |menu, _, cx| {
                 let (edit_app, edit_dir) = (app.clone(), dir.clone());
@@ -386,6 +509,11 @@ impl WriterApp {
                     self.expanded_groups.insert(parent.to_path_buf());
                 }
                 self.selected = Some(Selection::Group(dir));
+                self.selected_groups.clear();
+                self.group_anchor = match &self.selected {
+                    Some(Selection::Group(path)) => Some(path.clone()),
+                    _ => None,
+                };
                 self.select_sheet(None, false, window, cx);
                 self.load_previews(cx);
                 cx.notify();
@@ -448,6 +576,14 @@ impl WriterApp {
                 self.library = Some(scanned);
                 if matches!(&self.selected, Some(Selection::Group(path)) if path.starts_with(dir)) {
                     self.selected = None;
+                }
+                self.selected_groups.retain(|path| path.is_dir());
+                if self
+                    .group_anchor
+                    .as_ref()
+                    .is_some_and(|path| !path.is_dir())
+                {
+                    self.group_anchor = None;
                 }
                 self.load_previews(cx);
                 cx.notify();

@@ -71,9 +71,8 @@ fn protected_ranges(text: &str) -> Vec<Range<usize>> {
 }
 
 fn quote(mark: char, previous: Option<char>) -> char {
-    let opening = previous.is_none_or(|c| {
-        c.is_whitespace() || matches!(c, '(' | '[' | '{' | '—' | '“' | '‘')
-    });
+    let opening = previous
+        .is_none_or(|c| c.is_whitespace() || matches!(c, '(' | '[' | '{' | '—' | '“' | '‘'));
     match (mark, opening) {
         ('"', true) => '“',
         ('"', false) => '”',
@@ -131,10 +130,7 @@ pub fn on_input(
     inserted: &str,
     options: &Options,
 ) -> (Range<usize>, String) {
-    if inserted.is_empty()
-        || !options.is_enabled()
-        || in_literal_context(document, range.start)
-    {
+    if inserted.is_empty() || !options.is_enabled() || in_literal_context(document, range.start) {
         return (range, inserted.to_string());
     }
     let mut candidate = document.to_string();
@@ -167,10 +163,8 @@ pub fn on_input(
     }
     if range.is_empty() {
         let prefix = &document[..start];
-        for (enabled, before, after) in [
-            (options.ellipsis, "...", "…"),
-            (options.dash, "--", "—"),
-        ] {
+        for (enabled, before, after) in [(options.ellipsis, "...", "…"), (options.dash, "--", "—")]
+        {
             if enabled
                 && prefix.ends_with(&before[..before.len() - 1])
                 && inserted == &before[before.len() - 1..]
@@ -231,9 +225,11 @@ pub fn paste(text: &str, same_format: bool, options: &Options) -> String {
             .min()
             .unwrap_or(text.len());
         let rest = &text[offset..limit];
-        if let Some(rule) = options.replacements.iter().find(|rule| {
-            rule.enabled && !rule.before.is_empty() && rest.starts_with(&rule.before)
-        }) {
+        if let Some(rule) = options
+            .replacements
+            .iter()
+            .find(|rule| rule.enabled && !rule.before.is_empty() && rest.starts_with(&rule.before))
+        {
             out.push_str(&rule.after);
             offset += rule.before.len();
         } else if options.ellipsis && rest.starts_with("...") {
@@ -519,7 +515,10 @@ fn footnote_numbers(text: &str) -> impl Iterator<Item = usize> + '_ {
 /// `[^이름]:`로 시작하는 각주 정의 줄인지.
 fn is_footnote_definition(line: &str) -> bool {
     line.strip_prefix("[^")
-        .and_then(|rest| rest.find("]:").map(|end| end > 0 && !rest[..end].contains(']')))
+        .and_then(|rest| {
+            rest.find("]:")
+                .map(|end| end > 0 && !rest[..end].contains(']'))
+        })
         .unwrap_or(false)
 }
 
@@ -631,7 +630,10 @@ fn join(out: &mut String, lines: &[Line<'_>], gap: impl Fn(&Line<'_>, &Line<'_>)
 
 /// 두 줄이 같은 펜스나 줄 묶음 안에 있는지(사이를 원문 그대로 둔다).
 fn same_block(prev: Kind, next: Kind) -> bool {
-    matches!((prev, next), (Kind::Verbatim, Kind::Verbatim) | (Kind::Grouped, Kind::Grouped))
+    matches!(
+        (prev, next),
+        (Kind::Verbatim, Kind::Verbatim) | (Kind::Grouped, Kind::Grouped)
+    )
 }
 
 /// 에디터 본문 → 저장할 마크다운.
@@ -789,9 +791,21 @@ mod tests {
         round_trips(editor);
         // 묶음 안의 줄은 다른 앱 파일처럼 한 줄로 잇지 않는다.
         assert_eq!(to_editor(":::\nA\nB\n:::"), ":::\nA\nB\n:::");
-        assert_eq!(line_groups(editor), vec![LineGroup { lines: 1..7, closed: true }]);
+        assert_eq!(
+            line_groups(editor),
+            vec![LineGroup {
+                lines: 1..7,
+                closed: true
+            }]
+        );
         // 닫지 않은 묶음은 끝까지, 코드 펜스 안의 `:::`는 묶음이 아니다.
-        assert_eq!(line_groups("A\n::: 시\nB"), vec![LineGroup { lines: 1..3, closed: false }]);
+        assert_eq!(
+            line_groups("A\n::: 시\nB"),
+            vec![LineGroup {
+                lines: 1..3,
+                closed: false
+            }]
+        );
         assert!(line_groups("```\n:::\n```").is_empty());
         // 묶음 안에서도 문장 자동 변환은 한다.
         assert!(!in_literal_context(":::\n가", 7));
@@ -817,7 +831,10 @@ mod tests {
         assert_eq!(selected, "첫 행\n둘째 행");
         // 묶음 안을 고르고 다시 누르면 푼다.
         let inside = wrapped.find("둘째").unwrap();
-        assert_eq!(toggled(&wrapped, inside..inside), (text.to_string(), "첫 행\n둘째 행".to_string()));
+        assert_eq!(
+            toggled(&wrapped, inside..inside),
+            (text.to_string(), "첫 행\n둘째 행".to_string())
+        );
         // 빈 선택은 커서 줄, 다음 줄 첫머리에서 끝난 선택은 그 줄을 빼고 감싼다.
         assert_eq!(toggled("A\nB", 0..0).0, ":::\nA\n:::\nB");
         assert_eq!(toggled("A\nB", 0..2).0, ":::\nA\n:::\nB");
@@ -848,13 +865,19 @@ mod tests {
         // 다음 번호는 가장 큰 숫자 + 1, 정의는 끝 정의 줄 바로 다음. 끝 빈 줄은 버린다.
         let text = "A[^1] B[^note]\n\n[^1]: 하나\n[^note]: 이름\n\n";
         let (out, _) = with_footnote(text, "A[^1] B".len(), "둘");
-        assert_eq!(out, "A[^1] B[^2][^note]\n\n[^1]: 하나\n[^note]: 이름\n[^2]: 둘");
+        assert_eq!(
+            out,
+            "A[^1] B[^2][^note]\n\n[^1]: 하나\n[^note]: 이름\n[^2]: 둘"
+        );
         // 빈 시트, 끝 줄(정의 아님)에 넣기.
         assert_eq!(with_footnote("", 0, "x").0, "[^1]\n\n[^1]: x");
         assert_eq!(with_footnote("끝", 3, "x").0, "끝[^1]\n\n[^1]: x");
         // 정의 줄 맨 앞에 넣으면 그 줄은 더는 정의가 아니다.
         let text = "A\n[^1]: 하나";
-        assert_eq!(with_footnote(text, 2, "x").0, "A\n[^2][^1]: 하나\n\n[^2]: x");
+        assert_eq!(
+            with_footnote(text, 2, "x").0,
+            "A\n[^2][^1]: 하나\n\n[^2]: x"
+        );
     }
 
     /// 여러 종류의 줄을 네 줄까지 모든 순서로 섞어도 원래대로 돌아온다.

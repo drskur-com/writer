@@ -45,7 +45,9 @@ impl Prefs {
     pub fn init(config: &Config, cx: &mut App) {
         cx.set_global(Prefs {
             editor_font: config.editor_font.clone().map(SharedString::from),
-            editor_font_size: config.editor_font_size.filter(|size| (12..=32).contains(size)),
+            editor_font_size: config
+                .editor_font_size
+                .filter(|size| (12..=32).contains(size)),
         });
     }
 

@@ -6,8 +6,9 @@ use gpui_kit::gpui::*;
 #[cfg(target_os = "macos")]
 use crate::APP_NAME;
 use crate::{
-    CloseLibrary, CompileProject, InsertFootnote, InsertImage, InsertSpecialChar, InsertTable, ToggleLineGroup, NewSheet, OpenLibrary, OpenSettings, QuitApp, SaveSheet,
-    SetTheme, ShowAbout, ToggleBold, ToggleItalic, TogglePreview, ToggleSidebar, ToggleTheme, theme,
+    CloseLibrary, CompileProject, InsertFootnote, InsertImage, InsertSpecialChar, InsertTable,
+    NewSheet, OpenLibrary, OpenSettings, QuitApp, SaveSheet, SetTheme, ShowAbout, ToggleBold,
+    ToggleItalic, ToggleLineGroup, TogglePreview, ToggleSidebar, ToggleTheme, theme,
 };
 
 /// 메뉴 트리.
@@ -54,15 +55,18 @@ pub(crate) fn build_menus(theme_names: &[SharedString], active_theme: &str) -> V
     }
     menus.push(Menu::new("File").items(file_items));
 
-    #[cfg_attr(target_os = "macos", allow(unused_mut))]
+    // `Emoji & Symbols…`는 macOS 관례상 Edit에, 그 밖에는 Insert > Special Characters… 하나로 둔다(같은 대화상자를 두 번 보이지 않게).
     let mut edit_items = vec![
         MenuItem::action("Bold", ToggleBold),
         MenuItem::action("Italic", ToggleItalic),
         MenuItem::separator(),
         MenuItem::action("Toggle Line Group", ToggleLineGroup),
-        MenuItem::separator(),
-        MenuItem::action("Emoji & Symbols…", InsertSpecialChar),
     ];
+    #[cfg(target_os = "macos")]
+    {
+        edit_items.push(MenuItem::separator());
+        edit_items.push(MenuItem::action("Emoji & Symbols…", InsertSpecialChar));
+    }
     #[cfg(not(target_os = "macos"))]
     {
         edit_items.push(MenuItem::separator());
