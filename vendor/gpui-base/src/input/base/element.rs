@@ -2691,6 +2691,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        crate::input::scroll_trace::prepaint_started();
         let style = window.text_style();
         let font = style.font();
         let text_size = style.font_size.to_pixels(window.rem_size());
@@ -3526,8 +3527,14 @@ impl<M: InputModeKind> Element for TextElement<M> {
             state.set_input_bounds(input_bounds, cx);
             state.last_selected_range = Some(selected_range);
             state.scroll_size = prepaint.scroll_size;
+            let before = state.scroll_handle.offset().y;
             state.update_scroll_offset(Some(prepaint.cursor_scroll_offset), cx);
             state.deferred_scroll_offset = None;
+            crate::input::scroll_trace::painted(
+                before.as_f32(),
+                state.scroll_handle.offset().y.as_f32(),
+                state.overscroll.offset(),
+            );
 
             // Layout consumers need changed geometry, not another notification
             // for every paint of an unchanged input.
