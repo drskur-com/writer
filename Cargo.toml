@@ -4,7 +4,27 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gpui-kit = "0.8"
+# tree-sitter-*: 에디터 펜스 코드 블록 하이라이팅. markdown 문법이 펜스를 찾고 안쪽을 각 언어 문법에 넘긴다.
+gpui-kit = { version = "0.8", features = [
+    "tree-sitter",
+    "tree-sitter-markdown",
+    "tree-sitter-javascript",
+    "tree-sitter-typescript",
+    "tree-sitter-tsx",
+    "tree-sitter-html",
+    "tree-sitter-css",
+    "tree-sitter-rust",
+    "tree-sitter-go",
+    "tree-sitter-python",
+    "tree-sitter-java",
+    "tree-sitter-bash",
+    "tree-sitter-yaml",
+    "tree-sitter-toml",
+    "tree-sitter-sql",
+    "tree-sitter-diff",
+] }
+# 하이라이터에 편집 내용(`InputEdit`)을 넘길 때 쓴다. 버전은 gpui-component와 맞춘다.
+tree-sitter = "0.26"
 # `LineStyle`처럼 gpui-kit이 다시 내보내지 않는 타입용. 버전은 gpui-kit과 맞춘다.
 gpui-base = "0.8"
 dirs = "5"

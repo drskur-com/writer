@@ -3,6 +3,7 @@
 mod book_info;
 mod book_preview;
 mod book_style;
+mod code_highlight;
 mod compile_dialog;
 mod editor;
 mod editor_image;

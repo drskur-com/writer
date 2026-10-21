@@ -550,7 +550,9 @@ impl WriterApp {
                 .smart_indent(false)
                 .folding(false)
                 .cursor_surrounding_lines(Some(CURSOR_MARGIN_LINES))
-                .scroll_beyond_last_line(Some(CURSOR_MARGIN_LINES));
+                .scroll_beyond_last_line(Some(CURSOR_MARGIN_LINES))
+                .language(super::code_highlight::LANGUAGE);
+            state.set_highlighter_factory(super::code_highlight::factory(), cx);
             configure_text_transform(&mut state, styles.as_ref());
             state.set_line_style(Some(line_style(styles.as_ref(), style_groups)), cx);
             // 이미지 줄 아래에 이미지를 그린다(ADR-0008).
