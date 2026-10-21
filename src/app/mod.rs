@@ -28,7 +28,7 @@ use gpui_kit::component::menu::AppMenuBar;
 
 use crate::menus::install_menus;
 use crate::{
-    APP_NAME, CloseLibrary, CompileProject, OpenLibrary, QuitApp, SaveSheet, SetTheme, ShowAbout, TogglePreview,
+    APP_NAME, CloseLibrary, CompileProject, OpenLibrary, QuitApp, SaveSheet, SetTheme, ToggleLineGroup, ShowAbout, TogglePreview,
     ToggleSidebar, ToggleTheme, config, icons, library, theme,
 };
 use style::*;
@@ -160,6 +160,24 @@ impl WriterApp {
         if let Err(err) = self.save_open_sheet(cx) {
             self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
         }
+    }
+
+    /// 선택한 줄을 줄 묶음으로 감싸거나 푼다(ADR-0016). 한 번에 되돌릴 수 있게 한 편집으로 바꾼다.
+    fn on_toggle_line_group(&mut self, _: &ToggleLineGroup, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = &self.editor else {
+            self.notify("먼저 시트를 여세요.", window, cx);
+            return;
+        };
+        editor.state().update(cx, |state, cx| {
+            let text = state.value();
+            let (range, replacement, selected) =
+                crate::text_transform::toggle_line_group(&text, state.selected_range());
+            state.set_selected_range(range, cx);
+            state.replace(replacement, window, cx);
+            state.set_selected_range(selected, cx);
+            state.focus(window, cx);
+        });
+        self.on_editor_changed(window, cx);
     }
 
     fn on_compile_project(&mut self, _: &CompileProject, window: &mut Window, cx: &mut Context<Self>) {
@@ -518,6 +536,7 @@ impl Render for WriterApp {
             .on_action(cx.listener(Self::on_save_sheet))
             .on_action(cx.listener(Self::on_compile_project))
             .on_action(cx.listener(Self::on_insert_image))
+            .on_action(cx.listener(Self::on_toggle_line_group))
             .on_action(cx.listener(Self::on_open_library))
             .on_action(cx.listener(Self::on_close_library))
             .on_action(cx.listener(Self::on_show_about))

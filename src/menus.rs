@@ -6,7 +6,7 @@ use gpui_kit::gpui::*;
 #[cfg(target_os = "macos")]
 use crate::APP_NAME;
 use crate::{
-    CloseLibrary, CompileProject, InsertImage, NewSheet, OpenLibrary, OpenSettings, QuitApp, SaveSheet,
+    CloseLibrary, CompileProject, InsertImage, ToggleLineGroup, NewSheet, OpenLibrary, OpenSettings, QuitApp, SaveSheet,
     SetTheme, ShowAbout, TogglePreview, ToggleSidebar, ToggleTheme, theme,
 };
 
@@ -14,6 +14,7 @@ use crate::{
 ///
 /// - macOS: `Settings…`는 앱 메뉴(`Writer`)에 둔다 (Apple HIG).
 /// - 그 외: `Edit > Settings…`에 둔다.
+/// - `Edit > Toggle Line Group`: 선택한 줄을 줄 묶음(`:::`)으로 감싸거나 푼다(ADR-0016).
 /// - 테마 목록은 `ThemeRegistry`에서 읽어 `View > Theme`에 채운다.
 pub(crate) fn build_menus(theme_names: &[SharedString], active_theme: &str) -> Vec<Menu> {
     let theme_items: Vec<MenuItem> = theme_names
@@ -53,8 +54,14 @@ pub(crate) fn build_menus(theme_names: &[SharedString], active_theme: &str) -> V
     }
     menus.push(Menu::new("File").items(file_items));
 
+    #[cfg_attr(target_os = "macos", allow(unused_mut))]
+    let mut edit_items = vec![MenuItem::action("Toggle Line Group", ToggleLineGroup)];
     #[cfg(not(target_os = "macos"))]
-    menus.push(Menu::new("Edit").items([MenuItem::action("Settings…", OpenSettings)]));
+    {
+        edit_items.push(MenuItem::separator());
+        edit_items.push(MenuItem::action("Settings…", OpenSettings));
+    }
+    menus.push(Menu::new("Edit").items(edit_items));
 
     menus.push(Menu::new("Insert").items([MenuItem::action("Image…", InsertImage)]));
 

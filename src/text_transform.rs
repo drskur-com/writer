@@ -385,6 +385,75 @@ pub fn line_groups(text: &str) -> Vec<Range<usize>> {
     groups
 }
 
+/// 선택한 줄을 줄 묶음으로 감싸거나, 선택이 걸친 묶음을 푼다(Edit 메뉴의 토글).
+///
+/// 선택은 줄 단위로 넓힌다(빈 선택이면 커서 줄). 선택이 묶음(펜스 줄 포함)에 닿아 있으면 그 묶음들의
+/// `:::` 줄을 지우고, 아니면 앞뒤에 `:::` 줄을 넣는다. (바꿀 범위, 새 글, 바꾼 뒤 선택할 범위)를 돌려준다.
+pub fn toggle_line_group(
+    text: &str,
+    selection: Range<usize>,
+) -> (Range<usize>, String, Range<usize>) {
+    let lines = split(text);
+    let mut starts = Vec::with_capacity(lines.len());
+    let mut offset = 0;
+    for line in &lines {
+        starts.push(offset);
+        offset += line.len() + 1;
+    }
+    let line_at = |offset: usize| starts.partition_point(|&start| start <= offset) - 1;
+    let first = line_at(selection.start);
+    let mut last = line_at(selection.end);
+    // 다음 줄 첫머리에서 끝난 선택은 그 줄을 넣지 않는다.
+    if last > first && starts[last] == selection.end {
+        last -= 1;
+    }
+    let line_end = |ix: usize| starts[ix] + lines[ix].len();
+    let touched: Vec<Range<usize>> = line_groups(text)
+        .into_iter()
+        .filter(|group| group.start <= last && first < group.end)
+        .collect();
+    if touched.is_empty() {
+        let range = starts[first]..line_end(last);
+        let body = &text[range.clone()];
+        let replacement = format!(":::\n{body}\n:::");
+        let selected = range.start + 4..range.start + 4 + body.len();
+        return (range, replacement, selected);
+    }
+    // 묶음의 펜스 줄(여는 줄, 닫혔으면 닫는 줄)을 뺀 나머지 줄을 잇는다.
+    let from = touched[0].start.min(first);
+    let to = touched[touched.len() - 1].end.max(last + 1);
+    let fences: Vec<usize> = touched
+        .iter()
+        .flat_map(|group| {
+            let close = group.end - 1;
+            let closed = close > group.start
+                && group_fence(lines[close]).is_some_and(|(colons, bare)| {
+                    bare && group_fence(lines[group.start]).is_some_and(|(open, _)| colons >= open)
+                });
+            [Some(group.start), closed.then_some(close)]
+        })
+        .flatten()
+        .collect();
+    let kept: Vec<&str> = (from..to)
+        .filter(|ix| !fences.contains(ix))
+        .map(|ix| lines[ix])
+        .collect();
+    let range = starts[from]..line_end(to - 1);
+    let mut replacement = kept.join("\n");
+    let mut range = range;
+    if kept.is_empty() {
+        // 빈 묶음은 줄째 지운다.
+        if range.end < text.len() {
+            range.end += 1;
+        } else if range.start > 0 {
+            range.start -= 1;
+        }
+        replacement.clear();
+    }
+    let selected = range.start..range.start + replacement.len();
+    (range, replacement, selected)
+}
+
 /// 펜스 밖 줄 하나의 종류.
 fn kind_of(line: &str) -> Kind {
     let trimmed = line.trim();
@@ -651,6 +720,39 @@ mod tests {
         assert!(line_groups("```\n:::\n```").is_empty());
         // 묶음 안에서도 문장 자동 변환은 한다.
         assert!(!in_literal_context(":::\n가", 7));
+    }
+
+    /// 토글을 적용한 글과 선택한 글.
+    fn toggled(text: &str, selection: Range<usize>) -> (String, String) {
+        let (range, replacement, selected) = toggle_line_group(text, selection);
+        let mut out = text.to_string();
+        out.replace_range(range, &replacement);
+        let selected = out[selected].to_string();
+        (out, selected)
+    }
+
+    #[test]
+    fn toggle_line_group_wraps_and_unwraps_selected_lines() {
+        let text = "앞\n첫 행\n둘째 행\n뒤";
+        // 줄 가운데부터 다음 줄 가운데까지 고르면 두 줄 전체를 감싼다.
+        let start = text.find("행").unwrap();
+        let end = text.find("째").unwrap();
+        let (wrapped, selected) = toggled(text, start..end);
+        assert_eq!(wrapped, "앞\n:::\n첫 행\n둘째 행\n:::\n뒤");
+        assert_eq!(selected, "첫 행\n둘째 행");
+        // 묶음 안을 고르고 다시 누르면 푼다.
+        let inside = wrapped.find("둘째").unwrap();
+        assert_eq!(toggled(&wrapped, inside..inside), (text.to_string(), "첫 행\n둘째 행".to_string()));
+        // 빈 선택은 커서 줄, 다음 줄 첫머리에서 끝난 선택은 그 줄을 빼고 감싼다.
+        assert_eq!(toggled("A\nB", 0..0).0, ":::\nA\n:::\nB");
+        assert_eq!(toggled("A\nB", 0..2).0, ":::\nA\n:::\nB");
+        // 펜스 줄만 골라도 풀고, 닫지 않은 묶음은 여는 줄만 지운다. 빈 묶음은 줄째 없앤다.
+        assert_eq!(toggled(":::\nA\n:::", 0..0).0, "A");
+        assert_eq!(toggled("X\n::: 시\nA", 9..9).0, "X\nA");
+        assert_eq!(toggled("X\n:::\n:::\nY", 2..2).0, "X\nY");
+        // 여러 묶음에 걸친 선택은 모두 푼다.
+        let both = ":::\nA\n:::\nB\n:::\nC\n:::";
+        assert_eq!(toggled(both, 0..both.len()).0, "A\nB\nC");
     }
 
     /// 여러 종류의 줄을 네 줄까지 모든 순서로 섞어도 원래대로 돌아온다.
