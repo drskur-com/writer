@@ -2799,22 +2799,6 @@ impl<M: InputModeKind> InputBaseState<M> {
             self.update_scroll_offset(Some(old_offset + delta), cx);
         }
 
-        // TEMP(writer scroll trace): WRITER_SCROLL_TRACE=1.
-        if crate::input::scroll_trace::enabled() {
-            eprintln!(
-                "[wheel] t={:.1}ms phase={:?} precise={} dy={:.3} y {:.3} -> {:.3} (moved {:.3}) stretch={:.3} scroll_h={:.1}",
-                crate::input::scroll_trace::now_ms(),
-                event.touch_phase,
-                precise,
-                delta.y.as_f32(),
-                old_offset.y.as_f32(),
-                self.scroll_handle.offset().y.as_f32(),
-                (self.scroll_handle.offset().y - old_offset.y).as_f32(),
-                self.overscroll.offset(),
-                self.scroll_size.height.as_f32(),
-            );
-        }
-
         // Text that has room to scroll keeps a scroll over it even where the
         // text ends, so reaching the end does not scroll the region around the
         // input; text that fits leaves the scroll to that region.

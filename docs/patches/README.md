@@ -20,7 +20,6 @@ vendor와 같아진다.
 | `input/editor/display_map/display_map.rs` | `…/display_map_writer.rs`(행 높이 기하) |
 | `input/editor/display_map/text_wrapper.rs` | `…/text_wrapper_writer.rs`(`LineStyle` 등 타입, 줄 스타일·블록·펼치기) |
 | `input/editor/display_map/wrap_map.rs` | `…/wrap_map_writer.rs` |
-| `input/mod.rs` | `input/scroll_trace.rs`(임시 스크롤 추적, `WRITER_SCROLL_TRACE=1`) |
 
 원본 파일 안에 남은 변경: `text_wrapper.rs`의 줄바꿈 클로저(줄별 글자 크기·첫 줄 들여쓰기),
 `element.rs`의 레이아웃·그리기 연결부, `state.rs`의 필드와 붙여넣기·입력 변환 호출,

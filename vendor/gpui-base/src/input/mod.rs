@@ -129,7 +129,3 @@ pub use ropey::Rope;
 pub use search::{SearchMatcher, SearchSession};
 pub use state::*;
 pub use textarea::{Textarea, TextareaState};
-
-/// TEMP(writer scroll trace): logs wheel packets and editor frame times to stderr when
-/// `WRITER_SCROLL_TRACE=1`. Remove after the scroll hitch is found.
-pub(crate) mod scroll_trace;
