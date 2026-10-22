@@ -14,6 +14,7 @@ mod cache;
 mod config;
 mod dock_icon;
 pub mod export;
+mod extension;
 mod icons;
 mod library;
 mod markdown;
@@ -60,12 +61,25 @@ struct SetTheme {
     name: SharedString,
 }
 
+/// 확장 명령 실행 액션(ADR-0026, `Extensions` 메뉴에서 동적으로 생성).
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = writer, no_json)]
+struct RunExtensionCommand {
+    extension: SharedString,
+    index: usize,
+}
+
 const APP_NAME: &str = "Writer";
 
-/// 라이브러리를 열 때 빌트인 스킬을 `Skills/`에 깔거나 새 버전으로 바꾼다. 실패는 기록만 한다.
+/// 라이브러리를 열 때 빌트인 스킬을 `Skills/`에 깔거나 새 버전으로 바꾸고, `Extensions/`를 만든다.
+/// 실패는 기록만 한다.
 fn sync_builtin_skills(root: &std::path::Path) {
     if let Err(err) = agent::skills::sync_builtin(root) {
         eprintln!("빌트인 스킬 설치 실패: {err}");
+    }
+    // 모델이 확장 파일을 바로 쓸 수 있게 폴더를 만들어 둔다(ADR-0026).
+    if let Err(err) = extension::ensure_dir(root) {
+        eprintln!("확장 폴더를 만들 수 없습니다: {err}");
     }
 }
 

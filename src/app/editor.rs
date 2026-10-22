@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use super::WriterApp;
+use super::editor_extension::ExtensionBlocks;
 use super::editor_image::ImageBlocks;
 use super::editor_layout::{BookLayout, PAGE_BREAK_HEIGHT};
 use super::editor_table::TableBlocks;
@@ -91,17 +92,20 @@ pub(super) struct OpenSheet {
     line_count: usize,
     /// 표(ADR-0017). 줄 스타일·줄 블록이 읽으므로 본문이 바뀔 때마다 맞춘다([`sync_tables`]).
     tables: Rc<TableBlocks>,
+    /// 확장 블록(ADR-0026). 표와 같이 본문이 바뀔 때마다 맞춘다.
+    extensions: Rc<ExtensionBlocks>,
     _subscription: Subscription,
 }
 
 /// 줄 스타일: 책 스타일대로 문단·제목을 배치한다(ADR-0010). 제목 줄 확대는 gpui-base 패치(ADR-0006),
 /// 이미지 줄은 커서가 들어올 때만 글자를 보인다(ADR-0008). 책 스타일이 없으면 기본 배치다.
 /// 줄 묶음 안의 줄은 한 문단의 행으로 배치한다(ADR-0016). 표의 줄은 커서가 표에 닿을 때만 글자를
-/// 보이고, 마지막 행 아래에 격자를 그린다(ADR-0017).
+/// 보이고, 마지막 행 아래에 격자를 그린다(ADR-0017). 확장 블록도 같다(ADR-0026).
 fn line_style(
     styles: Option<&library::Styles>,
     groups: Rc<RefCell<Vec<LineGroup>>>,
     tables: Rc<TableBlocks>,
+    extensions: Rc<ExtensionBlocks>,
     font_size: f32,
     cx: &App,
 ) -> impl Fn(LineContext<'_>) -> LineStyle + 'static {
@@ -112,7 +116,7 @@ fn line_style(
     move |line| {
         let row = line.row;
         let mut style = layout.line_style(line, &groups.borrow());
-        if tables.contains(row) {
+        if tables.contains(row) || extensions.contains(row) {
             style.collapsed = true;
             style.reveal_run = true;
         }
@@ -125,7 +129,8 @@ fn line_style(
 
 /// 본문에 맞춰 표를 다시 찾고, 바뀐 표가 닿았던 줄과 닿는 줄을 다시 배치한다.
 fn sync_tables(editor: &OpenSheet, text: &str, cx: &mut App) {
-    let rows = editor.tables.sync(text);
+    let mut rows = editor.tables.sync(text);
+    rows.extend(editor.extensions.sync(text));
     if rows.is_empty() {
         return;
     }
@@ -362,6 +367,7 @@ impl WriterApp {
             editor.styles.as_ref(),
             editor.line_groups.clone(),
             editor.tables.clone(),
+            editor.extensions.clone(),
             font_size,
             cx,
         );
@@ -614,6 +620,16 @@ impl WriterApp {
         ));
         let (style_tables, measure_tables, render_tables) =
             (tables.clone(), tables.clone(), tables.clone());
+        let root = self
+            .library
+            .as_ref()
+            .map_or_else(|| path.clone(), |lib| lib.root.clone());
+        let extensions = Rc::new(ExtensionBlocks::new(
+            &text,
+            crate::extension::Host::new(root),
+        ));
+        let (style_extensions, measure_extensions, render_extensions) =
+            (extensions.clone(), extensions.clone(), extensions.clone());
         // 마지막 줄 아래 빈 공간(scroll_beyond_last_line)은 코드 에디터 모드에만 있어서
         // EditorState를 쓰고 코드용 기능(줄 번호·들여쓰기 안내선·괄호 자동 닫기·접기)은 끈다.
         // 빈 공간이 없으면 문서 끝에서 커서 여백을 맞추려 끝 너머로 스크롤했다가 되돌아오며 출렁인다.
@@ -641,6 +657,7 @@ impl WriterApp {
                     styles.as_ref(),
                     style_groups,
                     style_tables,
+                    style_extensions,
                     crate::settings::Prefs::editor_font_size(cx),
                     cx,
                 )),
@@ -649,17 +666,36 @@ impl WriterApp {
             // 이미지 줄 아래에 이미지를 그린다(ADR-0008).
             let images = Rc::new(ImageBlocks::new(&path));
             let measure = images.clone();
-            // 줄 블록 = 이미지·표 격자(측정한 몫) + 줄 스타일이 잡은 나머지(페이지 나눔 표시, ADR-0010).
-            // 첫 줄 위 블록은 페이지 나눔 표시뿐이다.
+            // 줄 블록 = 이미지·표 격자·확장 캔버스(측정한 몫) + 줄 스타일이 잡은 나머지(페이지 나눔
+            // 표시, ADR-0010). 첫 줄 위 블록은 페이지 나눔 표시뿐이다.
             state.set_line_blocks(
                 move |row, line, wrap_width| {
-                    measure.measure(line, wrap_width) + measure_tables.measure(row, wrap_width)
+                    measure.measure(line, wrap_width)
+                        + measure_tables.measure(row, wrap_width)
+                        + measure_extensions.measure(row, wrap_width)
                 },
-                move |block, _, cx| {
+                move |block, window, cx| {
                     if block.above {
                         return page_break_mark(block.size, cx);
                     }
                     let width = Some(block.size.width);
+                    let drawn = render_extensions.measure(block.line, width);
+                    if drawn > px(0.) {
+                        let mark = block.size.height - drawn;
+                        return div()
+                            .flex()
+                            .flex_col()
+                            .children(render_extensions.render(
+                                block.line,
+                                size(block.size.width, drawn),
+                                window,
+                                cx,
+                            ))
+                            .when(mark >= px(PAGE_BREAK_HEIGHT), |this| {
+                                this.child(page_break_mark(size(block.size.width, mark), cx))
+                            })
+                            .into_any_element();
+                    }
                     let grid = render_tables.measure(block.line, width);
                     if grid > px(0.) {
                         let mark = block.size.height - grid;
@@ -751,6 +787,7 @@ impl WriterApp {
             line_groups,
             line_count,
             tables,
+            extensions,
             _subscription: subscription,
         });
     }
@@ -855,6 +892,7 @@ impl WriterApp {
                     styles.as_ref(),
                     editor.line_groups.clone(),
                     editor.tables.clone(),
+                    editor.extensions.clone(),
                     crate::settings::Prefs::editor_font_size(cx),
                     cx,
                 );
@@ -867,6 +905,12 @@ impl WriterApp {
                 let text = editor.state.read(cx).value();
                 editor.markup.apply_headings(&text, cx);
             }
+        }
+        // 확장 파일이 바뀌었으면(모델이 고쳤으면) 캔버스를 다시 재고 그린다.
+        if editor.extensions.files_changed() {
+            editor
+                .state
+                .update(cx, |state, cx| state.refresh_line_blocks(cx));
         }
         if !editor.path.is_file() {
             self.editor = None;
@@ -922,6 +966,7 @@ impl WriterApp {
             styles.as_ref(),
             editor.line_groups.clone(),
             editor.tables.clone(),
+            editor.extensions.clone(),
             crate::settings::Prefs::editor_font_size(cx),
             cx,
         );

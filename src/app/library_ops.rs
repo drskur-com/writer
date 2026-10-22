@@ -120,6 +120,7 @@ impl WriterApp {
     /// 현재 라이브러리 루트 감시를 (다시) 시작한다. 변경이 오면 잠깐 모았다가 다시 스캔한다.
     pub(super) fn start_watching(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.watcher = None;
+        self.refresh_extension_commands(cx);
         let Some(root) = self.library.as_ref().map(|lib| lib.root.clone()) else {
             return;
         };
@@ -216,6 +217,7 @@ impl WriterApp {
             self.book_style = None;
         }
         self.sync_open_sheet(window, cx);
+        self.refresh_extension_commands(cx);
         self.load_previews(cx);
         cx.notify();
     }

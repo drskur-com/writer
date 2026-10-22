@@ -7,8 +7,9 @@ use gpui_kit::gpui::*;
 use crate::APP_NAME;
 use crate::{
     CloseLibrary, CompileProject, InsertFootnote, InsertImage, InsertSpecialChar, InsertTable,
-    NewSheet, OpenLibrary, OpenSettings, QuitApp, SaveSheet, SetTheme, ShowAbout, ToggleBold,
-    ToggleItalic, ToggleLineGroup, TogglePreview, ToggleSidebar, ToggleTheme, theme,
+    NewSheet, OpenLibrary, OpenSettings, QuitApp, RunExtensionCommand, SaveSheet, SetTheme,
+    ShowAbout, ToggleBold, ToggleItalic, ToggleLineGroup, TogglePreview, ToggleSidebar,
+    ToggleTheme, theme,
 };
 
 /// 메뉴 트리.
@@ -17,7 +18,12 @@ use crate::{
 /// - 그 외: `Edit > Settings…`에 둔다.
 /// - `Edit > Toggle Line Group`: 선택한 줄을 줄 묶음(`:::`)으로 감싸거나 푼다(ADR-0016).
 /// - 테마 목록은 `ThemeRegistry`에서 읽어 `View > Theme`에 채운다.
-pub(crate) fn build_menus(theme_names: &[SharedString], active_theme: &str) -> Vec<Menu> {
+/// - 확장 명령(ADR-0026)이 있으면 `Extensions` 메뉴에 확장 이름으로 묶어 둔다.
+pub(crate) fn build_menus(
+    theme_names: &[SharedString],
+    active_theme: &str,
+    extension_commands: &[(String, usize, String)],
+) -> Vec<Menu> {
     let theme_items: Vec<MenuItem> = theme_names
         .iter()
         .map(|name| {
@@ -82,6 +88,25 @@ pub(crate) fn build_menus(theme_names: &[SharedString], active_theme: &str) -> V
         MenuItem::action("Special Characters…", InsertSpecialChar),
     ]));
 
+    if !extension_commands.is_empty() {
+        let mut items = Vec::new();
+        let mut previous: Option<&str> = None;
+        for (extension, index, title) in extension_commands {
+            if previous.is_some_and(|previous| previous != extension) {
+                items.push(MenuItem::separator());
+            }
+            previous = Some(extension);
+            items.push(MenuItem::action(
+                title.clone(),
+                RunExtensionCommand {
+                    extension: extension.clone().into(),
+                    index: *index,
+                },
+            ));
+        }
+        menus.push(Menu::new("Extensions").items(items));
+    }
+
     let mut view_items = vec![
         MenuItem::action("Toggle Sidebar", ToggleSidebar),
         MenuItem::action("Toggle Preview", TogglePreview),
@@ -98,13 +123,23 @@ pub(crate) fn build_menus(theme_names: &[SharedString], active_theme: &str) -> V
     menus
 }
 
-/// 현재 테마를 반영해 앱 메뉴를 (재)설치한다.
+/// 열린 라이브러리의 확장 명령: (확장 이름, 명령 번호, 제목). 메뉴를 만들 때 읽는다.
+#[derive(Default)]
+pub(crate) struct ExtensionCommands(pub(crate) Vec<(String, usize, String)>);
+
+impl Global for ExtensionCommands {}
+
+/// 현재 테마와 확장 명령을 반영해 앱 메뉴를 (재)설치한다.
 pub(crate) fn install_menus(cx: &mut App) {
     let theme_names = theme::theme_names(cx);
     let active = theme::active_name(cx);
+    let commands = cx
+        .try_global::<ExtensionCommands>()
+        .map(|commands| commands.0.clone())
+        .unwrap_or_default();
 
-    cx.set_menus(build_menus(&theme_names, &active));
-    let owned: Vec<OwnedMenu> = build_menus(&theme_names, &active)
+    cx.set_menus(build_menus(&theme_names, &active, &commands));
+    let owned: Vec<OwnedMenu> = build_menus(&theme_names, &active, &commands)
         .into_iter()
         .map(|menu| menu.owned())
         .collect();

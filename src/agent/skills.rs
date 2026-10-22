@@ -47,6 +47,7 @@ const BUILTIN: &[Builtin] = &[
     builtin!("brainstorm": "SKILL.md"),
     builtin!("settings": "SKILL.md"),
     builtin!("sheet-format": "SKILL.md"),
+    builtin!("extension": "SKILL.md"),
 ];
 
 /// 깐 빌트인 스킬의 기록(`.writer/skills.toml`).
@@ -357,6 +358,7 @@ mod tests {
             names(&root),
             [
                 "brainstorm",
+                "extension",
                 "proofread",
                 "revise",
                 "settings",
@@ -378,7 +380,13 @@ mod tests {
         sync_builtin(&root).unwrap();
         assert_eq!(
             names(&root),
-            ["proofread", "revise", "settings", "sheet-format"]
+            [
+                "extension",
+                "proofread",
+                "revise",
+                "settings",
+                "sheet-format"
+            ]
         );
         assert!(!reference.exists());
         assert!(!root.join(SKILLS_DIR).join("brainstorm").exists());

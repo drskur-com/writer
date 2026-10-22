@@ -10,6 +10,8 @@
 //! - TOML 파일은 쓰기 전에 문법을, 그룹 메타는 앱이 읽는 모양까지 검사한다. 깨진 글은 쓰지 않는다.
 //!
 //! 라이브러리에 스킬(`Skills/`)이 있으면 스킬 본문을 읽는 `load_skill`도 준다([`super::skills`]).
+//! `run_extension`은 확장(`Extensions/<이름>.lua`, ADR-0026)을 실행해 오류와 그린 결과를 알려 준다.
+//! 모델이 쓴 확장을 스스로 확인하고 고치게 한다.
 //!
 //! 도구 설명과 결과(오류 포함)는 모델이 읽으므로 영어로 쓴다. 화면에 보이는 요약 줄(`summary`)만
 //! 사용자 언어다.
@@ -41,6 +43,7 @@ const WRITE: &str = "write_file";
 const EDIT: &str = "edit_file";
 const CREATE_SHEET: &str = "create_sheet";
 const LOAD_SKILL: &str = "load_skill";
+const RUN_EXTENSION: &str = "run_extension";
 
 /// 도구가 다룰 수 있는 폴더와 그 안의 스킬.
 #[derive(Clone, Debug)]
@@ -201,6 +204,28 @@ impl Workspace {
                 }),
             ),
             (
+                RUN_EXTENSION,
+                "Test an extension (Extensions/<name>.lua). Without command, calls draw(g, t, args) once and reports \
+                 errors, the number of shapes, and the bounds of what was drawn compared with the canvas. With command, \
+                 runs that command (1-based index or title) with the given selection and returns its result. Nothing \
+                 in the library changes.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Extension name (the file name without .lua)." },
+                        "t": { "type": "number", "description": "Time in seconds for draw. Default 0." },
+                        "args": {
+                            "type": "object",
+                            "description": "Block arguments for draw, as in the ```ext block's key: value lines.",
+                            "additionalProperties": { "type": ["string", "number", "boolean"] },
+                        },
+                        "command": { "type": ["integer", "string"], "description": "Command to run instead of draw: 1-based index or title." },
+                        "selection": { "type": "string", "description": "Selected text passed to the command as ctx.selection." },
+                    },
+                    "required": ["name"],
+                }),
+            ),
+            (
                 WRITE,
                 "Write one file that is not a sheet (settings, skills, scripts, and so on) in the library with the \
                  given content. An existing file is replaced entirely. The folder must already exist. Create new \
@@ -236,6 +261,11 @@ impl Workspace {
     /// 도구를 부른다. 읽기는 바로 끝내고, 파일을 바꾸는 도구는 쓰지 않고 계획만 돌려준다.
     /// 실패도 모델이 읽고 고칠 수 있게 글로 돌려준다.
     pub fn plan(&self, name: &str, arguments: &Map<String, Value>) -> Planned {
+        if name == RUN_EXTENSION {
+            let extension = arguments.get("name").and_then(Value::as_str).unwrap_or("");
+            let path = format!("{}/{extension}.lua", crate::extension::EXTENSIONS_DIR);
+            return Planned::Done(output(&path, "실행", self.run_extension(arguments)));
+        }
         if name == LOAD_SKILL {
             return Planned::Done(
                 self.load_skill(arguments.get("name").and_then(Value::as_str).unwrap_or("")),
@@ -312,6 +342,116 @@ impl Workspace {
                 summary: format!("실패 · 스킬 {name}"),
             },
         }
+    }
+
+    fn run_extension(&self, arguments: &Map<String, Value>) -> Result<String, String> {
+        use crate::extension::{CommandContext, Extension, Shape, Theme};
+        let name = arguments.get("name").and_then(Value::as_str).unwrap_or("");
+        let extension = Extension::open(&self.root, name)?;
+        let commands = if extension.commands.is_empty() {
+            "none".to_string()
+        } else {
+            extension
+                .commands
+                .iter()
+                .enumerate()
+                .map(|(ix, title)| format!("{}. {title}", ix + 1))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if let Some(command) = arguments.get("command") {
+            let index = match command {
+                Value::Number(n) => n.as_u64().and_then(|n| (n as usize).checked_sub(1)),
+                Value::String(title) => extension.commands.iter().position(|t| t == title),
+                _ => None,
+            }
+            .filter(|ix| *ix < extension.commands.len())
+            .ok_or(format!("No such command. Commands: {commands}"))?;
+            let ctx = CommandContext {
+                selection: arguments
+                    .get("selection")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                ..CommandContext::default()
+            };
+            return Ok(match extension.run_command(index, &ctx)? {
+                Some(text) => format!("The command returned: {text:?}"),
+                None => "The command returned nil (nothing is inserted).".into(),
+            });
+        }
+        let t = arguments.get("t").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let args: Vec<(String, String)> = arguments
+            .get("args")
+            .and_then(Value::as_object)
+            .map(|args| {
+                args.iter()
+                    .map(|(key, value)| {
+                        let value = match value {
+                            Value::String(text) => text.clone(),
+                            other => other.to_string(),
+                        };
+                        (key.clone(), value)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (width, height) = extension.size;
+        let header = format!(
+            "Canvas {width} x {height}, animated: {}, commands: {commands}.",
+            extension.animated
+        );
+        if !extension.draws {
+            return Ok(format!("{header} No draw function."));
+        }
+        let shapes = extension.draw(t, &args, &Theme::default())?;
+        let (mut fills, mut strokes, mut texts) = (0, 0, 0);
+        let mut bounds: Option<[f32; 4]> = None;
+        let mut extend = |[x, y]: [f32; 2]| {
+            let b = bounds.get_or_insert([x, y, x, y]);
+            *b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+        };
+        for shape in &shapes {
+            match shape {
+                Shape::Fill { path, .. } | Shape::Stroke { path, .. } => {
+                    if matches!(shape, Shape::Fill { .. }) {
+                        fills += 1;
+                    } else {
+                        strokes += 1;
+                    }
+                    for segment in path {
+                        use crate::extension::Segment;
+                        match *segment {
+                            Segment::Move(p) | Segment::Line(p) => extend(p),
+                            Segment::Cubic(a, b, p) => {
+                                extend(a);
+                                extend(b);
+                                extend(p);
+                            }
+                            Segment::Close => {}
+                        }
+                    }
+                }
+                Shape::Text { origin, .. } => {
+                    texts += 1;
+                    extend(*origin);
+                }
+            }
+        }
+        let Some([x0, y0, x1, y1]) = bounds else {
+            return Ok(format!("{header} At t = {t}: drew nothing."));
+        };
+        let outside = x0 < 0.0 || y0 < 0.0 || x1 > width || y1 > height;
+        Ok(format!(
+            "{header} At t = {t}: {} shapes ({fills} fills, {strokes} strokes, {texts} texts). \
+             Drawing bounds x {x0:.1}..{x1:.1}, y {y0:.1}..{y1:.1} (text counts its top-left corner only).{}",
+            shapes.len(),
+            if outside {
+                " Part of the drawing is outside the canvas and will be cut off."
+            } else {
+                ""
+            }
+        ))
     }
 
     fn list(&self, path: &str) -> Result<String, String> {
@@ -671,7 +811,18 @@ mod tests {
             .iter()
             .map(|def| def.name.to_string())
             .collect();
-        assert_eq!(names, [LIST, READ, EDIT, CREATE_SHEET, WRITE, LOAD_SKILL]);
+        assert_eq!(
+            names,
+            [
+                LIST,
+                READ,
+                EDIT,
+                CREATE_SHEET,
+                RUN_EXTENSION,
+                WRITE,
+                LOAD_SKILL
+            ]
+        );
         let out = ws.call(LOAD_SKILL, &args(&[("name", "tone")]));
         assert!(out.text.starts_with("존댓말로"));
         assert_eq!(out.summary, "스킬 · tone");
@@ -682,7 +833,7 @@ mod tests {
         );
         // 스킬이 없으면 load_skill을 주지 않는다.
         let (bare, _) = workspace();
-        assert_eq!(bare.definitions().len(), 5);
+        assert_eq!(bare.definitions().len(), 6);
     }
 
     #[test]
@@ -902,6 +1053,38 @@ mod tests {
         );
         assert!(out.text.contains("TOML syntax error"), "{}", out.text);
         assert!(!root.join("Skills/count/config.toml").exists());
+    }
+
+    #[test]
+    fn runs_extensions_for_the_model() {
+        let (ws, root) = workspace();
+        std::fs::create_dir_all(root.join("Extensions")).unwrap();
+        std::fs::write(
+            root.join("Extensions/dot.lua"),
+            "return { size = { 100, 50 }, draw = function(g, t, args) g.circle('fill', 10 + t, 10, args.r) end,\n\
+             commands = { { title = 'Shout', run = function(ctx) return ctx.selection .. '!' end } } }",
+        )
+        .unwrap();
+        let run = |arguments: Value| ws.call(RUN_EXTENSION, arguments.as_object().unwrap());
+        let out = run(json!({ "name": "dot", "args": { "r": 5 } }));
+        assert_eq!(out.summary, "실행 · Extensions/dot.lua");
+        assert!(out.text.contains("1 shapes (1 fills"), "{}", out.text);
+        assert!(!out.text.contains("outside"), "{}", out.text);
+        let out = run(json!({ "name": "dot", "t": 100, "args": { "r": 5 } }));
+        assert!(out.text.contains("outside the canvas"), "{}", out.text);
+        let out = run(json!({ "name": "dot", "command": "Shout", "selection": "hi" }));
+        assert_eq!(out.text, "The command returned: \"hi!\"");
+        let out = run(json!({ "name": "dot", "command": 2 }));
+        assert!(
+            out.text.starts_with("Error: No such command"),
+            "{}",
+            out.text
+        );
+        // 오류는 모델이 고칠 수 있게 그대로 돌려준다.
+        let out = run(json!({ "name": "dot" }));
+        assert!(out.text.starts_with("Error: "), "{}", out.text);
+        let out = run(json!({ "name": "none" }));
+        assert!(out.text.contains("No extension named"), "{}", out.text);
     }
 
     #[cfg(unix)]

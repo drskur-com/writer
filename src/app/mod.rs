@@ -7,12 +7,14 @@ mod book_style;
 mod code_highlight;
 mod compile_dialog;
 mod editor;
+mod editor_extension;
 mod editor_format;
 mod editor_image;
 mod editor_layout;
 mod editor_link;
 mod editor_table;
 mod editor_task;
+mod extension_commands;
 mod file_view;
 mod insert_footnote;
 mod insert_image;
@@ -85,6 +87,8 @@ pub(crate) struct WriterApp {
     library: Option<library::Library>,
     /// 접힌 최상위 섹션(UI 상태; 추후 registry에 저장).
     collapsed_sections: std::collections::HashSet<library::SectionKind>,
+    /// 확장 폴더의 파일과 수정 시각. 바뀔 때만 확장 명령을 다시 읽는다(ADR-0026).
+    extension_files: Option<Vec<(String, Option<std::time::SystemTime>)>>,
     /// 사이드바 1단에 펼쳐 둔 프로젝트. 있으면 라이브러리 대신 프로젝트 화면을 그린다.
     open_project: Option<PathBuf>,
     /// 프로젝트 화면에서 하위 그룹을 펼친 그룹.
@@ -160,6 +164,7 @@ impl WriterApp {
             library,
             notice,
             collapsed_sections: std::collections::HashSet::new(),
+            extension_files: None,
             open_project: None,
             expanded_groups: std::collections::HashSet::new(),
             selected: None,
@@ -274,6 +279,7 @@ impl WriterApp {
         self.preview_task = None;
         self.previews.clear();
         self.library = None;
+        self.refresh_extension_commands(cx);
         self.notice = None;
         self.open_project = None;
         self.expanded_groups.clear();
@@ -623,6 +629,7 @@ impl Render for WriterApp {
             .on_action(cx.listener(Self::on_toggle_preview))
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_set_theme))
+            .on_action(cx.listener(Self::on_run_extension_command))
             .on_action(cx.listener(Self::on_quit));
 
         // 커스텀 타이틀바 + 메뉴바 (macOS는 투명 타이틀바 + 네이티브 메뉴를 쓰므로 생략)
