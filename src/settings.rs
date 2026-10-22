@@ -15,6 +15,7 @@ use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 
 use crate::app::style::{PANEL_INSET, Palette, TOOLBAR_HEIGHT, window_drag_area};
+use crate::aws_profiles::{self, AwsProfile};
 use crate::config::Config;
 use crate::icons;
 
@@ -36,9 +37,45 @@ pub struct Prefs {
     /// 에디터 서체. 없으면 테마 서체(시스템 서체).
     pub editor_font: Option<SharedString>,
     pub editor_font_size: Option<u16>,
+    /// 어시스턴트가 쓸 AI 제공자. 없으면 쓰지 않는다.
+    pub ai_provider: Option<AiProvider>,
+    /// Bedrock에 쓸 AWS 프로필 이름.
+    pub aws_profile: Option<SharedString>,
+    /// Bedrock을 부를 리전. 없으면 프로필의 리전을 따른다.
+    pub aws_region: Option<SharedString>,
+    /// 어시스턴트가 부를 Bedrock 모델(추론 프로필) ID. 어시스턴트 패널에서 고른다.
+    pub ai_model: Option<SharedString>,
 }
 
 impl Global for Prefs {}
+
+/// 어시스턴트가 쓸 AI 제공자.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AiProvider {
+    /// Amazon Bedrock(AWS 프로필의 자격 증명으로 부른다).
+    Bedrock,
+}
+
+impl AiProvider {
+    const ALL: [AiProvider; 1] = [AiProvider::Bedrock];
+
+    /// `config.toml`에 적는 이름.
+    fn key(self) -> &'static str {
+        match self {
+            AiProvider::Bedrock => "bedrock",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|provider| provider.key() == key)
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            AiProvider::Bedrock => "Amazon Bedrock",
+        }
+    }
+}
 
 impl Prefs {
     /// 설정 파일 값으로 전역 설정을 만든다.
@@ -48,6 +85,10 @@ impl Prefs {
             editor_font_size: config
                 .editor_font_size
                 .filter(|size| (12..=32).contains(size)),
+            ai_provider: config.ai_provider.as_deref().and_then(AiProvider::from_key),
+            aws_profile: config.aws_profile.clone().map(SharedString::from),
+            aws_region: config.aws_region.clone().map(SharedString::from),
+            ai_model: config.ai_model.clone().map(SharedString::from),
         });
     }
 
@@ -70,6 +111,58 @@ impl Prefs {
         cx.global_mut::<Prefs>().editor_font_size = Some(size);
         let mut config = Config::load();
         config.editor_font_size = Some(size);
+        if let Err(err) = config.save() {
+            eprintln!("설정 저장 실패: {err}");
+        }
+    }
+
+    /// AI 제공자를 바꾸고 저장한다.
+    fn set_ai_provider(provider: Option<AiProvider>, cx: &mut App) {
+        if cx.global::<Prefs>().ai_provider == provider {
+            return;
+        }
+        cx.global_mut::<Prefs>().ai_provider = provider;
+        let mut config = Config::load();
+        config.ai_provider = provider.map(|provider| provider.key().to_string());
+        if let Err(err) = config.save() {
+            eprintln!("설정 저장 실패: {err}");
+        }
+    }
+
+    /// Bedrock에 쓸 AWS 프로필을 바꾸고 저장한다.
+    fn set_aws_profile(profile: Option<SharedString>, cx: &mut App) {
+        if cx.global::<Prefs>().aws_profile == profile {
+            return;
+        }
+        cx.global_mut::<Prefs>().aws_profile = profile.clone();
+        let mut config = Config::load();
+        config.aws_profile = profile.map(|profile| profile.to_string());
+        if let Err(err) = config.save() {
+            eprintln!("설정 저장 실패: {err}");
+        }
+    }
+
+    /// Bedrock 리전을 바꾸고 저장한다. `None`이면 프로필의 리전을 따른다.
+    fn set_aws_region(region: Option<SharedString>, cx: &mut App) {
+        if cx.global::<Prefs>().aws_region == region {
+            return;
+        }
+        cx.global_mut::<Prefs>().aws_region = region.clone();
+        let mut config = Config::load();
+        config.aws_region = region.map(|region| region.to_string());
+        if let Err(err) = config.save() {
+            eprintln!("설정 저장 실패: {err}");
+        }
+    }
+
+    /// 어시스턴트가 부를 Bedrock 모델(추론 프로필) ID를 바꾸고 저장한다.
+    pub(crate) fn set_ai_model(model: Option<SharedString>, cx: &mut App) {
+        if cx.global::<Prefs>().ai_model == model {
+            return;
+        }
+        cx.global_mut::<Prefs>().ai_model = model.clone();
+        let mut config = Config::load();
+        config.ai_model = model.map(|model| model.to_string());
         if let Err(err) = config.save() {
             eprintln!("설정 저장 실패: {err}");
         }
@@ -143,20 +236,23 @@ pub fn open(cx: &mut App) {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     General,
+    Ai,
 }
 
 impl Page {
-    const ALL: [Page; 1] = [Page::General];
+    const ALL: [Page; 2] = [Page::General, Page::Ai];
 
     fn title(self) -> &'static str {
         match self {
             Page::General => "일반",
+            Page::Ai => "AI",
         }
     }
 
     fn icon(self) -> AssetIcon {
         match self {
             Page::General => icons::settings(),
+            Page::Ai => icons::ai_settings(),
         }
     }
 }
@@ -248,11 +344,39 @@ impl SearchableListItem for FontSizeItem {
     }
 }
 
+/// 이름만 있는 선택지(AI 제공자, AWS 프로필). 값이 `None`이면 "사용 안 함" 같은 비움 항목.
+#[derive(Clone)]
+struct ChoiceItem {
+    title: SharedString,
+    value: Option<SharedString>,
+}
+
+impl SearchableListItem for ChoiceItem {
+    type Value = Option<SharedString>;
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div().child(self.title.clone())
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+}
+
 /// 설정 창 화면.
 struct SettingsWindow {
     page: Page,
     font_picker: Entity<SelectState<SearchableVec<FontItem>>>,
     font_size_picker: Entity<SelectState<SearchableVec<FontSizeItem>>>,
+    provider_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
+    profile_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
+    region_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
+    /// 창을 열 때 읽은 AWS 프로필.
+    aws_profiles: Vec<AwsProfile>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -284,6 +408,92 @@ impl SettingsWindow {
                 cx,
             )
         });
+        // AI 제공자: 맨 앞은 "사용 안 함".
+        let providers: Vec<_> = std::iter::once(ChoiceItem {
+            title: "사용 안 함".into(),
+            value: None,
+        })
+        .chain(AiProvider::ALL.into_iter().map(|provider| ChoiceItem {
+            title: provider.title().into(),
+            value: Some(provider.key().into()),
+        }))
+        .collect();
+        let current_provider = cx.global::<Prefs>().ai_provider.map(|p| p.key());
+        let selected_provider = providers
+            .iter()
+            .position(|item| item.value.as_deref() == current_provider)
+            .unwrap_or(0);
+        let provider_picker = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(providers),
+                Some(IndexPath::new(selected_provider)),
+                window,
+                cx,
+            )
+        });
+
+        // AWS 프로필: 저장한 프로필이 목록에 없으면 고르지 않은 상태로 둔다.
+        let aws_profiles = aws_profiles::list();
+        let current_profile = cx.global::<Prefs>().aws_profile.clone();
+        let selected_profile = aws_profiles
+            .iter()
+            .position(|profile| Some(profile.name.as_str()) == current_profile.as_deref());
+        let profile_items: Vec<_> = aws_profiles
+            .iter()
+            .map(|profile| ChoiceItem {
+                title: profile.name.clone().into(),
+                value: Some(profile.name.clone().into()),
+            })
+            .collect();
+        let profile_picker = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(profile_items),
+                selected_profile.map(IndexPath::new),
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+
+        // 리전: 맨 앞은 "프로필 리전 따르기". 저장한 리전이 목록에 없으면(직접 고친 설정) 끝에 더한다.
+        let current_region = cx.global::<Prefs>().aws_region.clone();
+        let mut regions: Vec<_> = std::iter::once(ChoiceItem {
+            title: "프로필 리전 따르기".into(),
+            value: None,
+        })
+        .chain(
+            aws_profiles::BEDROCK_REGIONS
+                .iter()
+                .map(|(code, name)| ChoiceItem {
+                    title: format!("{name} · {code}").into(),
+                    value: Some((*code).into()),
+                }),
+        )
+        .collect();
+        if let Some(region) = &current_region
+            && !regions
+                .iter()
+                .any(|item| item.value.as_ref() == Some(region))
+        {
+            regions.push(ChoiceItem {
+                title: region.clone(),
+                value: Some(region.clone()),
+            });
+        }
+        let selected_region = regions
+            .iter()
+            .position(|item| item.value == current_region)
+            .unwrap_or(0);
+        let region_picker = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(regions),
+                Some(IndexPath::new(selected_region)),
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+
         let subscriptions = vec![
             cx.subscribe(
                 &font_picker,
@@ -303,6 +513,33 @@ impl SettingsWindow {
                     }
                 },
             ),
+            cx.subscribe(
+                &provider_picker,
+                |_, _, event: &SelectEvent<SearchableVec<ChoiceItem>>, cx| {
+                    let SelectEvent::Confirm(value) = event;
+                    if let Some(key) = value {
+                        Prefs::set_ai_provider(key.as_deref().and_then(AiProvider::from_key), cx);
+                    }
+                },
+            ),
+            cx.subscribe(
+                &profile_picker,
+                |_, _, event: &SelectEvent<SearchableVec<ChoiceItem>>, cx| {
+                    let SelectEvent::Confirm(value) = event;
+                    if let Some(profile) = value {
+                        Prefs::set_aws_profile(profile.clone(), cx);
+                    }
+                },
+            ),
+            cx.subscribe(
+                &region_picker,
+                |_, _, event: &SelectEvent<SearchableVec<ChoiceItem>>, cx| {
+                    let SelectEvent::Confirm(value) = event;
+                    if let Some(region) = value {
+                        Prefs::set_aws_region(region.clone(), cx);
+                    }
+                },
+            ),
             cx.observe_global::<Prefs>(|_, cx| cx.notify()),
         ];
 
@@ -310,6 +547,10 @@ impl SettingsWindow {
             page: Page::General,
             font_picker,
             font_size_picker,
+            provider_picker,
+            profile_picker,
+            region_picker,
+            aws_profiles,
             _subscriptions: subscriptions,
         }
     }
@@ -397,11 +638,96 @@ impl SettingsWindow {
     }
 }
 
+impl SettingsWindow {
+    /// AI: 어시스턴트가 쓸 제공자와, Bedrock이면 AWS 프로필.
+    fn render_ai(&self, cx: &App, pal: Palette) -> impl IntoElement {
+        let prefs = cx.global::<Prefs>();
+        let saved_profile = prefs.aws_profile.clone();
+        let profile = saved_profile.as_ref().and_then(|name| {
+            self.aws_profiles
+                .iter()
+                .find(|profile| profile.name == name.as_ref())
+        });
+        // 프로필 아래 안내: 프로필이 없거나 사라졌다는 안내, 아니면 프로필을 읽는 곳.
+        let hint: Option<SharedString> = if self.aws_profiles.is_empty() {
+            Some("~/.aws/config에 프로필이 없습니다. 터미널에서 aws configure로 만드세요.".into())
+        } else if profile.is_some() {
+            None
+        } else if let Some(name) = &saved_profile {
+            Some(format!("저장한 프로필 '{name}'을 찾을 수 없습니다. 다시 고르세요.").into())
+        } else {
+            Some("~/.aws/config와 ~/.aws/credentials의 프로필에서 고릅니다.".into())
+        };
+        // 리전 아래 안내: 프로필 리전을 따를 때 실제로 쓰일 리전.
+        let region_hint: Option<SharedString> = match (&prefs.aws_region, profile) {
+            (Some(_), _) => None,
+            (None, Some(profile)) => Some(match &profile.region {
+                Some(region) => format!("프로필 리전 {region}을 씁니다.").into(),
+                None => "프로필에 리전이 없습니다. AWS_REGION 환경 변수를 따릅니다.".into(),
+            }),
+            (None, None) => Some("프로필을 고르면 그 프로필의 리전을 씁니다.".into()),
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("AI 제공자")
+                    .child(Select::new(&self.provider_picker).large().focus_ring(false)),
+            )
+            .when(prefs.ai_provider == Some(AiProvider::Bedrock), |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child("AWS 프로필")
+                        .child(
+                            Select::new(&self.profile_picker)
+                                .large()
+                                .focus_ring(false)
+                                .disabled(self.aws_profiles.is_empty())
+                                .placeholder("프로필 선택")
+                                .menu_max_h(px(240.0))
+                                .search_placeholder("프로필 검색"),
+                        )
+                        .children(
+                            hint.map(|hint| div().text_sm().text_color(pal.muted).child(hint)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child("리전")
+                        .child(
+                            Select::new(&self.region_picker)
+                                .large()
+                                .focus_ring(false)
+                                .menu_max_h(px(240.0))
+                                .search_placeholder("리전 검색"),
+                        )
+                        .children(
+                            region_hint
+                                .map(|hint| div().text_sm().text_color(pal.muted).child(hint)),
+                        ),
+                )
+            })
+    }
+}
+
 impl Render for SettingsWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = Palette::from_theme(cx.theme());
         let content = match self.page {
             Page::General => self.render_general().into_any_element(),
+            Page::Ai => self.render_ai(cx, pal).into_any_element(),
         };
 
         let body = div()
@@ -420,10 +746,14 @@ impl Render for SettingsWindow {
                         div().h(px(TOOLBAR_HEIGHT)).flex_shrink_0(),
                     ))
                     .child(
+                        // 폼이 창보다 길면(AI 페이지) 세로로 스크롤한다.
                         div()
+                            .id("settings-form")
                             .flex_1()
                             .min_h_0()
+                            .overflow_y_scroll()
                             .px_8()
+                            .pb_8()
                             .flex()
                             .justify_center()
                             .child(div().w_full().max_w(px(FORM_MAX_WIDTH)).child(content)),

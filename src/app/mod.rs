@@ -76,10 +76,12 @@ pub(crate) struct WriterApp {
     sidebar_visible: bool,
     /// 오른쪽 어시스턴트 패널 표시 여부.
     assistant_visible: bool,
-    /// 어시스턴트 패널에서 고른 대화(샘플 대화 목록의 위치).
-    assistant_conversation: usize,
+    /// 어시스턴트 패널에서 고른 대화(샘플 대화 목록의 위치). `None`이면 새(빈) 대화.
+    assistant_conversation: Option<usize>,
     /// 어시스턴트 패널에 대화 대신 대화 기록을 보이는지.
     assistant_history: bool,
+    /// 어시스턴트 새 대화(실제 모델과 주고받는 대화).
+    assistant_chat: assistant_panel::LiveChat,
     library: Option<library::Library>,
     /// 접힌 최상위 섹션(UI 상태; 추후 registry에 저장).
     collapsed_sections: std::collections::HashSet<library::SectionKind>,
@@ -139,10 +141,12 @@ impl WriterApp {
             true
         });
         // 설정(서체 등)이 바뀌면 다시 그린다.
-        let prefs_subscription = cx.observe_global::<crate::settings::Prefs>(|this, cx| {
-            this.refresh_editor_preferences(cx);
-            cx.notify();
-        });
+        let prefs_subscription =
+            cx.observe_global_in::<crate::settings::Prefs>(window, |this, window, cx| {
+                this.refresh_editor_preferences(cx);
+                this.refresh_assistant_models(window, cx);
+                cx.notify();
+            });
         let quit_subscription = cx.on_app_quit(|this, cx| {
             this.close_sheet(cx);
             async {}
@@ -150,8 +154,9 @@ impl WriterApp {
         let mut app = WriterApp {
             sidebar_visible: true,
             assistant_visible: false,
-            assistant_conversation: 0,
+            assistant_conversation: None,
             assistant_history: false,
+            assistant_chat: assistant_panel::LiveChat::new(window, cx),
             library,
             notice,
             collapsed_sections: std::collections::HashSet::new(),
@@ -176,6 +181,7 @@ impl WriterApp {
             menu_bar: AppMenuBar::new(cx),
         };
         app.start_watching(window, cx);
+        app.refresh_assistant_models(window, cx);
         app.load_previews(cx);
         app
     }

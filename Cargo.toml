@@ -48,6 +48,12 @@ reqwest_client = { version = "=0.3.9", package = "gpui-pre-reqwest-client" }
 # 로컬 캐시(할 일 색인 등, ADR-0024): 동기화하지 않는 OS 캐시 폴더의 키-값 파일. 값은 JSON으로 넣는다.
 redb = "4.4"
 serde_json = "1"
+rig-core = "0.45"
+rig-bedrock = "0.45"
+# rig-bedrock은 aws-config 기본 기능을 꺼서 credential_process·SSO 프로필을 못 읽는다. 직접 켜 둔다.
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+aws-sdk-bedrock = "1"
 
 # 번들 없이 실행할 때(`cargo run`)도 Dock에 앱 아이콘을 보인다. 버전은 gpui가 쓰는 것과 맞춘다.
 [target.'cfg(target_os = "macos")'.dependencies]

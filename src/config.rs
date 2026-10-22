@@ -26,6 +26,14 @@ pub struct Config {
     pub editor_font: Option<String>,
     /// 에디터 본문 글자 크기(px). 없으면 16.
     pub editor_font_size: Option<u16>,
+    /// 어시스턴트가 쓸 AI 제공자(`bedrock`). 없으면 쓰지 않는다.
+    pub ai_provider: Option<String>,
+    /// Bedrock에 쓸 AWS 프로필 이름(`~/.aws/config`). 없으면 고르지 않은 것.
+    pub aws_profile: Option<String>,
+    /// Bedrock을 부를 리전. 없으면 프로필의 리전을 따른다.
+    pub aws_region: Option<String>,
+    /// 어시스턴트가 부를 Bedrock 모델(추론 프로필) ID. 없으면 `ai::DEFAULT_MODEL`.
+    pub ai_model: Option<String>,
 }
 
 /// 설정 디렉터리 (`<config_dir>/Writer`).

@@ -164,9 +164,19 @@ pub fn assistant() -> IconName {
     IconName::Sparkles
 }
 
+/// 설정 창의 "AI" 페이지.
+pub fn ai_settings() -> IconName {
+    IconName::Sparkles
+}
+
 /// 어시스턴트 대화 기록.
 pub fn history() -> IconName {
     IconName::Clock
+}
+
+/// 어시스턴트 답 받기 멈추기.
+pub fn stop() -> IconName {
+    IconName::Square
 }
 
 /// 어시스턴트에게 보내기.
