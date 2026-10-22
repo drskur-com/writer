@@ -1,4 +1,4 @@
-//! 어시스턴트 대화: Amazon Bedrock(rig-bedrock, Converse API)에 대화를 보내고 답을 조각으로 받는다.
+//! Amazon Bedrock(rig-bedrock, Converse API)에 대화를 보내고 답을 조각으로 받는다.
 //!
 //! rig·AWS SDK는 tokio 위에서 돈다. 앱(gpui) 실행기와 섞지 않도록 tokio 런타임을 따로 두고,
 //! 답 조각은 채널로 화면에 넘긴다. 받는 쪽이 채널을 버리면 다음 조각에서 요청을 멈춘다.
@@ -7,8 +7,15 @@ use futures::StreamExt as _;
 use futures::channel::mpsc;
 use rig_bedrock::client::BedrockRuntime;
 use rig_core::completion::CompletionRequest;
-use rig_core::message::Message;
+use rig_core::message::{Message, ToolResultContent};
 use rig_core::streaming::{Item, StreamEvent};
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use futures::channel::oneshot;
+
+use super::tools::Planned;
+use super::{Approval, Backend, ChangeCard, ChangeState, ChatEvent, Turn, Workspace};
 
 /// 설정에서 모델을 고르지 않았을 때 쓰는 모델(Bedrock 전역 교차 리전 추론 프로필).
 pub const DEFAULT_MODEL: &str = "global.anthropic.claude-opus-5-5";
@@ -106,38 +113,16 @@ fn models_in(ids: &[String]) -> Vec<(BedrockModel, String)> {
 /// 한 번의 답에 쓸 수 있는 최대 출력 토큰. 스트리밍이라 넉넉히 둔다.
 const MAX_TOKENS: u64 = 64_000;
 
-/// 대화의 말 한 마디.
-#[derive(Clone, Debug)]
-pub struct Turn {
-    /// 사용자가 한 말이면 `true`, 어시스턴트 답이면 `false`.
-    pub user: bool,
-    pub text: String,
-}
-
 /// Bedrock에 보낼 대화.
 #[derive(Clone, Debug)]
 pub struct ChatRequest {
-    /// 자격 증명을 읽을 AWS 프로필(`~/.aws/config`).
-    pub profile: String,
-    /// 부를 리전. 없으면 프로필의 리전을 따른다.
-    pub region: Option<String>,
-    /// Bedrock 모델 ID 또는 추론 프로필 ID.
-    pub model: String,
+    pub backend: Backend,
+    /// 도구가 읽고 쓸 수 있는 폴더(라이브러리). 없으면 도구 없이 답만 받는다.
+    pub workspace: Option<Workspace>,
     /// 시스템 프롬프트.
     pub system: String,
     /// 지금까지의 대화. 마지막은 이번에 보낼 사용자 말이다.
     pub turns: Vec<Turn>,
-}
-
-/// 답을 받는 동안 화면에 넘기는 일.
-#[derive(Debug)]
-pub enum ChatEvent {
-    /// 답 글이 이만큼 더 왔다.
-    Text(String),
-    /// 답이 끝났다.
-    Done,
-    /// 요청이 실패했다(자격 증명, 권한, 모델 ID 등). 사람이 읽을 설명.
-    Failed(String),
 }
 
 /// tokio 런타임. 처음 대화를 보낼 때 만든다.
@@ -166,38 +151,116 @@ pub fn stream(request: ChatRequest) -> mpsc::UnboundedReceiver<ChatEvent> {
     rx
 }
 
+/// 사용자가 변경을 거절했을 때 모델에 돌려줄 글.
+const DECLINED: &str = "The user declined this change. Do not retry it unless they ask; you may ask what they would like instead.";
+
+/// 승인 카드 번호. 대화가 달라도 겹치지 않게 앱 전체에서 센다.
+static NEXT_CHANGE: AtomicU64 = AtomicU64::new(1);
+
+/// 도구를 부르고 다시 묻기를 이만큼까지만 되풀이한다(끝없이 도는 것을 막는다).
+const MAX_TOOL_ROUNDS: usize = 24;
+
 async fn run(request: ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Result<(), String> {
-    let Some((prompt, history)) = request.turns.split_last() else {
+    if request.turns.is_empty() {
         return Err("보낼 말이 없습니다.".into());
-    };
-    let mut runtime = BedrockRuntime::builder().profile_name(&request.profile);
-    if let Some(region) = &request.region {
+    }
+    let backend = &request.backend;
+    let mut runtime = BedrockRuntime::builder().profile_name(&backend.profile);
+    if let Some(region) = &backend.region {
         runtime = runtime.region(region);
     }
-    let model = runtime.build().completion(&request.model);
+    let model = runtime.build().completion(&backend.model);
+    let tools = request
+        .workspace
+        .as_ref()
+        .map(Workspace::definitions)
+        .unwrap_or_default();
 
-    let completion = CompletionRequest::new(Message::user(&prompt.text))
-        .preamble(&request.system)
-        .messages(history.iter().map(|turn| {
+    // 이번 답 동안 쌓이는 대화: 지난 말들 + 도구 호출과 그 결과.
+    let mut messages: Vec<Message> = request
+        .turns
+        .iter()
+        .map(|turn| {
             if turn.user {
                 Message::user(&turn.text)
             } else {
                 Message::assistant(&turn.text)
             }
-        }))
-        .max_tokens(MAX_TOKENS);
+        })
+        .collect();
 
-    let mut stream = model.stream(completion).map_err(|err| err.to_string())?;
-    while let Some(item) = stream.next().await {
-        // 글 조각만 쓴다(추론·도구 호출 조각은 이 대화에서 쓰지 않는다).
-        if let Item::Event(StreamEvent::Text { text, .. }) = item.map_err(|err| err.to_string())?
-            // 받는 쪽(화면)이 대화를 버렸으면 그만 받는다.
-            && tx.unbounded_send(ChatEvent::Text(text)).is_err()
-        {
-            return Ok(());
+    for _ in 0..MAX_TOOL_ROUNDS {
+        let Some((prompt, history)) = messages.split_last() else {
+            break;
+        };
+        let completion = CompletionRequest::new(prompt.clone())
+            .preamble(&request.system)
+            .messages(history.iter().cloned())
+            .tools(tools.iter().cloned())
+            .max_tokens(MAX_TOKENS);
+
+        let mut stream = model.stream(completion).map_err(|err| err.to_string())?;
+        while let Some(item) = stream.next().await {
+            // 글 조각만 화면에 넘긴다(도구 호출은 다 받은 뒤 응답에서 읽는다).
+            if let Item::Event(StreamEvent::Text { text, .. }) =
+                item.map_err(|err| err.to_string())?
+                // 받는 쪽(화면)이 대화를 버렸으면 그만 받는다.
+                && tx.unbounded_send(ChatEvent::Text(text)).is_err()
+            {
+                return Ok(());
+            }
         }
+        let response = stream.finish().await.map_err(|err| err.to_string())?;
+        let calls: Vec<_> = response.tool_calls().cloned().collect();
+        let (Some(workspace), false) = (&request.workspace, calls.is_empty()) else {
+            return Ok(());
+        };
+        messages.extend(response.message());
+        let mut results = Vec::with_capacity(calls.len());
+        for call in &calls {
+            let text = match workspace.plan(&call.function.name, &call.function.arguments) {
+                Planned::Done(output) => {
+                    if tx.unbounded_send(ChatEvent::Tool(output.summary)).is_err() {
+                        return Ok(());
+                    }
+                    output.text
+                }
+                // 파일을 바꾸는 도구는 승인 카드를 띄우고 사용자의 답을 기다린다.
+                Planned::Change(change) => {
+                    let id = NEXT_CHANGE.fetch_add(1, Ordering::Relaxed);
+                    let (reply, answer) = oneshot::channel();
+                    let card = ChangeCard {
+                        id,
+                        path: change.path.clone(),
+                        new_file: change.is_new(),
+                        lines: change.diff(),
+                        state: ChangeState::Pending,
+                    };
+                    if tx
+                        .unbounded_send(ChatEvent::Approve(Approval { card, reply }))
+                        .is_err()
+                    {
+                        return Ok(());
+                    }
+                    match answer.await {
+                        Ok(true) => {
+                            let output = workspace.commit(change);
+                            if output.text.starts_with("Error:") {
+                                tx.unbounded_send(ChatEvent::ChangeFailed(id)).ok();
+                            }
+                            output.text
+                        }
+                        Ok(false) => DECLINED.to_string(),
+                        // 사용자가 답을 멈췄다.
+                        Err(_) => return Ok(()),
+                    }
+                }
+            };
+            results.push(call.result(vec![ToolResultContent::text(text)]));
+        }
+        messages.push(Message::tool_results(results));
     }
-    Ok(())
+    Err(format!("도구를 {MAX_TOOL_ROUNDS}번 넘게 불러 멈췄습니다."))
 }
 
 #[cfg(test)]
@@ -245,13 +308,17 @@ mod tests {
     fn live_stream() {
         let profile = std::env::var("WRITER_AI_PROFILE").expect("WRITER_AI_PROFILE");
         let mut rx = stream(ChatRequest {
-            profile,
-            region: std::env::var("WRITER_AI_REGION").ok(),
-            model: std::env::var("WRITER_AI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()),
+            backend: Backend {
+                profile,
+                region: std::env::var("WRITER_AI_REGION").ok(),
+                model: std::env::var("WRITER_AI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()),
+            },
+            workspace: None,
             system: "짧게 답하세요.".into(),
             turns: vec![Turn {
                 user: true,
                 text: "한 문장으로 인사해 줘.".into(),
+                ..Turn::default()
             }],
         });
         let mut chunks = 0;

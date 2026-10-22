@@ -307,6 +307,31 @@ impl Library {
         Some(projects.join(name))
     }
 
+    /// 그룹(또는 섹션 폴더)의 정렬 방법과, 사용자가 고를 수 있는지.
+    ///
+    /// 프로젝트 원고는 순서가 곧 원고 구조라서 늘 수동이고 고를 수 없다.
+    /// 지정이 없으면 메모는 수정일순, 프로젝트 추가자료(`<Project>/Extras/…`)는 수동이다.
+    pub fn sort_of(&self, path: &Path) -> (SortMode, bool) {
+        let projects = self.root.join(SectionKind::Projects.dir());
+        let default = match path.strip_prefix(&projects) {
+            Ok(relative)
+                if relative
+                    .components()
+                    .nth(1)
+                    .is_some_and(|part| part.as_os_str() == EXTRAS_DIR) =>
+            {
+                SortMode::Manual
+            }
+            Ok(_) => return (SortMode::Manual, false),
+            Err(_) => SortMode::Modified,
+        };
+        let mode = self
+            .find_group(path)
+            .and_then(|group| group.sort)
+            .unwrap_or(default);
+        (mode, true)
+    }
+
     /// `Projects/` 바로 아래의 프로젝트를 찾는다.
     pub fn find_project(&self, path: &Path) -> Option<&Group> {
         self.section(SectionKind::Projects)?
@@ -317,6 +342,28 @@ impl Library {
                 _ => None,
             })
     }
+}
+
+/// 그룹 메타(`.writer.toml`) 글이 앱이 읽을 수 있는 모양인지 본다. 읽는 쪽은 깨진 값을 조용히
+/// 기본값으로 바꾸므로(시트 순서 등이 사라진다), 밖에서 고친 글은 쓰기 전에 이것으로 검사한다.
+/// 오류는 어시스턴트 모델이 읽고 고치므로 영어다.
+pub fn validate_group_meta(text: &str) -> Result<(), String> {
+    let mut table: toml::Table = text
+        .parse()
+        .map_err(|err| format!("TOML syntax error: {err}"))?;
+    if let Some(book) = table.remove("book") {
+        book.try_into::<BookMeta>()
+            .map_err(|err| format!("Invalid [book] value: {err}"))?;
+    }
+    if let Some(styles) = table.remove("styles") {
+        styles
+            .try_into::<Styles>()
+            .map_err(|err| format!("Invalid [styles] value: {err}"))?;
+    }
+    toml::Value::Table(table)
+        .try_into::<GroupMeta>()
+        .map_err(|err| format!("Invalid group setting: {err}"))?;
+    Ok(())
 }
 
 /// 레이아웃과 기본 메타를 보장한 뒤 라이브러리를 스캔한다.
@@ -534,13 +581,16 @@ pub(crate) mod test_util {
     }
 
     pub fn temp_dir(tag: &str) -> PathBuf {
+        // 시각만으로는 병렬 테스트끼리 겹칠 수 있다(macOS 시각은 마이크로초 단위). 순번을 더한다.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let base = std::env::temp_dir().join(format!(
-            "writer-test-{tag}-{}-{}",
+            "writer-test-{tag}-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&base).unwrap();
         base

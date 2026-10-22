@@ -437,22 +437,11 @@ impl WriterApp {
         let Some(lib) = &self.library else {
             return fixed;
         };
-        let projects = lib.root.join(library::SectionKind::Projects.dir());
-        let default = match path.strip_prefix(&projects) {
-            // <Project>/Extras/… 만 고를 수 있다.
-            Ok(relative)
-                if relative
-                    .components()
-                    .nth(1)
-                    .is_some_and(|part| part.as_os_str() == library::EXTRAS_DIR) =>
-            {
-                library::SortMode::Manual
-            }
-            Ok(_) => return fixed,
-            Err(_) => library::SortMode::Modified,
-        };
+        let (mode, choosable) = lib.sort_of(path);
+        if !choosable {
+            return fixed;
+        }
         let group = lib.find_group(path);
-        let mode = group.and_then(|group| group.sort).unwrap_or(default);
         GroupSort {
             mode,
             descending: group

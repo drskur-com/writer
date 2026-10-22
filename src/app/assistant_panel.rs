@@ -1,9 +1,10 @@
 //! 오른쪽 어시스턴트(LLM) 패널. 에디터 툴바 오른쪽 끝 버튼으로 열고 닫는다.
 //!
 //! 새 대화는 설정의 Bedrock 프로필로 실제 모델과 주고받고, 답을 받는 대로 조금씩 그린다
-//! ([`crate::ai`]). 기록의 지난 대화는 아직 저장하지 않아 샘플을 보여 준다.
+//! ([`crate::agent`]). 대화 상태와 프롬프트는 에이전트가 맡고, 여기서는 그리기만 한다. 기록의 지난 대화는 아직 저장하지 않아 샘플을 보여 준다.
 
 use futures::StreamExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
@@ -13,20 +14,15 @@ use gpui_kit::gpui::*;
 
 use super::WriterApp;
 use super::style::*;
-use crate::{ai, icons};
+use crate::{agent, icons};
 
 /// 새 대화(실제 모델과 주고받는 대화)의 상태.
 pub(super) struct LiveChat {
     /// 입력창. Enter로 보내고 Shift+Enter로 줄을 바꾼다.
     input: Entity<TextareaState>,
-    /// 주고받은 말. 답을 받는 중이면 마지막은 자라는 어시스턴트 답이다.
-    turns: Vec<ai::Turn>,
-    /// 마지막 요청이 실패한 까닭.
-    error: Option<SharedString>,
+    conversation: agent::Conversation,
     /// 답을 받는 태스크. 버리면 받기를 멈춘다.
     reply: Option<Task<()>>,
-    /// 답을 받는 중인지. 태스크가 끝나도 `reply`는 남아 있으므로 따로 둔다.
-    streaming: bool,
     /// 답이 자랄 때 맨 아래로 따라가는 스크롤.
     scroll: ScrollHandle,
     /// 입력창 아래의 모델 고르기. 리전에서 쓸 수 있는 모델만 담는다.
@@ -45,7 +41,7 @@ enum ModelLookup {
     Idle,
     Loading,
     /// 쓸 수 있는 모델과 부를 ID(추론 프로필).
-    Ready(Vec<(ai::BedrockModel, String)>),
+    Ready(Vec<(agent::BedrockModel, String)>),
     Failed(SharedString),
 }
 
@@ -113,10 +109,8 @@ impl LiveChat {
         );
         Self {
             input,
-            turns: Vec::new(),
-            error: None,
+            conversation: agent::Conversation::default(),
             reply: None,
-            streaming: false,
             scroll: ScrollHandle::new(),
             model_picker,
             models: ModelLookup::Idle,
@@ -354,9 +348,9 @@ impl WriterApp {
             } else {
                 conversation.map_or_else(
                     || {
-                        live.turns
-                            .first()
-                            .map(|turn| SharedString::from(turn.text.clone()))
+                        live.conversation
+                            .title()
+                            .map(|title| SharedString::from(title.to_string()))
                             .unwrap_or_else(|| "새 대화".into())
                     },
                     |conversation| conversation.title.into(),
@@ -389,11 +383,13 @@ impl WriterApp {
                     message_bubble(message.role == Role::User, message.text.into(), pal)
                 }))
                 .into_any_element(),
-            None if live.turns.is_empty() && live.error.is_none() => self
+            None if live.conversation.is_empty() => self
                 .render_assistant_empty(configured, cx, pal)
                 .into_any_element(),
             None => {
-                let last = live.turns.len().saturating_sub(1);
+                let turns = live.conversation.turns();
+                let streaming = live.conversation.is_streaming();
+                let last = turns.len().saturating_sub(1);
                 div()
                     .id("assistant-live-messages")
                     .track_scroll(&live.scroll)
@@ -405,15 +401,21 @@ impl WriterApp {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .children(live.turns.iter().enumerate().map(|(ix, turn)| {
-                        // 첫 조각이 오기 전의 빈 답은 받는 중 표시로 그린다.
-                        if !turn.user && turn.text.is_empty() && live.streaming && ix == last {
-                            message_bubble(false, "…".into(), pal)
+                    .children(turns.iter().enumerate().map(|(ix, turn)| {
+                        // 글이 오기 전의 빈 답은 받는 중 표시로 그린다.
+                        let text = if !turn.user && turn.text.is_empty() && streaming && ix == last
+                        {
+                            "…".into()
                         } else {
-                            message_bubble(turn.user, turn.text.clone().into(), pal)
+                            turn.text.trim_end().to_string().into()
+                        };
+                        if turn.user {
+                            message_bubble(true, text, pal)
+                        } else {
+                            self.render_reply(text, &turn.activity, cx, pal)
                         }
                     }))
-                    .children(live.error.clone().map(|error| {
+                    .children(live.conversation.error().map(|error| {
                         div()
                             .px_3()
                             .py_2()
@@ -422,7 +424,7 @@ impl WriterApp {
                             .border_color(pal.danger.opacity(0.4))
                             .text_sm()
                             .text_color(pal.danger)
-                            .child(error)
+                            .child(format!("답을 받지 못했습니다: {error}"))
                     }))
                     .into_any_element()
             }
@@ -430,10 +432,10 @@ impl WriterApp {
 
         // 입력창. 새 대화에서만 쓰고(샘플 대화는 읽기 전용), AI를 설정하지 않았으면 두지 않는다.
         // 답을 받는 중에는 보내기 대신 멈추기 버튼을 둔다.
-        let can_send = !live.streaming
+        let can_send = !live.conversation.is_streaming()
             && self.assistant_model_usable(cx)
             && !live.input.read(cx).value().trim().is_empty();
-        let send_button = if live.streaming {
+        let send_button = if live.conversation.is_streaming() {
             icon_button("assistant-stop", icons::stop(), true, pal)
                 .on_click(cx.listener(|this, _, _, cx| this.stop_assistant_reply(cx)))
         } else {
@@ -735,11 +737,26 @@ impl WriterApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text = text.trim().to_string();
-        if text.is_empty() || self.assistant_chat.streaming {
+        let Some(backend) = agent::Backend::from_prefs(cx.global::<crate::settings::Prefs>())
+        else {
+            return;
+        };
+        if text.trim().is_empty() || self.assistant_chat.conversation.is_streaming() {
             return;
         }
-        let Some(request) = self.assistant_request(&text, cx) else {
+        // 에이전트가 열린 시트를 고칠 수 있으므로 먼저 저장해 둔다. 저장하지 않은 변경이 남아 있으면
+        // 에이전트가 쓴 내용을 다음 자동 저장이 덮어쓴다.
+        if let Err(err) = self.save_open_sheet(cx) {
+            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+            return;
+        }
+        let workspace = self
+            .library
+            .as_ref()
+            .map(|library| agent::Workspace::new(&library.root));
+        let system = self.assistant_system_prompt(workspace.as_ref(), cx);
+        let chat = &mut self.assistant_chat;
+        let Some(turns) = chat.conversation.send(&text) else {
             return;
         };
 
@@ -747,26 +764,22 @@ impl WriterApp {
         self.assistant_conversation = None;
         self.assistant_history = false;
         let chat = &mut self.assistant_chat;
-        chat.error = None;
-        chat.turns.push(ai::Turn {
-            user: true,
-            text: text.clone(),
-        });
-        chat.turns.push(ai::Turn {
-            user: false,
-            text: String::new(),
-        });
-        chat.streaming = true;
         chat.input
             .update(cx, |input, cx| input.set_value("", window, cx));
         chat.scroll.scroll_to_bottom();
 
-        let mut events = ai::stream(request);
+        let mut events = agent::stream(agent::ChatRequest {
+            backend,
+            workspace,
+            system,
+            turns,
+        });
         chat.reply = Some(cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.next().await {
-                let finished = !matches!(event, ai::ChatEvent::Text(_));
+                let finished =
+                    matches!(event, agent::ChatEvent::Done | agent::ChatEvent::Failed(_));
                 let updated = this.update_in(cx, |this, window, cx| {
-                    this.on_assistant_event(event, &text, window, cx);
+                    this.on_assistant_event(event, window, cx);
                 });
                 if updated.is_err() || finished {
                     break;
@@ -779,13 +792,8 @@ impl WriterApp {
     /// AI 설정(제공자·프로필·리전)이 바뀌었으면 그 리전에서 쓸 수 있는 모델을 다시 확인한다.
     pub(super) fn refresh_assistant_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prefs = cx.global::<crate::settings::Prefs>();
-        let key = match (prefs.ai_provider, &prefs.aws_profile) {
-            (Some(crate::settings::AiProvider::Bedrock), Some(profile)) => Some((
-                profile.to_string(),
-                prefs.aws_region.as_ref().map(ToString::to_string),
-            )),
-            _ => None,
-        };
+        let key =
+            agent::Backend::from_prefs(prefs).map(|backend| (backend.profile, backend.region));
         let chat = &mut self.assistant_chat;
         if chat.models_for == key && !matches!(chat.models, ModelLookup::Failed(_)) {
             return;
@@ -801,7 +809,7 @@ impl WriterApp {
             return;
         };
         chat.models = ModelLookup::Loading;
-        let lookup = ai::available_models(profile, region);
+        let lookup = agent::available_models(profile, region);
         chat.model_lookup = Some(cx.spawn_in(window, async move |this, cx| {
             let result = lookup
                 .await
@@ -818,7 +826,7 @@ impl WriterApp {
     /// (`us.` ↔ `global.` 등)이면 그 ID로 바꿔 저장한다.
     fn apply_assistant_models(
         &mut self,
-        result: Result<Vec<(ai::BedrockModel, String)>, String>,
+        result: Result<Vec<(agent::BedrockModel, String)>, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -832,7 +840,7 @@ impl WriterApp {
         };
         let saved = cx.global::<crate::settings::Prefs>().ai_model.clone();
         // 고른 적이 없으면 기본 모델(Opus 5.5)을 고른 것으로 보인다.
-        let wanted = saved.as_deref().unwrap_or(ai::DEFAULT_MODEL);
+        let wanted = saved.as_deref().unwrap_or(agent::DEFAULT_MODEL);
         let selected = models.iter().position(|(model, _)| model.matches(wanted));
         if let (Some(ix), Some(saved)) = (selected, &saved)
             && models[ix].1 != saved.as_ref()
@@ -860,7 +868,7 @@ impl WriterApp {
         match &self.assistant_chat.models {
             ModelLookup::Ready(models) => {
                 let prefs = cx.global::<crate::settings::Prefs>();
-                let wanted = prefs.ai_model.as_deref().unwrap_or(ai::DEFAULT_MODEL);
+                let wanted = prefs.ai_model.as_deref().unwrap_or(agent::DEFAULT_MODEL);
                 models.iter().any(|(model, _)| model.matches(wanted))
             }
             ModelLookup::Loading => false,
@@ -909,38 +917,18 @@ impl WriterApp {
         }
     }
 
-    /// 받은 답 조각을 화면 상태에 반영한다.
+    /// 받은 일을 대화에 반영한다. 답이 한 글자도 오지 않고 실패했으면 보낸 말을 입력창으로
+    /// 되돌려 다시 보낼 수 있게 한다.
     fn on_assistant_event(
         &mut self,
-        event: ai::ChatEvent,
-        sent: &str,
+        event: agent::ChatEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let chat = &mut self.assistant_chat;
-        match event {
-            ai::ChatEvent::Text(piece) => {
-                if let Some(turn) = chat.turns.last_mut().filter(|turn| !turn.user) {
-                    turn.text.push_str(&piece);
-                }
-            }
-            ai::ChatEvent::Done => chat.streaming = false,
-            ai::ChatEvent::Failed(message) => {
-                chat.streaming = false;
-                chat.error = Some(format!("답을 받지 못했습니다: {message}").into());
-                // 답이 한 글자도 오지 않았으면 보낸 말을 입력창으로 되돌려 다시 보낼 수 있게 한다.
-                if chat
-                    .turns
-                    .last()
-                    .is_some_and(|turn| !turn.user && turn.text.is_empty())
-                {
-                    chat.turns.pop();
-                    chat.turns.pop();
-                    let sent = sent.to_string();
-                    chat.input
-                        .update(cx, |input, cx| input.set_value(sent, window, cx));
-                }
-            }
+        if let Some(sent) = chat.conversation.apply(event) {
+            chat.input
+                .update(cx, |input, cx| input.set_value(sent, window, cx));
         }
         chat.scroll.scroll_to_bottom();
         cx.notify();
@@ -950,14 +938,7 @@ impl WriterApp {
     fn stop_assistant_reply(&mut self, cx: &mut Context<Self>) {
         let chat = &mut self.assistant_chat;
         chat.reply = None;
-        chat.streaming = false;
-        if chat
-            .turns
-            .last()
-            .is_some_and(|turn| !turn.user && turn.text.is_empty())
-        {
-            chat.turns.pop();
-        }
+        chat.conversation.stop();
         cx.notify();
     }
 
@@ -965,76 +946,231 @@ impl WriterApp {
     fn reset_live_chat(&mut self, cx: &mut Context<Self>) {
         let chat = &mut self.assistant_chat;
         chat.reply = None;
-        chat.streaming = false;
-        chat.turns.clear();
-        chat.error = None;
+        chat.conversation.clear();
         cx.notify();
     }
 
-    /// 설정과 열린 시트로 Bedrock 요청을 만든다. AI를 설정하지 않았으면 `None`.
-    fn assistant_request(&self, text: &str, cx: &App) -> Option<ai::ChatRequest> {
-        let prefs = cx.global::<crate::settings::Prefs>();
-        let profile = match prefs.ai_provider {
-            Some(crate::settings::AiProvider::Bedrock) => prefs.aws_profile.clone()?,
-            None => return None,
+    /// 열린 시트를 넣은 시스템 프롬프트.
+    fn assistant_system_prompt(&self, workspace: Option<&agent::Workspace>, cx: &App) -> String {
+        let tools = workspace.is_some();
+        let skills = workspace.map_or(&[][..], agent::Workspace::skills);
+        let Some(editor) = &self.editor else {
+            return agent::system_prompt(None, tools, skills);
         };
-        let mut turns: Vec<ai::Turn> = self
-            .assistant_chat
-            .turns
-            .iter()
-            .filter(|turn| !turn.text.is_empty())
-            .cloned()
-            .collect();
-        turns.push(ai::Turn {
-            user: true,
-            text: text.to_string(),
+        let path = self.library.as_ref().and_then(|library| {
+            let relative = editor.path().strip_prefix(&library.root).ok()?;
+            Some(relative.to_string_lossy().into_owned())
         });
-        Some(ai::ChatRequest {
-            profile: profile.to_string(),
-            region: prefs.aws_region.as_ref().map(ToString::to_string),
-            model: prefs
-                .ai_model
-                .as_ref()
-                .map_or_else(|| ai::DEFAULT_MODEL.to_string(), ToString::to_string),
-            system: self.assistant_system_prompt(cx),
-            turns,
-        })
+        let title = self
+            .previews
+            .get(editor.path())
+            .map(|(_, preview)| preview.title.to_string())
+            .unwrap_or_default();
+        // 파일과 같은 마크다운으로 넣는다(에디터 본문은 줄 하나가 문단이라 파일과 다르다). 그래야
+        // edit_file의 old를 파일에서 그대로 찾는다.
+        let body = crate::text_transform::to_markdown(&editor.state().read(cx).value());
+        agent::system_prompt(
+            Some(agent::Sheet {
+                title: &title,
+                path: path.as_deref(),
+                body: &body,
+            }),
+            tools,
+            skills,
+        )
     }
+}
 
-    /// 시스템 프롬프트: 앱과 역할 안내 + 열린 시트 본문.
-    fn assistant_system_prompt(&self, cx: &App) -> String {
-        let mut prompt = String::from(
-            "당신은 글쓰기 앱 Writer 안의 글쓰기 도우미입니다. 사용자는 마크다운으로 원고(시트)를 쓰고 \
-             있으며, 지금 열린 시트를 함께 보며 묻습니다. 사용자가 쓰는 말로 답하세요. 문장을 \
-             고치자고 할 때는 원래 문장과 바꿀 문장을 함께 보여 주세요.",
-        );
-        if let Some(editor) = &self.editor {
-            let title = self
-                .previews
-                .get(editor.path())
-                .map(|(_, preview)| preview.title.trim().to_string())
-                .filter(|title| !title.is_empty())
-                .unwrap_or_else(|| "제목 없는 시트".to_string());
-            let body = editor.state().read(cx).value();
-            prompt.push_str(&format!(
-                "\n\n지금 열린 시트입니다.\n<sheet title=\"{title}\">\n{body}\n</sheet>"
-            ));
-        }
-        prompt
+impl WriterApp {
+    /// 어시스턴트 답: 한 일(도구 줄, 승인 카드)과 글.
+    fn render_reply(
+        &self,
+        text: SharedString,
+        activity: &[agent::Activity],
+        cx: &mut Context<Self>,
+        pal: Palette,
+    ) -> AnyElement {
+        let pending = self.assistant_chat.conversation.pending_change();
+        let activity = activity
+            .iter()
+            .map(|activity| match activity {
+                agent::Activity::Tool(summary) => div()
+                    .text_xs()
+                    .truncate()
+                    .text_color(pal.muted)
+                    .child(SharedString::from(summary.clone()))
+                    .into_any_element(),
+                agent::Activity::Change(card) => {
+                    change_card(card, pending == Some(card.id), cx, pal)
+                }
+            })
+            .collect();
+        assistant_reply(false, text, activity, pal)
     }
+}
+
+/// 승인 카드: 바꿀 파일, 변경 내용(diff), 그리고 기다리는 중이면 [취소] [적용] 버튼.
+fn change_card(
+    card: &agent::ChangeCard,
+    waiting: bool,
+    cx: &mut Context<WriterApp>,
+    pal: Palette,
+) -> AnyElement {
+    let id = card.id as usize;
+    let status = match card.state {
+        agent::ChangeState::Pending if card.new_file => "새로 만들려고 합니다",
+        agent::ChangeState::Pending => "고치려고 합니다",
+        agent::ChangeState::Applied => "적용함",
+        agent::ChangeState::Declined => "취소함",
+        agent::ChangeState::Failed => "적용하지 못함",
+    };
+    let status_color = match card.state {
+        agent::ChangeState::Applied => pal.success,
+        agent::ChangeState::Failed => pal.danger,
+        _ => pal.muted,
+    };
+    let card_id = card.id;
+    let decide = |approve: bool| {
+        cx.listener(move |this: &mut WriterApp, _: &ClickEvent, _, cx| {
+            this.assistant_chat.conversation.decide(card_id, approve);
+            cx.notify();
+        })
+    };
+    let (decline, apply) = (decide(false), decide(true));
+    div()
+        .w_full()
+        .rounded_lg()
+        .border_1()
+        .border_color(pal.panel_border)
+        .overflow_hidden()
+        .child(
+            div()
+                .px_2()
+                .py_1()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .bg(pal.hover)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(card.path.clone())),
+                )
+                .child(div().flex_shrink_0().text_color(status_color).child(status)),
+        )
+        .child(
+            div()
+                .id(("change-lines", id))
+                .max_h(px(260.0))
+                .overflow_y_scroll()
+                .py_1()
+                .flex()
+                .flex_col()
+                .children(card.lines.iter().map(|line| diff_line(line, pal))),
+        )
+        .when(waiting, |this| {
+            this.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(pal.panel_border)
+                    .child(
+                        Button::new(("change-decline", id))
+                            .small()
+                            .label("취소")
+                            .on_click(decline),
+                    )
+                    .child(
+                        Button::new(("change-apply", id))
+                            .small()
+                            .primary()
+                            .label("적용")
+                            .on_click(apply),
+                    ),
+            )
+        })
+        .into_any_element()
+}
+
+/// diff 한 줄. 지운 줄은 빨강, 더한 줄은 초록 바탕이고, 줄 안에서 바뀐 글자는 더 진하게 칠한다.
+fn diff_line(line: &agent::DiffLine, pal: Palette) -> AnyElement {
+    let (sign, color) = match line.kind {
+        agent::LineKind::Removed => ("−", Some(pal.danger)),
+        agent::LineKind::Added => ("+", Some(pal.success)),
+        agent::LineKind::Context => (" ", None),
+        agent::LineKind::Gap => {
+            return div()
+                .px_2()
+                .text_xs()
+                .text_color(pal.muted)
+                .child("⋯")
+                .into_any_element();
+        }
+    };
+    // 빈 줄도 한 줄 높이를 차지하게 한다.
+    let text: SharedString = if line.text.is_empty() {
+        " ".into()
+    } else {
+        line.text.clone().into()
+    };
+    let highlights: Vec<_> = match color {
+        Some(color) if !line.text.is_empty() => line
+            .emphasis
+            .iter()
+            .map(|range| {
+                (
+                    range.clone(),
+                    HighlightStyle {
+                        background_color: Some(color.opacity(0.35)),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    div()
+        .px_2()
+        .flex()
+        .gap_1()
+        .text_xs()
+        .line_height(relative(1.5))
+        .when_some(color, |this, color| this.bg(color.opacity(0.1)))
+        .when(color.is_none(), |this| this.text_color(pal.muted))
+        .child(div().flex_shrink_0().w(px(10.0)).child(sign))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(StyledText::new(text).with_highlights(highlights)),
+        )
+        .into_any_element()
 }
 
 /// AI를 쓸 준비가 됐는지: 제공자를 골랐고, Bedrock이면 AWS 프로필도 골랐다.
 fn ai_configured(cx: &App) -> bool {
-    let prefs = cx.global::<crate::settings::Prefs>();
-    match prefs.ai_provider {
-        Some(crate::settings::AiProvider::Bedrock) => prefs.aws_profile.is_some(),
-        None => false,
-    }
+    agent::Backend::from_prefs(cx.global::<crate::settings::Prefs>()).is_some()
 }
 
 /// 대화 한 줄. 내 말은 오른쪽 말풍선, 어시스턴트 말은 왼쪽 본문으로 그린다.
+/// 말풍선. 어시스턴트 답이면 한 일(`activity`: 부른 도구, 승인 카드)을 글 위에 둔다.
 fn message_bubble(user: bool, text: SharedString, pal: Palette) -> AnyElement {
+    assistant_reply(user, text, Vec::new(), pal)
+}
+
+fn assistant_reply(
+    user: bool,
+    text: SharedString,
+    activity: Vec<AnyElement>,
+    pal: Palette,
+) -> AnyElement {
     if user {
         div()
             .flex()
@@ -1064,9 +1200,13 @@ fn message_bubble(user: bool, text: SharedString, pal: Palette) -> AnyElement {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_sm()
-                    .line_height(relative(1.5))
-                    .child(text),
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .children(activity)
+                    .when(!text.is_empty(), |this| {
+                        this.child(div().text_sm().line_height(relative(1.5)).child(text))
+                    }),
             )
             .into_any_element()
     }

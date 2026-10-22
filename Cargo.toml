@@ -54,6 +54,8 @@ rig-bedrock = "0.45"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 aws-sdk-bedrock = "1"
+unicode-normalization = "0.1.26"
+similar = { version = "3.2.0", features = ["inline"] }
 
 # 번들 없이 실행할 때(`cargo run`)도 Dock에 앱 아이콘을 보인다. 버전은 gpui가 쓰는 것과 맞춘다.
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -4,8 +4,8 @@
 use gpui_kit::component::*;
 use gpui_kit::gpui::*;
 
+mod agent;
 mod app;
-mod ai;
 mod assets;
 mod aws_profiles;
 // 할 일 화면(ADR-0024 2단계)에서 쓴다. 그 전까지는 테스트에서만 쓴다.
@@ -61,6 +61,13 @@ struct SetTheme {
 }
 
 const APP_NAME: &str = "Writer";
+
+/// 라이브러리를 열 때 빌트인 스킬을 `Skills/`에 깔거나 새 버전으로 바꾼다. 실패는 기록만 한다.
+fn sync_builtin_skills(root: &std::path::Path) {
+    if let Err(err) = agent::skills::sync_builtin(root) {
+        eprintln!("빌트인 스킬 설치 실패: {err}");
+    }
+}
 
 fn main() {
     gpui_kit::application()
@@ -120,7 +127,8 @@ fn main() {
             let library = config
                 .library_root
                 .as_deref()
-                .and_then(|root| library::open(root).ok());
+                .and_then(|root| library::open(root).ok())
+                .inspect(|library| sync_builtin_skills(&library.root));
             let notice = if config.library_root.is_some() && library.is_none() {
                 Some(SharedString::from(
                     "저장된 라이브러리를 열 수 없습니다. 폴더를 다시 선택하세요.",

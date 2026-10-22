@@ -35,6 +35,8 @@ pub(crate) struct Palette {
     pub(crate) muted: Hsla,
     pub(crate) border: Hsla,
     pub(crate) danger: Hsla,
+    /// 더한 것·성공(어시스턴트 변경 카드의 더한 줄 등).
+    pub(crate) success: Hsla,
     /// 라이브러리 패널 배경/테두리. 테두리는 툴바 버튼·목록 구분선 같은 가는 선에도 쓴다.
     pub(crate) panel: Hsla,
     pub(crate) panel_border: Hsla,
@@ -57,6 +59,7 @@ impl Palette {
             muted: theme.muted_foreground,
             border: theme.border,
             danger: theme.danger,
+            success: theme.success,
             panel: theme.sidebar,
             panel_border: theme.sidebar_border,
             accent: theme.sidebar_accent,

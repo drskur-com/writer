@@ -65,6 +65,7 @@ impl WriterApp {
     pub(super) fn adopt(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         match library::open(&root) {
             Ok(opened) => {
+                crate::sync_builtin_skills(&opened.root);
                 let mut config = config::Config::load();
                 config.set_library(opened.root.clone());
                 if let Err(err) = config.save() {

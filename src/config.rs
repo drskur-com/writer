@@ -32,7 +32,7 @@ pub struct Config {
     pub aws_profile: Option<String>,
     /// Bedrock을 부를 리전. 없으면 프로필의 리전을 따른다.
     pub aws_region: Option<String>,
-    /// 어시스턴트가 부를 Bedrock 모델(추론 프로필) ID. 없으면 `ai::DEFAULT_MODEL`.
+    /// 어시스턴트가 부를 Bedrock 모델(추론 프로필) ID. 없으면 `agent::DEFAULT_MODEL`.
     pub ai_model: Option<String>,
 }
 
