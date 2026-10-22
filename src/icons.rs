@@ -159,6 +159,21 @@ pub fn panel() -> IconName {
     IconName::PanelLeft
 }
 
+/// 어시스턴트(LLM) 표시와 오른쪽 어시스턴트 패널 토글.
+pub fn assistant() -> IconName {
+    IconName::Sparkles
+}
+
+/// 어시스턴트 대화 기록.
+pub fn history() -> IconName {
+    IconName::Clock
+}
+
+/// 어시스턴트에게 보내기.
+pub fn send() -> IconName {
+    IconName::ArrowUp
+}
+
 /// 메모 "모두" 보기.
 pub fn all_sheets() -> IconName {
     IconName::Layers

@@ -1,5 +1,6 @@
 //! 앱 상태(`WriterApp`)와 액션 핸들러. 화면별 렌더는 하위 모듈에 나눠 둔다.
 
+mod assistant_panel;
 mod book_info;
 mod book_preview;
 mod book_style;
@@ -8,8 +9,8 @@ mod compile_dialog;
 mod editor;
 mod editor_format;
 mod editor_image;
-mod editor_link;
 mod editor_layout;
+mod editor_link;
 mod editor_table;
 mod editor_task;
 mod file_view;
@@ -73,6 +74,12 @@ pub(super) enum GroupFamily {
 pub(crate) struct WriterApp {
     /// 사이드바 1단(섹션+그룹) 표시 여부. 2단(시트 목록)은 항상 보인다.
     sidebar_visible: bool,
+    /// 오른쪽 어시스턴트 패널 표시 여부.
+    assistant_visible: bool,
+    /// 어시스턴트 패널에서 고른 대화(샘플 대화 목록의 위치).
+    assistant_conversation: usize,
+    /// 어시스턴트 패널에 대화 대신 대화 기록을 보이는지.
+    assistant_history: bool,
     library: Option<library::Library>,
     /// 접힌 최상위 섹션(UI 상태; 추후 registry에 저장).
     collapsed_sections: std::collections::HashSet<library::SectionKind>,
@@ -142,6 +149,9 @@ impl WriterApp {
         });
         let mut app = WriterApp {
             sidebar_visible: true,
+            assistant_visible: false,
+            assistant_conversation: 0,
+            assistant_history: false,
             library,
             notice,
             collapsed_sections: std::collections::HashSet::new(),
@@ -586,6 +596,7 @@ impl WriterApp {
                 this.child(self.render_sheet_column(cx, pal))
             })
             .child(self.render_editor_column(cx, pal))
+            .child(self.render_assistant_panel(cx, pal))
     }
 }
 

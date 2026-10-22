@@ -436,6 +436,9 @@ impl WriterApp {
                         })),
                     ),
             ),
+        })
+        .when(!self.assistant_open(), |this| {
+            this.child(self.assistant_toggle(cx, pal))
         });
 
         let body: AnyElement = match &self.editor {
@@ -522,6 +525,9 @@ impl WriterApp {
 
         div()
             .flex_1()
+            // 좁은 창에서는 오른쪽 패널이 밀려나지 않게 에디터 칸이 줄어든다(툴바는 잘린다).
+            .min_w_0()
+            .overflow_hidden()
             .h_full()
             .flex()
             .flex_col()
