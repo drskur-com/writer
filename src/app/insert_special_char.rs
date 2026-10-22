@@ -1292,7 +1292,7 @@ impl SpecialCharForm {
         let Some(item) = self.active_item(cx) else {
             return false;
         };
-        self.insert_item(&item, window, cx);
+        self.insert_item(item, window, cx);
         true
     }
 

@@ -943,6 +943,7 @@ impl WriterApp {
     /// 열린 시트(`sheet`)의 커서 자리에 이미지 마크다운을 넣는다. 넣었으면 `true`.
     ///
     /// 이미지는 문단 하나로 둔다(캡션이 붙는 그림이 되도록). 커서 앞뒤에 글이 있으면 빈 줄로 띄운다.
+    #[allow(clippy::too_many_arguments)]
     fn insert_image(
         &mut self,
         sheet: &Path,

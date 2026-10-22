@@ -71,7 +71,7 @@ fn preview_of(text: &str) -> Preview {
     // 카드 제목에서는 첫 줄의 `{unnumbered}` 속성(ADR-0018)도 지운다.
     let title = strip_unnumbered(&strip_breaks(strip_heading(first))).to_string();
     let level = heading_level(first);
-    let mut content = content.map(strip_heading);
+    let content = content.map(strip_heading);
 
     let mut excerpt = String::new();
     for line in content {

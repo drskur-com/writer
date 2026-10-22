@@ -235,15 +235,15 @@ impl WriterApp {
             return Some(dir.clone());
         }
         let library = self.library.as_ref()?;
-        if let Some(ref sheet) = self.selected_sheet {
-            if let Some(p) = library.project_of(sheet) {
-                return Some(p);
-            }
+        if let Some(ref sheet) = self.selected_sheet
+            && let Some(p) = library.project_of(sheet)
+        {
+            return Some(p);
         }
-        if let Some(Selection::Group(ref group)) = self.selected {
-            if let Some(p) = library.project_of(group) {
-                return Some(p);
-            }
+        if let Some(Selection::Group(ref group)) = self.selected
+            && let Some(p) = library.project_of(group)
+        {
+            return Some(p);
         }
         None
     }

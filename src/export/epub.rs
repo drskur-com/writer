@@ -153,10 +153,10 @@ impl<'a> EpubBuilder<'a> {
 
     /// 현재 작업 중인 섹션이 있고 비어있지 않다면 마감한다.
     fn finish_section(&mut self) {
-        if let Some(sec) = self.current_section.take() {
-            if !sec.html_body.trim().is_empty() {
-                self.sections.push(sec);
-            }
+        if let Some(sec) = self.current_section.take()
+            && !sec.html_body.trim().is_empty()
+        {
+            self.sections.push(sec);
         }
     }
 
