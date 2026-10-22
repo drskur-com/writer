@@ -21,6 +21,32 @@ const BOX_MAX: f32 = 18.;
 /// 체크 상자와 항목 글 사이 간격(상자 한 변에 대한 비율).
 const GAP_SCALE: f32 = 0.4;
 
+/// 할 일 줄의 첫 행 여백(미완료, 완료). 비례 서체에서는 `[ ]`과 `[x]`의 폭이 달라 체크하면 뒤 글이 밀린다.
+/// 좁은 쪽에 폭 차이만큼 여백을 주어 체크 여부와 상관없이 글이 같은 자리에 오게 한다.
+/// 줄 스타일이라 커서가 그 줄에 들어가 원문이 보여도 그대로다.
+pub(super) fn check_indents(family: &SharedString, font_size: f32, cx: &App) -> (Pixels, Pixels) {
+    let text_system = WindowTextSystem::new(cx.text_system().clone());
+    let width = |text: &str| {
+        text_system
+            .layout_line(
+                text,
+                px(font_size),
+                &[TextRun {
+                    len: text.len(),
+                    font: font(family.clone()),
+                    color: gpui_kit::gpui::black(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                None,
+            )
+            .width
+    };
+    let delta = width("[x]") - width("[ ]");
+    (delta.max(px(0.)), (-delta).max(px(0.)))
+}
+
 /// 에디터에 할 일 체크 상자를 단다.
 pub(super) fn install(state: &mut EditorState, cx: &mut Context<EditorState>) {
     let editor = cx.entity().downgrade();

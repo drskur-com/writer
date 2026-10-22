@@ -103,14 +103,21 @@ fn line_style(
     groups: Rc<RefCell<Vec<LineGroup>>>,
     tables: Rc<TableBlocks>,
     font_size: f32,
+    cx: &App,
 ) -> impl Fn(LineContext<'_>) -> LineStyle + 'static {
     let layout = book_layout(styles, font_size);
+    // 체크해도 할 일 글이 밀리지 않도록 `[ ]`·`[x]` 폭 차이를 첫 행 여백으로 메운다(ADR-0023).
+    let (unchecked, checked) =
+        super::editor_task::check_indents(&editor_font(styles, cx), font_size, cx);
     move |line| {
         let row = line.row;
         let mut style = layout.line_style(line, &groups.borrow());
         if tables.contains(row) {
             style.collapsed = true;
             style.reveal_run = true;
+        }
+        if let Some(marker) = markdown::task_marker(line.text) {
+            style.first_indent += if marker.checked { checked } else { unchecked };
         }
         style
     }
@@ -356,6 +363,7 @@ impl WriterApp {
             editor.line_groups.clone(),
             editor.tables.clone(),
             font_size,
+            cx,
         );
         editor.state.update(cx, |state, cx| {
             state.set_line_style(Some(style), cx);
@@ -627,6 +635,7 @@ impl WriterApp {
                     style_groups,
                     style_tables,
                     crate::settings::Prefs::editor_font_size(cx),
+                    cx,
                 )),
                 cx,
             );
@@ -838,6 +847,7 @@ impl WriterApp {
                     editor.line_groups.clone(),
                     editor.tables.clone(),
                     crate::settings::Prefs::editor_font_size(cx),
+                    cx,
                 );
                 editor.markup.heading_weights = heading_weights(styles.as_ref());
                 editor.styles = styles;
@@ -904,6 +914,7 @@ impl WriterApp {
             editor.line_groups.clone(),
             editor.tables.clone(),
             crate::settings::Prefs::editor_font_size(cx),
+            cx,
         );
         editor.markup.heading_weights = heading_weights(styles.as_ref());
         let transform_styles = styles.clone();
