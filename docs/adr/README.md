@@ -37,6 +37,7 @@
 | [0022](./0022-project-relative-image-paths.md) | 프로젝트 시트의 이미지 경로는 프로젝트 폴더 기준으로 적는다 | Proposed | 2026-10-22 |
 | [0023](./0023-editor-task-checkbox-overlay.md) | 에디터의 할 일 항목은 기호 위에 체크 상자를 겹쳐 그리고, 누르면 원문의 `[ ]`·`[x]`만 바꾼다 | Proposed | 2026-10-22 |
 | [0024](./0024-note-todos.md) | 메모의 할 일은 원문을 유일한 저장소로 두고, 할 일 화면은 메모를 훑어 모은 색인으로 만든다 | Proposed | 2026-10-22 |
+| [0025](./0025-editor-link-open.md) | 에디터 링크는 보조 키(macOS ⌘, Windows Ctrl)+클릭으로 연다 | Proposed | 2026-10-22 |
 
 ## 작성 규칙
 

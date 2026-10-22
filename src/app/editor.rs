@@ -612,6 +612,7 @@ impl WriterApp {
         // EditorState를 쓰고 코드용 기능(줄 번호·들여쓰기 안내선·괄호 자동 닫기·접기)은 끈다.
         // 빈 공간이 없으면 문서 끝에서 커서 여백을 맞추려 끝 너머로 스크롤했다가 되돌아오며 출렁인다.
         let image_app = cx.entity().downgrade();
+        let link_app = cx.entity().downgrade();
         let image_sheet = path.clone();
         let state = cx.new(|cx| {
             let mut state = EditorState::new(window, cx)
@@ -707,6 +708,8 @@ impl WriterApp {
             );
             // 할 일 항목의 기호 자리에 체크 상자를 그린다(ADR-0023).
             super::editor_task::install(&mut state, cx);
+            // ⌘(macOS)·Ctrl(Windows)+클릭으로 링크를 연다.
+            super::editor_link::install(&mut state, link_app);
             state.set_value(text.clone(), window, cx);
             state
         });

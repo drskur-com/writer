@@ -6,6 +6,7 @@ use super::{EditorMode, InputBaseState, InputModeKind};
 mod writer;
 pub use writer::{
     LineBlockContext, LineBlockRenderer, LineOverlayContext, LineOverlayRanges, LineOverlayRenderer,
+    SecondaryClickHandler,
 };
 
 /// State for source-code editing.
@@ -91,6 +92,14 @@ impl InputModeKind for EditorMode {
         window: &mut Window,
         cx: &mut gpui::Context<InputBaseState<Self>>,
     ) -> bool {
+        // Writer patch: a host handler for ⌘/Ctrl-click, e.g. to open a Markdown link.
+        if event.modifiers.secondary()
+            && !event.modifiers.alt
+            && let Some(handler) = state.secondary_click.clone()
+            && handler(&state.text.to_string(), offset, window, cx)
+        {
+            return true;
+        }
         state.handle_click_hover_definition(event, offset, window, cx)
     }
 

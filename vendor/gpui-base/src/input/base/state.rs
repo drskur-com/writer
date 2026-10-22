@@ -421,6 +421,9 @@ pub struct InputBaseState<M: InputModeKind> {
         crate::input::LineOverlayRanges,
         crate::input::LineOverlayRenderer,
     )>,
+    /// Handles a secondary-modifier click (⌘ on macOS, Ctrl elsewhere) before it places the
+    /// caret (see [`crate::input::EditorState::set_secondary_click`]).
+    pub(crate) secondary_click: Option<crate::input::SecondaryClickHandler>,
     /// Text revision and selected rows that collapsed lines were last revealed for.
     revealed_rows: Option<(u64, Vec<std::ops::Range<usize>>)>,
     pub(super) undo_manager: UndoManager,
@@ -892,6 +895,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             undo_manager,
             line_block_renderer: None,
             line_overlays: None,
+            secondary_click: None,
             revealed_rows: None,
             inline_tokens: None,
             pending_token: None,

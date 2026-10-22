@@ -96,7 +96,7 @@ pub use display_map::{
 };
 pub use editor::{
     Editor, EditorState, LineBlockContext, LineBlockRenderer, LineOverlayContext,
-    LineOverlayRanges, LineOverlayRenderer,
+    LineOverlayRanges, LineOverlayRenderer, SecondaryClickHandler,
 };
 pub use highlighting::{
     DiagnosticColors, FoldIconRenderer, HighlightStyleResolver, InputEditorStyle, InputHighlighter,

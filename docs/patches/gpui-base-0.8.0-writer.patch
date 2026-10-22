@@ -660,8 +660,8 @@ diff -ruN a/src/input/base/movement.rs b/src/input/base/movement.rs
                  ) {
 diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
 --- a/src/input/base/state.rs	2006-07-24 10:21:28
-+++ b/src/input/base/state.rs	2026-10-22 08:19:33
-@@ -413,6 +413,16 @@
++++ b/src/input/base/state.rs	2026-10-22 11:30:24
+@@ -413,6 +413,19 @@
      pub(super) mode: LayoutMode,
      pub(super) text: Rope,
      pub(super) display_map: DisplayMap,
@@ -673,12 +673,15 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
 +        crate::input::LineOverlayRanges,
 +        crate::input::LineOverlayRenderer,
 +    )>,
++    /// Handles a secondary-modifier click (⌘ on macOS, Ctrl elsewhere) before it places the
++    /// caret (see [`crate::input::EditorState::set_secondary_click`]).
++    pub(crate) secondary_click: Option<crate::input::SecondaryClickHandler>,
 +    /// Text revision and selected rows that collapsed lines were last revealed for.
 +    revealed_rows: Option<(u64, Vec<std::ops::Range<usize>>)>,
      pub(super) undo_manager: UndoManager,
      pub(super) inline_tokens: Option<Box<super::inline_tokens::InlineTokenStore>>,
      pub(super) pending_token: Option<super::InlineToken>,
-@@ -486,6 +496,11 @@
+@@ -486,6 +499,11 @@
      pub(crate) cursor_line_end_affinity: bool,
      pub(super) pattern: Option<regex::Regex>,
      pub(super) validate: Option<Box<dyn Fn(&str, &mut App) -> bool + 'static>>,
@@ -690,7 +693,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
      /// The step strategy for [`super::NumberInput`] to increment/decrement.
      /// See [`Self::step`] and [`Self::step_by`].
      pub(crate) number_step: Option<NumberStep>,
-@@ -634,6 +649,10 @@
+@@ -634,6 +652,10 @@
  
  impl<M: InputModeKind> EventEmitter<InputEvent> for InputBaseState<M> {}
  
@@ -701,17 +704,18 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
  impl<M: InputModeKind> InputBaseState<M> {
      #[doc(hidden)]
      pub fn cursor_layout(&self) -> Option<(Bounds<Pixels>, Pixels)> {
-@@ -871,6 +890,9 @@
+@@ -871,6 +893,10 @@
              cursor_surrounding_lines: None,
              blink_cursor,
              undo_manager,
 +            line_block_renderer: None,
 +            line_overlays: None,
++            secondary_click: None,
 +            revealed_rows: None,
              inline_tokens: None,
              pending_token: None,
              replaying_history: false,
-@@ -901,6 +923,9 @@
+@@ -901,6 +927,9 @@
              loading: false,
              pattern: None,
              validate: None,
@@ -721,7 +725,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
              number_step: Some(NumberStep::Fixed(1.)),
              number_min: None,
              number_max: None,
-@@ -1078,7 +1103,7 @@
+@@ -1078,7 +1107,7 @@
              let prev_lines_offset = last_layout.visible_line_byte_offsets[vi];
              let local_offset = offset.saturating_sub(prev_lines_offset);
              if let Some(pos) = line.position_for_index(local_offset, last_layout, false) {
@@ -730,7 +734,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
                  let adjusted_pos = point(pos.x + last_layout.line_number_width, pos.y + y_offset);
                  return (vi, sub_line_index, Some(adjusted_pos));
              }
-@@ -2190,7 +2215,9 @@
+@@ -2190,7 +2219,9 @@
                      } else {
                          String::new()
                      };
@@ -741,7 +745,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
                  }
                  edits.sort_by_key(|(range, _)| range.start);
                  self.replace_text_in_ranges(&edits, window, cx);
-@@ -2262,7 +2289,10 @@
+@@ -2262,7 +2293,10 @@
  
                      // Add newline and indent
                      let new_line_text = format!("\n{}", indent);
@@ -753,7 +757,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
                      self.pause_blink_cursor(cx);
                  }
              }
-@@ -2884,7 +2914,11 @@
+@@ -2884,7 +2918,11 @@
          let display_row = self
              .display_map
              .offset_to_display_row(offset, self.line_end_affinity_at(offset));
@@ -766,7 +770,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
  
          // For Right alignment use 0 margin: the cursor indicator is clamped inside bounds
          // in layout_cursors, so shifting the text here would cause a first-click visual jump.
-@@ -2930,7 +2964,7 @@
+@@ -2930,7 +2968,7 @@
          scroll_offset.y = super::element::reveal_row(
              scroll_offset.y,
              row_offset_y,
@@ -775,7 +779,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
              bounds.size.height,
              edge_height,
          );
-@@ -2983,7 +3017,7 @@
+@@ -2983,7 +3021,7 @@
  
          let texts = self.selected_texts();
  
@@ -784,7 +788,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
      }
  
      pub(super) fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-@@ -2993,7 +3027,7 @@
+@@ -2993,7 +3031,7 @@
  
          let texts = self.selected_texts();
  
@@ -793,7 +797,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
  
          self.undo_manager.set_pending_intent(EditIntent::Atomic);
          self.replace_text_in_range_silent(None, "", window, cx);
-@@ -3061,6 +3095,15 @@
+@@ -3061,6 +3099,15 @@
          let Some(mut new_text) = clipboard.text().filter(|text| !text.is_empty()) else {
              return;
          };
@@ -809,7 +813,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
          // A paste is one atomic edit, never part of a typing run.
          self.undo_manager.set_pending_intent(EditIntent::Atomic);
  
-@@ -3519,7 +3562,10 @@
+@@ -3519,7 +3566,10 @@
              .zip(last_line_pos)
              .zip(last_layout.visible_line_byte_offsets.last())
              .map(|((line_layout, pos), line_start)| {
@@ -821,7 +825,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
                  let pos = point(pos.x, last_row_top);
                  (
                      self.resolve_index(line_start + line_layout.len()),
-@@ -4381,6 +4427,19 @@
+@@ -4381,6 +4431,19 @@
              .unwrap_or(self.selected_range());
          let range = self.normalize_token_range(range);
  
@@ -841,7 +845,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
          // Skip-over as a pure cursor move: a typed closer that already follows
          // the cursor moves past it without touching text or history, so Undo
          // never exposes a transient duplicate. Only for interactive single
-@@ -4411,7 +4470,14 @@
+@@ -4411,7 +4474,14 @@
                  let mut edits: Vec<(Range<usize>, String)> = self
                      .selections
                      .iter()
@@ -857,7 +861,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
                      .collect();
                  edits.sort_by_key(|(range, _)| range.start);
                  // One keystroke across several cursors is one batch, committed
-@@ -4727,6 +4793,8 @@
+@@ -4727,6 +4797,8 @@
  
          let mut start_origin = None;
          let mut end_origin = None;
@@ -866,7 +870,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
          let line_number_origin = point(line_number_width, px(0.));
          let mut y_offset = last_layout.visible_top;
  
-@@ -4744,6 +4812,7 @@
+@@ -4744,6 +4816,7 @@
                      false,
                  ) {
                      start_origin = Some(p + point(px(0.), y_offset));
@@ -874,7 +878,7 @@ diff -ruN a/src/input/base/state.rs b/src/input/base/state.rs
                  }
              }
  
-@@ -4772,7 +4841,9 @@
+@@ -4772,7 +4845,9 @@
          Some(Bounds::from_corners(
              bounds.origin + line_number_origin + start_origin,
              // + line_height for show IME panel under the cursor line.
@@ -988,8 +992,8 @@ diff -ruN a/src/input/base/state_writer.rs b/src/input/base/state_writer.rs
 +}
 diff -ruN a/src/input/base/tests/element_writer.rs b/src/input/base/tests/element_writer.rs
 --- a/src/input/base/tests/element_writer.rs	1970-01-01 09:00:00
-+++ b/src/input/base/tests/element_writer.rs	2026-10-22 08:12:16
-@@ -0,0 +1,641 @@
++++ b/src/input/base/tests/element_writer.rs	2026-10-22 11:31:16
+@@ -0,0 +1,685 @@
 +//! Tests for the writer patches to the text element: line styles, line blocks, collapsed lines,
 +//! line overlays and row placement (see `docs/patches/`).
 +
@@ -1629,6 +1633,50 @@ diff -ruN a/src/input/base/tests/element_writer.rs b/src/input/base/tests/elemen
 +            editor.read(cx).display_map.display_row_top(2, lh),
 +            lh * 2. + px(20.)
 +        );
++    });
++}
++
++#[gpui::test]
++fn secondary_click_goes_to_the_host_before_placing_the_caret(cx: &mut TestAppContext) {
++    let text = "first line\nsecond line";
++    let (editor, window) = decoration_editor(cx, text, false);
++    let mut cx = VisualTestContext::from_window(window.into(), cx);
++    let clicks = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
++    cx.update(|window, cx| {
++        let seen = clicks.clone();
++        editor.update(cx, |state, cx| {
++            state.set_secondary_click(move |text, offset, _, _| {
++                seen.borrow_mut().push((text.to_string(), offset));
++                true
++            });
++            state.set_selected_range(0..0, cx);
++        });
++        window.draw(cx).clear(cx);
++    });
++    let (origin, lh) = cx.update(|_, cx| {
++        let state = editor.read(cx);
++        (
++            state.last_bounds.unwrap().origin,
++            state.last_layout.as_ref().unwrap().line_height,
++        )
++    });
++    let on_second_line = origin + point(px(10.), lh + lh / 2.);
++
++    // ⌘ (macOS) / Ctrl click: the host takes it and the caret stays.
++    cx.simulate_click(on_second_line, gpui::Modifiers::secondary_key());
++    cx.update(|_, cx| {
++        let clicks = clicks.borrow();
++        assert_eq!(clicks.len(), 1);
++        assert_eq!(clicks[0].0, text);
++        assert!((11..=text.len()).contains(&clicks[0].1), "{}", clicks[0].1);
++        assert_eq!(editor.read(cx).cursor(), 0);
++    });
++
++    // A plain click places the caret as usual.
++    cx.simulate_click(on_second_line, gpui::Modifiers::default());
++    cx.update(|_, cx| {
++        assert_eq!(clicks.borrow().len(), 1);
++        assert!(editor.read(cx).cursor() >= 11);
 +    });
 +}
 diff -ruN a/src/input/editor/display_map/display_map.rs b/src/input/editor/display_map/display_map.rs
@@ -2827,8 +2875,8 @@ diff -ruN a/src/input/editor/indent.rs b/src/input/editor/indent.rs
  
 diff -ruN a/src/input/editor/mod.rs b/src/input/editor/mod.rs
 --- a/src/input/editor/mod.rs	2006-07-24 10:21:28
-+++ b/src/input/editor/mod.rs	2026-10-22 08:13:39
-@@ -2,6 +2,12 @@
++++ b/src/input/editor/mod.rs	2026-10-22 11:30:24
+@@ -2,6 +2,13 @@
  
  use super::{EditorMode, InputBaseState, InputModeKind};
  
@@ -2836,15 +2884,31 @@ diff -ruN a/src/input/editor/mod.rs b/src/input/editor/mod.rs
 +mod writer;
 +pub use writer::{
 +    LineBlockContext, LineBlockRenderer, LineOverlayContext, LineOverlayRanges, LineOverlayRenderer,
++    SecondaryClickHandler,
 +};
 +
  /// State for source-code editing.
  ///
  /// This is the shared editing engine in its code-editor kind. Languages, line
+@@ -85,6 +92,14 @@
+         window: &mut Window,
+         cx: &mut gpui::Context<InputBaseState<Self>>,
+     ) -> bool {
++        // Writer patch: a host handler for ⌘/Ctrl-click, e.g. to open a Markdown link.
++        if event.modifiers.secondary()
++            && !event.modifiers.alt
++            && let Some(handler) = state.secondary_click.clone()
++            && handler(&state.text.to_string(), offset, window, cx)
++        {
++            return true;
++        }
+         state.handle_click_hover_definition(event, offset, window, cx)
+     }
+ 
 diff -ruN a/src/input/editor/writer.rs b/src/input/editor/writer.rs
 --- a/src/input/editor/writer.rs	1970-01-01 09:00:00
-+++ b/src/input/editor/writer.rs	2026-10-22 08:12:16
-@@ -0,0 +1,172 @@
++++ b/src/input/editor/writer.rs	2026-10-22 11:30:24
+@@ -0,0 +1,187 @@
 +//! Writer patches to the editor (see `docs/patches/`): line styles, blocks below lines, overlays on
 +//! parts of lines, and an edit that keeps the selections.
 +
@@ -2935,6 +2999,18 @@ diff -ruN a/src/input/editor/writer.rs b/src/input/editor/writer.rs
 +        cx.notify();
 +    }
 +
++    /// Handle a click with the secondary modifier (⌘ on macOS, Ctrl on Windows and Linux) before it
++    /// places the caret, e.g. to open the Markdown link under the pointer. `handler` gets the
++    /// document text and the clicked byte offset, and returns whether it took the click. It runs
++    /// while the editor is being updated, so it should defer work that reads or replaces the
++    /// editor (`window.defer`). Alt clicks (multiple carets) never reach it.
++    pub fn set_secondary_click(
++        &mut self,
++        handler: impl Fn(&str, usize, &mut Window, &mut App) -> bool + 'static,
++    ) {
++        self.secondary_click = Some(std::rc::Rc::new(handler));
++    }
++
 +    /// Replace the text in `range` (bytes) as one undoable edit and keep the selections where
 +    /// they are (shifted past the edit), e.g. to tick a task item's check box without moving
 +    /// the caret to it.
@@ -3017,9 +3093,12 @@ diff -ruN a/src/input/editor/writer.rs b/src/input/editor/writer.rs
 +/// Draws an overlay on part of a line (see [`EditorState::set_line_overlays`]).
 +pub type LineOverlayRenderer =
 +    std::rc::Rc<dyn Fn(&LineOverlayContext, &mut Window, &mut App) -> gpui::AnyElement>;
++
++/// Handles a ⌘/Ctrl-click (see [`EditorState::set_secondary_click`]).
++pub type SecondaryClickHandler = std::rc::Rc<dyn Fn(&str, usize, &mut Window, &mut App) -> bool>;
 diff -ruN a/src/input/mod.rs b/src/input/mod.rs
 --- a/src/input/mod.rs	2006-07-24 10:21:28
-+++ b/src/input/mod.rs	2026-10-22 08:19:43
++++ b/src/input/mod.rs	2026-10-22 11:30:24
 @@ -90,8 +90,14 @@
      Diagnostic, DiagnosticEntry, DiagnosticRelatedInformation, DiagnosticSet, DiagnosticSeverity,
      DiagnosticSummary, DiagnosticTag, RelatedInformation,
@@ -3032,7 +3111,7 @@ diff -ruN a/src/input/mod.rs b/src/input/mod.rs
 +};
 +pub use editor::{
 +    Editor, EditorState, LineBlockContext, LineBlockRenderer, LineOverlayContext,
-+    LineOverlayRanges, LineOverlayRenderer,
++    LineOverlayRanges, LineOverlayRenderer, SecondaryClickHandler,
 +};
  pub use highlighting::{
      DiagnosticColors, FoldIconRenderer, HighlightStyleResolver, InputEditorStyle, InputHighlighter,

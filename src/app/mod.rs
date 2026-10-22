@@ -8,6 +8,7 @@ mod compile_dialog;
 mod editor;
 mod editor_format;
 mod editor_image;
+mod editor_link;
 mod editor_layout;
 mod editor_table;
 mod editor_task;

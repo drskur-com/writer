@@ -16,7 +16,7 @@ vendor와 같아진다.
 | --- | --- |
 | `input/base/element.rs` | `input/base/element_writer.rs`(줄 블록·오버레이 배치, 행 정렬), `input/base/tests/element_writer.rs`(테스트) |
 | `input/base/state.rs` | `input/base/state_writer.rs`(입력·붙여넣기 변환, 접힌 줄 펼치기) |
-| `input/editor/mod.rs` | `input/editor/writer.rs`(공개 API: `set_line_style`·`set_line_blocks`·`set_line_overlays`·`replace_range_keeping_selections`) |
+| `input/editor/mod.rs` | `input/editor/writer.rs`(공개 API: `set_line_style`·`set_line_blocks`·`set_line_overlays`·`replace_range_keeping_selections`·`set_secondary_click`) |
 | `input/editor/display_map/display_map.rs` | `…/display_map_writer.rs`(행 높이 기하) |
 | `input/editor/display_map/text_wrapper.rs` | `…/text_wrapper_writer.rs`(`LineStyle` 등 타입, 줄 스타일·블록·펼치기) |
 | `input/editor/display_map/wrap_map.rs` | `…/wrap_map_writer.rs` |

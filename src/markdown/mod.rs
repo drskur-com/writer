@@ -59,6 +59,23 @@ fn parse_options() -> ParseOptions {
 }
 
 /// 원문 전체를 파싱해 스팬을 만든다. 범위는 바이트 offset이고 바깥 노드가 먼저 온다.
+/// `offset`(바이트)이 든 링크(`[글](주소)`, `<주소>`, 맨 주소)의 주소. 링크 밖이거나 이미지면 `None`.
+/// 링크 글·기호·주소 어디를 눌러도 같은 링크다.
+pub fn link_at(text: &str, offset: usize) -> Option<String> {
+    fn find(node: &Node, offset: usize) -> Option<String> {
+        if let Node::Link(link) = node
+            && range_of(node).is_some_and(|range| range.contains(&offset))
+        {
+            return Some(link.url.clone());
+        }
+        node.children()?
+            .iter()
+            .filter(|child| range_of(child).is_none_or(|range| range.start <= offset))
+            .find_map(|child| find(child, offset))
+    }
+    find(&markdown::to_mdast(text, &parse_options()).ok()?, offset)
+}
+
 pub fn spans(text: &str) -> Vec<Span> {
     let mut out = Vec::new();
     // MDX를 켜지 않으면 파싱은 실패하지 않는다.
@@ -822,6 +839,20 @@ mod tests {
         assert_eq!(pieces(text, SpanKind::Quote).len(), 2);
         let markers = pieces(text, SpanKind::Marker);
         assert_eq!(markers, [">", "> >", "- ", "1. ", "- [ ] ", "---"]);
+    }
+
+    #[test]
+    fn link_under_offset() {
+        let text = "앞 [링크](https://a.b/c) 가운데 <https://d.e> 끝 https://f.g ![그림](x.png) [시트](../메모/a.md)";
+        let at = |needle: &str| link_at(text, text.find(needle).unwrap());
+        assert_eq!(at("링크").as_deref(), Some("https://a.b/c"));
+        assert_eq!(at("a.b/c").as_deref(), Some("https://a.b/c"));
+        assert_eq!(at("[링크").as_deref(), Some("https://a.b/c"));
+        assert_eq!(at("d.e").as_deref(), Some("https://d.e"));
+        assert_eq!(at("f.g").as_deref(), Some("https://f.g"));
+        assert_eq!(at("시트").as_deref(), Some("../메모/a.md"));
+        assert_eq!(at("가운데"), None);
+        assert_eq!(at("그림"), None);
     }
 
     #[test]

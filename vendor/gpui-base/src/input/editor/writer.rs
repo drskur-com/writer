@@ -88,6 +88,18 @@ impl InputBaseState<EditorMode> {
         cx.notify();
     }
 
+    /// Handle a click with the secondary modifier (⌘ on macOS, Ctrl on Windows and Linux) before it
+    /// places the caret, e.g. to open the Markdown link under the pointer. `handler` gets the
+    /// document text and the clicked byte offset, and returns whether it took the click. It runs
+    /// while the editor is being updated, so it should defer work that reads or replaces the
+    /// editor (`window.defer`). Alt clicks (multiple carets) never reach it.
+    pub fn set_secondary_click(
+        &mut self,
+        handler: impl Fn(&str, usize, &mut Window, &mut App) -> bool + 'static,
+    ) {
+        self.secondary_click = Some(std::rc::Rc::new(handler));
+    }
+
     /// Replace the text in `range` (bytes) as one undoable edit and keep the selections where
     /// they are (shifted past the edit), e.g. to tick a task item's check box without moving
     /// the caret to it.
@@ -170,3 +182,6 @@ pub type LineOverlayRanges = std::rc::Rc<dyn Fn(usize, &str) -> Vec<std::ops::Ra
 /// Draws an overlay on part of a line (see [`EditorState::set_line_overlays`]).
 pub type LineOverlayRenderer =
     std::rc::Rc<dyn Fn(&LineOverlayContext, &mut Window, &mut App) -> gpui::AnyElement>;
+
+/// Handles a ⌘/Ctrl-click (see [`EditorState::set_secondary_click`]).
+pub type SecondaryClickHandler = std::rc::Rc<dyn Fn(&str, usize, &mut Window, &mut App) -> bool>;

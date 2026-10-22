@@ -639,3 +639,47 @@ fn neighbors_are_restyled_when_a_line_changes(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+fn secondary_click_goes_to_the_host_before_placing_the_caret(cx: &mut TestAppContext) {
+    let text = "first line\nsecond line";
+    let (editor, window) = decoration_editor(cx, text, false);
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    let clicks = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|window, cx| {
+        let seen = clicks.clone();
+        editor.update(cx, |state, cx| {
+            state.set_secondary_click(move |text, offset, _, _| {
+                seen.borrow_mut().push((text.to_string(), offset));
+                true
+            });
+            state.set_selected_range(0..0, cx);
+        });
+        window.draw(cx).clear(cx);
+    });
+    let (origin, lh) = cx.update(|_, cx| {
+        let state = editor.read(cx);
+        (
+            state.last_bounds.unwrap().origin,
+            state.last_layout.as_ref().unwrap().line_height,
+        )
+    });
+    let on_second_line = origin + point(px(10.), lh + lh / 2.);
+
+    // ⌘ (macOS) / Ctrl click: the host takes it and the caret stays.
+    cx.simulate_click(on_second_line, gpui::Modifiers::secondary_key());
+    cx.update(|_, cx| {
+        let clicks = clicks.borrow();
+        assert_eq!(clicks.len(), 1);
+        assert_eq!(clicks[0].0, text);
+        assert!((11..=text.len()).contains(&clicks[0].1), "{}", clicks[0].1);
+        assert_eq!(editor.read(cx).cursor(), 0);
+    });
+
+    // A plain click places the caret as usual.
+    cx.simulate_click(on_second_line, gpui::Modifiers::default());
+    cx.update(|_, cx| {
+        assert_eq!(clicks.borrow().len(), 1);
+        assert!(editor.read(cx).cursor() >= 11);
+    });
+}
