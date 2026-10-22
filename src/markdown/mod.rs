@@ -4,11 +4,13 @@
 //! 프리뷰(`TextView::markdown`)와 해석이 어긋나지 않도록 같은 파서(markdown-rs)·같은 옵션을 쓴다.
 
 mod book;
+mod tasks;
 
 pub use book::{
     Block, ColumnAlign, Inline, Marks, Rich, Table, UNNUMBERED, manuscript_blocks, plain,
     rich_text, table,
 };
+pub use tasks::{Todo, todos};
 
 use std::ops::Range;
 

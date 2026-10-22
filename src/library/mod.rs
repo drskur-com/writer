@@ -22,6 +22,9 @@ mod manuscript;
 mod meta;
 mod preview;
 mod style;
+// 할 일 화면(ADR-0024 2단계)에서 쓴다. 그 전까지는 테스트에서만 쓴다.
+#[allow(dead_code)]
+mod todos;
 
 pub use book::{
     BookMeta, COVER_EXTENSIONS, COVER_STEM, add_attachment, attach_bytes, image_extension,
