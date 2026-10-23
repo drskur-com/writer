@@ -92,11 +92,11 @@ pub(super) enum Item {
     },
 }
 
-/// 페이지에 놓은 확장 그림과, 미리보기에서 다시 쓰는 삼각형 캐시.
+/// 페이지에 놓은 확장 그림과, 미리보기에서 다시 쓰는 이미지.
 #[derive(Clone)]
 pub(super) struct PageDrawing {
     pub still: crate::extension::Still,
-    pub cache: std::rc::Rc<std::cell::RefCell<crate::app::extension_painter::TessCache>>,
+    pub cache: std::rc::Rc<std::cell::RefCell<crate::app::extension_painter::RasterCache>>,
 }
 
 impl std::fmt::Debug for PageDrawing {

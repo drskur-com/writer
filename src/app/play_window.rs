@@ -13,7 +13,7 @@ use gpui_kit::gpui::*;
 
 use super::WriterApp;
 use super::editor_extension::{shapes_canvas, theme};
-use super::extension_painter::TessCache;
+use super::extension_painter::RasterCache;
 use super::style::Palette;
 use crate::extension::{self, Extension, PlayEvent, PlayWorker, Shape};
 
@@ -34,7 +34,7 @@ pub(super) struct PlayView {
     last: Instant,
     /// 답을 기다리는 프레임이 있는지.
     pending: bool,
-    cache: Rc<RefCell<TessCache>>,
+    cache: Rc<RefCell<RasterCache>>,
     /// 캔버스를 그린 자리(마우스 좌표를 캔버스 좌표로 바꾼다).
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     focus: FocusHandle,

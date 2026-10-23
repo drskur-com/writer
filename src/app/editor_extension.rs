@@ -9,7 +9,7 @@
 //! 결과를 그리므로, 느린 확장은 그 블록만 늦게 바뀌고 편집은 막히지 않는다([`Player`]).
 //! - 애니메이션은 초당 [`FPS`]번만 다시 그리고, 창이 비활성이거나 움직임 줄이기 설정이면 멈춘다.
 //! - `period`가 있는 애니메이션은 `t`가 한 주기를 되풀이한다. 프레임은 보관하지 않고 매번 그린다(`draw`는 프레임당
-//!   0.1ms 안팎이다). 같은 모양의 삼각형은 삼각형 캐시가 다시 쓴다.
+//!   0.1ms 안팎이다). 모양이 같으면 지난 이미지를 다시 쓴다.
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::input::{EditorState, InlineToken, InlineTokenContext};
@@ -22,7 +22,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use super::extension_painter::{TessCache, paint};
+use super::extension_painter::{RasterCache, paint};
 use super::style::Palette;
 use crate::extension::{self, Host, Loaded, Region, Shape, Ui};
 
@@ -49,8 +49,8 @@ pub(super) enum Frame {
 pub(super) struct Player {
     /// 만든 때. 애니메이션의 `t`는 여기서 잰다.
     started: Instant,
-    /// 모양별 삼각형 캐시. 같은 프레임·같은 모양을 다시 나누지 않는다.
-    cache: Rc<RefCell<TessCache>>,
+    /// 마지막으로 그린 이미지. 모양이 같으면 다시 그리지 않는다.
+    cache: Rc<RefCell<RasterCache>>,
     state: RefCell<PlayerState>,
     /// 마우스 상태(ADR-0032). 바뀌면 그 상태로 다시 그린다.
     ui: RefCell<Ui>,
@@ -129,7 +129,7 @@ impl Player {
         true
     }
 
-    pub(super) fn cache(&self) -> Rc<RefCell<TessCache>> {
+    pub(super) fn cache(&self) -> Rc<RefCell<RasterCache>> {
         self.cache.clone()
     }
 
@@ -195,7 +195,6 @@ impl Player {
             }
         }
         // 프레임마다 작업 스레드에 다시 그리게 한다(`draw`는 프레임당 0.1ms 안팎이라 보관하지 않는다).
-        // 같은 모양은 삼각형 캐시가 다시 쓴다.
         let ui = self.ui.borrow().clone();
         let key = (frame, ui);
         if state.pending.is_none()
@@ -1030,7 +1029,7 @@ fn block_args_edit(
 /// 좌표가 이 크기 기준이다). 모양이 아직 없으면 빈 자리다. `bounds`가 있으면 그린 자리를 적어 둔다.
 pub(super) fn shapes_canvas(
     shapes: Option<Rc<Vec<Shape>>>,
-    cache: Rc<RefCell<TessCache>>,
+    cache: Rc<RefCell<RasterCache>>,
     bounds_out: Option<Rc<Cell<Option<Bounds<Pixels>>>>>,
     canvas_size: (f32, f32),
     width: Pixels,
@@ -1044,9 +1043,7 @@ pub(super) fn shapes_canvas(
                 out.set(Some(bounds));
             }
             if let Some(shapes) = shapes {
-                window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                    paint(&shapes, bounds.origin, scale, &cache, window, cx);
-                });
+                paint(&shapes, bounds, scale, &cache, window, cx);
             }
         },
     )

@@ -103,6 +103,8 @@ fn main() {
                 Err(err) => eprintln!("HTTP 클라이언트를 만들 수 없습니다: {err}"),
             }
             dock_icon::install();
+            // 확장 그림의 글자에 쓰는 시스템 서체를 미리 찾아 둔다(첫 그림이 기다리지 않게).
+            extension::render::preload_fonts();
 
             // 테마 등록 후 저장된 테마(없거나 모르는 이름이면 기본 라이트) 적용
             let config = config::Config::load();

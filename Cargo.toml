@@ -30,12 +30,12 @@ gpui-base = "0.8"
 # UI 문자열 번역(`locales/<언어>/*.yml`). gpui-component와 같은 크레이트라 언어 설정을 함께 쓴다.
 rust-i18n = "4"
 sys-locale = "0.3"
-# 확장 캔버스의 경로 측정·자르기·점선과 화면 테셀레이션(ADR-0026). 버전은 gpui와 맞춘다.
+# 확장 캔버스의 경로 측정·자르기·점선(ADR-0026). 버전은 gpui와 맞춘다.
 lyon = "1.0"
 # 확장 경로의 불리언 연산(합·차·교·XOR), 선 윤곽, 넓히기·좁히기.
 i_overlay = "9"
-# 어시스턴트가 확장의 그림을 보도록 모양 목록을 PNG로 그린다. 버전은 gpui(resvg)와 맞춘다.
-tiny-skia = "0.11"
+# 확장의 모양 목록을 픽셀로 그린다: 화면, 어시스턴트가 보는 PNG, DOCX(ADR-0042).
+vello_cpu = { version = "0.3", default-features = false, features = ["std", "u8_pipeline"] }
 # 플레이 창 확장의 소리(ADR-0040). 합성은 앱이 하고 출력만 쓴다(파일 디코더는 넣지 않는다).
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
 dirs = "5"

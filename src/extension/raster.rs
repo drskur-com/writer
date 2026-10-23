@@ -1,19 +1,13 @@
-//! 모양 목록을 PNG로 그린다(tiny-skia). 어시스턴트의 `run_extension`이 그린 결과를 모델에 보여 준다.
+//! 모양 목록을 PNG로 그린다(화면과 같은 [`super::render`]). 어시스턴트의 `run_extension`이 그린 결과를 모델에 보여 준다.
 //!
 //! - 캔버스 밖은 잘린다(에디터와 같다). 배경은 테마 배경색이다.
-//! - 글자는 시스템 서체(PDF 내보내기와 같은 이름 목록)의 윤곽으로 그린다. 커닝·합자는 없어 화면과 폭이 조금 다르다.
 //! - 프레임이 여럿이면 격자로 놓고 프레임마다 `t = …` 이름표를 붙인다.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use vello_cpu::color::{AlphaColor, Srgb};
+use vello_cpu::kurbo::{Affine, Rect};
 
-use tiny_skia::{
-    FillRule as SkFillRule, GradientStop, LinearGradient, Mask, Paint as SkPaint, PathBuilder,
-    Pixmap, PixmapPaint, RadialGradient, Shader, SpreadMode, Stroke, Transform,
-};
-
-use super::canvas::{
-    Align, Color, FillRule, LINE_HEIGHT, LineCap, LineJoin, Paint, Segment, Shape,
-};
+use super::canvas::{Align, Color, Shape};
+use super::render::{Renderer, draw_cell};
 
 /// 이미지 긴 변의 상한(모델이 줄이지 않고 받는 크기).
 pub const MAX_SIDE: f32 = 1568.0;
@@ -58,65 +52,74 @@ pub fn render_png_at(
     let total_h = rows as f32 * cell_h + (rows - 1) as f32 * GAP;
     let scale = (max_side / total_w.max(total_h)).min(max_scale);
     let px = |v: f32| ((v * scale).ceil() as u32).max(1);
-    let mut image = Pixmap::new(px(total_w), px(total_h)).ok_or("The canvas is too large.")?;
-    // 프레임 사이는 회색으로 두어 경계가 보이게 한다.
-    image.fill(if labeled {
-        tiny_skia::Color::from_rgba8(200, 200, 200, 255)
-    } else {
-        color(background)
-    });
-    let mut fonts = fonts().lock().map_err(|_| "Font lookup failed.")?;
-    for (ix, frame) in frames.iter().enumerate() {
-        let (col, row) = (ix % cols, ix / cols);
-        let x = col as f32 * (width + GAP);
-        let y = row as f32 * (cell_h + GAP);
-        let mut cell = Pixmap::new(px(width), px(cell_h)).ok_or("The canvas is too large.")?;
-        cell.fill(color(background));
-        let top = if labeled {
-            let mut label = Pixmap::new(px(width), px(LABEL)).ok_or("The canvas is too large.")?;
-            label.fill(tiny_skia::Color::from_rgba8(235, 235, 235, 255));
-            let text = Shape::Text {
-                text: frame.label.clone(),
-                origin: [4.0, 2.0],
-                size: 12.0,
-                color: [0.25, 0.25, 0.25, 1.0],
-                align: Align::Left,
-                width: None,
-            };
-            draw(&mut label, std::slice::from_ref(&text), scale, &mut fonts);
-            cell.draw_pixmap(
-                0,
-                0,
-                label.as_ref(),
-                &PixmapPaint::default(),
-                Transform::identity(),
-                None,
-            );
-            LABEL
+    let pixmap = Renderer::new().render_cells(px(total_w), px(total_h), |ctx, fonts| {
+        // 프레임 사이는 회색으로 두어 경계가 보이게 한다.
+        let gap = if labeled {
+            [200.0 / 255.0, 200.0 / 255.0, 200.0 / 255.0, 1.0]
         } else {
-            0.0
+            background
         };
-        let mut canvas = Pixmap::new(px(width), px(height)).ok_or("The canvas is too large.")?;
-        canvas.fill(color(background));
-        draw(&mut canvas, frame.shapes, scale, &mut fonts);
-        cell.draw_pixmap(
-            0,
-            (top * scale).round() as i32,
-            canvas.as_ref(),
-            &PixmapPaint::default(),
-            Transform::identity(),
-            None,
-        );
-        image.draw_pixmap(
-            (x * scale).round() as i32,
-            (y * scale).round() as i32,
-            cell.as_ref(),
-            &PixmapPaint::default(),
-            Transform::identity(),
-            None,
-        );
-    }
-    image.encode_png().map_err(|err| err.to_string())
+        ctx.set_paint(rgba(gap));
+        ctx.fill_rect(&Rect::new(
+            0.0,
+            0.0,
+            f64::from(px(total_w)),
+            f64::from(px(total_h)),
+        ));
+        for (ix, frame) in frames.iter().enumerate() {
+            let (col, row) = (ix % cols, ix / cols);
+            let x = col as f32 * (width + GAP);
+            let y = row as f32 * (cell_h + GAP);
+            let at = |dy: f32| {
+                Affine::translate((
+                    (x * scale).round() as f64,
+                    ((y + dy) * scale).round() as f64,
+                )) * Affine::scale(f64::from(scale))
+            };
+            let top = if labeled {
+                let text = Shape::Text {
+                    text: frame.label.clone(),
+                    origin: [4.0, 2.0],
+                    size: 12.0,
+                    color: [0.25, 0.25, 0.25, 1.0],
+                    align: Align::Left,
+                    width: None,
+                };
+                let label = [235.0 / 255.0, 235.0 / 255.0, 235.0 / 255.0, 1.0];
+                draw_cell(
+                    ctx,
+                    fonts,
+                    std::slice::from_ref(&text),
+                    at(0.0),
+                    [width, LABEL],
+                    Some(label),
+                );
+                LABEL
+            } else {
+                0.0
+            };
+            draw_cell(
+                ctx,
+                fonts,
+                frame.shapes,
+                at(top),
+                [width, height],
+                Some(background),
+            );
+        }
+    });
+    let (w, h) = (u32::from(pixmap.width()), u32::from(pixmap.height()));
+    let data = pixmap.take_rgba8(vello_cpu::peniko::ImageAlphaType::Alpha);
+    let image = image::RgbaImage::from_raw(w, h, data).ok_or("The canvas is too large.")?;
+    let mut png = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|err| err.to_string())?;
+    Ok(png)
+}
+
+fn rgba([r, g, b, a]: Color) -> AlphaColor<Srgb> {
+    AlphaColor::new([r, g, b, a])
 }
 
 /// 프레임 `n`개를 놓을 (열, 행): 전체의 긴 변이 가장 짧은 것.
@@ -134,320 +137,10 @@ fn grid(n: usize, width: f32, height: f32) -> (usize, usize) {
         .unwrap_or((1, n))
 }
 
-fn draw(pixmap: &mut Pixmap, shapes: &[Shape], scale: f32, fonts: &mut Fonts) {
-    let transform = Transform::from_scale(scale, scale);
-    let mut clip_rect: Option<[f32; 4]> = None;
-    let mut clip_paths: Vec<(Vec<Segment>, FillRule)> = Vec::new();
-    let mut mask: Option<Mask> = None;
-    for shape in shapes {
-        match shape {
-            Shape::Clip(rect) => {
-                clip_rect = *rect;
-                mask = clip_mask(pixmap, clip_rect, &clip_paths, transform);
-            }
-            Shape::ClipPath(next) => {
-                match next {
-                    Some(path) => clip_paths.push(path.clone()),
-                    None => clip_paths.clear(),
-                }
-                mask = clip_mask(pixmap, clip_rect, &clip_paths, transform);
-            }
-            Shape::Fill { path, paint, rule } => {
-                if let (Some(path), Some(paint)) = (sk_path(path), sk_paint(paint)) {
-                    pixmap.fill_path(&path, &paint, fill_rule(*rule), transform, mask.as_ref());
-                }
-            }
-            Shape::Stroke { path, paint, style } => {
-                if let (Some(path), Some(paint)) = (sk_path(path), sk_paint(paint)) {
-                    let stroke = Stroke {
-                        width: style.width,
-                        miter_limit: style.miter_limit,
-                        line_cap: match style.cap {
-                            LineCap::Butt => tiny_skia::LineCap::Butt,
-                            LineCap::Round => tiny_skia::LineCap::Round,
-                            LineCap::Square => tiny_skia::LineCap::Square,
-                        },
-                        line_join: match style.join {
-                            LineJoin::Miter => tiny_skia::LineJoin::Miter,
-                            LineJoin::Round => tiny_skia::LineJoin::Round,
-                            LineJoin::Bevel => tiny_skia::LineJoin::Bevel,
-                        },
-                        dash: None,
-                    };
-                    pixmap.stroke_path(&path, &paint, &stroke, transform, mask.as_ref());
-                }
-            }
-            Shape::Text {
-                text,
-                origin,
-                size,
-                color: text_color,
-                align,
-                width,
-            } => {
-                let Some(path) = fonts.line(text, *origin, *size, *align, *width) else {
-                    continue;
-                };
-                let paint = sk_paint(&Paint::Solid(*text_color));
-                if let Some(paint) = paint {
-                    pixmap.fill_path(&path, &paint, SkFillRule::Winding, transform, mask.as_ref());
-                }
-            }
-        }
-    }
-}
-
-fn clip_mask(
-    pixmap: &Pixmap,
-    rect: Option<[f32; 4]>,
-    paths: &[(Vec<Segment>, FillRule)],
-    transform: Transform,
-) -> Option<Mask> {
-    if rect.is_none() && paths.is_empty() {
-        return None;
-    }
-    let mut mask = Mask::new(pixmap.width(), pixmap.height())?;
-    let [x, y, w, h] = rect.unwrap_or([
-        0.0,
-        0.0,
-        pixmap.width() as f32 / transform.sx,
-        pixmap.height() as f32 / transform.sy,
-    ]);
-    // 빈 사각형이면 아무것도 보이지 않는다(마스크가 비어 있다).
-    if let Some(rect) = tiny_skia::Rect::from_xywh(x, y, w.max(0.0), h.max(0.0)) {
-        mask.fill_path(
-            &PathBuilder::from_rect(rect),
-            SkFillRule::Winding,
-            false,
-            transform,
-        );
-    }
-    for (path, rule) in paths {
-        match sk_path(path) {
-            Some(path) => mask.intersect_path(&path, fill_rule(*rule), true, transform),
-            // 자를 경로가 비었으면 아무것도 보이지 않는다.
-            None => mask = Mask::new(pixmap.width(), pixmap.height())?,
-        }
-    }
-    Some(mask)
-}
-
-fn sk_path(segments: &[Segment]) -> Option<tiny_skia::Path> {
-    let mut builder = PathBuilder::new();
-    for segment in segments {
-        match *segment {
-            Segment::Move([x, y]) => builder.move_to(x, y),
-            Segment::Line([x, y]) => builder.line_to(x, y),
-            Segment::Cubic([ax, ay], [bx, by], [x, y]) => builder.cubic_to(ax, ay, bx, by, x, y),
-            Segment::Close => builder.close(),
-        }
-    }
-    builder.finish()
-}
-
-fn fill_rule(rule: FillRule) -> SkFillRule {
-    match rule {
-        FillRule::NonZero => SkFillRule::Winding,
-        FillRule::EvenOdd => SkFillRule::EvenOdd,
-    }
-}
-
-fn color([r, g, b, a]: Color) -> tiny_skia::Color {
-    let c = |v: f32| v.clamp(0.0, 1.0);
-    tiny_skia::Color::from_rgba(c(r), c(g), c(b), c(a)).unwrap_or(tiny_skia::Color::BLACK)
-}
-
-fn pt([x, y]: [f32; 2]) -> tiny_skia::Point {
-    tiny_skia::Point::from_xy(x, y)
-}
-
-fn sk_paint(paint: &Paint) -> Option<SkPaint<'static>> {
-    let stops = |stops: &[(f32, Color)]| -> Vec<GradientStop> {
-        stops
-            .iter()
-            .map(|(offset, c)| GradientStop::new(*offset, color(*c)))
-            .collect()
-    };
-    let last = |stops: &[(f32, Color)]| stops.last().map_or([0.0; 4], |(_, c)| *c);
-    let shader = match paint {
-        Paint::Solid(c) => Shader::SolidColor(color(*c)),
-        Paint::Linear { from, to, stops: s } => LinearGradient::new(
-            pt(*from),
-            pt(*to),
-            stops(s),
-            SpreadMode::Pad,
-            Transform::identity(),
-        )
-        // 두 점이 같으면 바깥(끝 색)만 남는다.
-        .unwrap_or(Shader::SolidColor(color(last(s)))),
-        Paint::Radial {
-            center,
-            radius,
-            stops: s,
-        } => RadialGradient::new(
-            pt(*center),
-            pt(*center),
-            *radius,
-            stops(s),
-            SpreadMode::Pad,
-            Transform::identity(),
-        )
-        .unwrap_or(Shader::SolidColor(color(last(s)))),
-    };
-    Some(SkPaint {
-        shader,
-        anti_alias: true,
-        ..SkPaint::default()
-    })
-}
-
-/// 시스템 서체. 처음 글자를 그릴 때 한 번 찾는다.
-struct Fonts {
-    db: fontdb::Database,
-    /// 기본 서체 다음 대체 서체들(글자가 있는 첫 서체로 그린다). `None`이면 아직 찾지 않았다.
-    faces: Option<Vec<(Arc<Vec<u8>>, u32)>>,
-}
-
-fn fonts() -> &'static Mutex<Fonts> {
-    static FONTS: OnceLock<Mutex<Fonts>> = OnceLock::new();
-    FONTS.get_or_init(|| {
-        let mut db = fontdb::Database::new();
-        db.load_system_fonts();
-        Mutex::new(Fonts { db, faces: None })
-    })
-}
-
-impl Fonts {
-    fn faces(&mut self) -> &[(Arc<Vec<u8>>, u32)] {
-        if self.faces.is_none() {
-            let db = &self.db;
-            let faces = crate::export::pdf::DEFAULT_FAMILIES
-                .iter()
-                .chain(crate::export::pdf::FALLBACK_FAMILIES.iter())
-                .map(|name| fontdb::Family::Name(name))
-                .chain([fontdb::Family::SansSerif])
-                .filter_map(|family| {
-                    let families = [family];
-                    let id = db.query(&fontdb::Query {
-                        families: &families,
-                        ..fontdb::Query::default()
-                    })?;
-                    db.with_face_data(id, |data, index| (Arc::new(data.to_vec()), index))
-                })
-                .collect();
-            self.faces = Some(faces);
-        }
-        self.faces.as_deref().unwrap_or_default()
-    }
-
-    /// 글자 한 줄의 윤곽(캔버스 좌표). 줄 높이 안에서 세로 가운데에 놓는다(에디터와 같다).
-    fn line(
-        &mut self,
-        text: &str,
-        [x, y]: [f32; 2],
-        size: f32,
-        align: Align,
-        width: Option<f32>,
-    ) -> Option<tiny_skia::Path> {
-        if text.trim().is_empty() || size <= 0.0 {
-            return None;
-        }
-        let faces: Vec<ttf_parser::Face> = self
-            .faces()
-            .iter()
-            .filter_map(|(data, index)| ttf_parser::Face::parse(data, *index).ok())
-            .collect();
-        let primary = faces.first()?;
-        let em = |face: &ttf_parser::Face| size / f32::from(face.units_per_em());
-        let ascent = f32::from(primary.ascender()) * em(primary);
-        let descent = -f32::from(primary.descender()) * em(primary);
-        let baseline = y + (size * LINE_HEIGHT - ascent - descent) / 2.0 + ascent;
-        // 글자마다 (서체, 글리프, 앞으로 갈 폭).
-        let glyphs: Vec<(&ttf_parser::Face, Option<ttf_parser::GlyphId>, f32)> = text
-            .chars()
-            .map(|c| {
-                let found = faces
-                    .iter()
-                    .find_map(|face| face.glyph_index(c).map(|glyph| (face, glyph)));
-                match found {
-                    Some((face, glyph)) => {
-                        let advance =
-                            f32::from(face.glyph_hor_advance(glyph).unwrap_or(0)) * em(face);
-                        (face, Some(glyph), advance)
-                    }
-                    None => (primary, None, size * 0.5),
-                }
-            })
-            .collect();
-        let line_width: f32 = glyphs.iter().map(|(_, _, advance)| advance).sum();
-        let mut pen = x + match (align, width) {
-            (Align::Center, Some(width)) => (width - line_width) / 2.0,
-            (Align::Right, Some(width)) => width - line_width,
-            _ => 0.0,
-        };
-        let mut builder = PathBuilder::new();
-        for (face, glyph, advance) in glyphs {
-            if let Some(glyph) = glyph {
-                let mut outline = Outline {
-                    builder: &mut builder,
-                    x: pen,
-                    y: baseline,
-                    scale: em(face),
-                };
-                face.outline_glyph(glyph, &mut outline);
-            }
-            pen += advance;
-        }
-        builder.finish()
-    }
-}
-
-/// 글리프 윤곽(글꼴 단위, 위가 +)을 캔버스 좌표로 옮겨 담는다.
-struct Outline<'a> {
-    builder: &'a mut PathBuilder,
-    x: f32,
-    y: f32,
-    scale: f32,
-}
-
-impl Outline<'_> {
-    fn at(&self, x: f32, y: f32) -> (f32, f32) {
-        (self.x + x * self.scale, self.y - y * self.scale)
-    }
-}
-
-impl ttf_parser::OutlineBuilder for Outline<'_> {
-    fn move_to(&mut self, x: f32, y: f32) {
-        let (x, y) = self.at(x, y);
-        self.builder.move_to(x, y);
-    }
-
-    fn line_to(&mut self, x: f32, y: f32) {
-        let (x, y) = self.at(x, y);
-        self.builder.line_to(x, y);
-    }
-
-    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        let (x1, y1) = self.at(x1, y1);
-        let (x, y) = self.at(x, y);
-        self.builder.quad_to(x1, y1, x, y);
-    }
-
-    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        let (x1, y1) = self.at(x1, y1);
-        let (x2, y2) = self.at(x2, y2);
-        let (x, y) = self.at(x, y);
-        self.builder.cubic_to(x1, y1, x2, y2, x, y);
-    }
-
-    fn close(&mut self) {
-        self.builder.close();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extension::{FillRule, Paint, Segment};
 
     fn pixel(png: &[u8], x: u32, y: u32) -> [u8; 4] {
         let image = image::load_from_memory(png).unwrap().to_rgba8();

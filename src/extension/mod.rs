@@ -20,6 +20,7 @@ pub mod package;
 pub mod sound;
 pub(crate) mod path;
 pub mod raster;
+pub mod render;
 mod scene;
 pub mod svg;
 mod worker;
@@ -34,16 +35,10 @@ use std::time::{Duration, Instant, SystemTime};
 use mlua::{Function, Lua, Table, Value, VmState};
 
 pub use canvas::{
-    Align, Color, FillRule, LineCap, LineJoin, Paint, Region, Segment, Shape, StrokeStyle, Theme,
-    region_at,
+    Align, Color, FillRule, LineCap, LineJoin, Paint, Region, Segment, Shape, Theme, region_at,
 };
 pub use package::Package;
 pub use worker::{Info, PlayEvent, PlayWorker, Worker};
-
-/// 선분 목록의 lyon 경로(화면 테셀레이션에 쓴다).
-pub fn lyon_path(segments: &[Segment]) -> lyon::path::Path {
-    path::LuaPath::to_lyon(segments)
-}
 
 /// 라이브러리 루트 안의 확장 폴더.
 pub const EXTENSIONS_DIR: &str = "Extensions";

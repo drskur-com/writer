@@ -1,6 +1,6 @@
 # ADR-0026: 확장은 라이브러리의 Lua(Luau) 스크립트로 두고, 시트의 `` ```ext `` 블록에 캔버스로 그리거나 메뉴 명령을 더한다
 
-- 상태: Proposed
+- 상태: Proposed (화면 그리기는 Superseded by ADR-0042)
 - 날짜: 2026-10-23
 - 관련: ADR-0008(줄 블록), ADR-0017(표: 접힌 줄 + 아래 블록), `src/extension/`, `src/app/editor_extension.rs`, `src/app/extension_painter.rs`, `src/app/extension_commands.rs`, `src/app/insert_extension.rs`, `src/app/manage_extensions.rs`, `src/agent/tools.rs`(`run_extension`), `src/extension/raster.rs`, `src/agent/prompt.rs`, `resources/skills/extension/`
 
