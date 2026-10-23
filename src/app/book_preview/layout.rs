@@ -969,13 +969,18 @@ impl<'a> Flow<'a> {
         widest
     }
 
-    /// 확장 그림: 캔버스(배율 `scale:`, 이미지 px처럼 판형 단위로 바꾼다)를 가운데 두고, 칸보다 크면 줄인다.
-    /// 그리지 못했으면 지금처럼 코드 블록으로 둔다.
+    /// 확장 그림: 캔버스(배율 `scale:`, 이미지 px처럼 판형 단위로 바꾼다)를 `align:` 자리(기본 가운데)에 두고,
+    /// 칸보다 크면 줄인다. 내보내기에서 빼는 블록은 두지 않고, 그리지 못했으면 지금처럼 코드 블록으로 둔다.
     fn extension(&mut self, name: &str, args: &[(String, String)], code: &str, ctx: &Context) {
-        let still = self
+        let drawing = self
             .drawings
-            .and_then(|drawings| drawings.get(&(name.to_string(), args.to_vec())))
+            .and_then(|drawings| drawings.get(&(name.to_string(), args.to_vec())));
+        if let Some(Ok(None)) = drawing {
+            return;
+        }
+        let still = drawing
             .and_then(|drawing| drawing.as_ref().ok())
+            .and_then(Option::as_ref)
             .filter(|still| still.canvas.0 > 0. && still.canvas.1 > 0.);
         let Some(still) = still else {
             self.code(code, ctx);
@@ -991,7 +996,11 @@ impl<'a> Flow<'a> {
         };
         self.space(self.em(1.));
         let top = self.reserve(shown.height, px(0.));
-        let left = ctx.left + (ctx.width - shown.width) / 2.;
+        let left = match still.align {
+            crate::extension::Align::Left => ctx.left,
+            crate::extension::Align::Center => ctx.left + (ctx.width - shown.width) / 2.,
+            crate::extension::Align::Right => ctx.left + ctx.width - shown.width,
+        };
         self.page.items.push(Item::Drawing {
             bounds: Bounds::new(point(left, top), shown),
             drawing: PageDrawing {

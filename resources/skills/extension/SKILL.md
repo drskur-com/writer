@@ -39,6 +39,7 @@ Answer in the user's language. Write code, comments, and file names in English u
 | `period` | number | Seconds after which an animation repeats exactly (0–10). The app keeps the frames of one period and stops calling `draw` after the first loop, so set it for every looping animation. |
 | `draw` | `function(g, t, args, ui)` | Draws the block. `ui` is the mouse state (`references/interactive.md`). |
 | `click` | `function(id, args)` | Called when a region is clicked; returns block arguments to change. Needs `draw`. |
+| `export` | boolean | Default for the book preview and exports. Default `true`. Set `false` for things that make no sense on paper (games, buttons); a block's `export:` overrides it. |
 | `commands` | list of `{ title = string, run = function(ctx) }` | Items in the Extensions menu, in this order. |
 
 The table needs `draw`, `commands`, or both. Other fields are ignored. Code outside the returned functions (helpers, constants) runs once at load; keep it free of side effects. The canvas `g` is also a global there, so build paths and gradients once at the top of the file (`local LEAF = g.newPath(...)`) and reuse them in every `draw`; drawing at load time does nothing.
@@ -80,7 +81,10 @@ other: value
 
 - `` ~~~ `` fences and longer fences work too. A fence without its closing line is not a block yet.
 - Each body line `key: value` becomes `args.key`. A value that reads as a number becomes a number, `true`/`false` become booleans, and anything else stays a string (spaces at the ends removed). Lines without `:` are ignored.
-- `scale` is reserved for the app: `scale: 1.5` shows the whole canvas 1.5 times larger (0.1–4; still shrunk to the page width). It works for every extension and is not passed to `draw` or `size`, so do not use `scale` as an argument name or draw bigger yourself for it.
+- `scale`, `align`, and `export` are reserved for the app. They work for every extension and are not passed to `draw` or `size`, so never use them as argument names or implement them yourself:
+  - `scale: 1.5` shows the whole canvas 1.5 times larger (0.1–4; still shrunk to the page width).
+  - `align: left`, `center` (default), or `right` places the canvas within the text width, in the editor and in exports.
+  - `export: false` leaves the block out of the book preview and PDF, EPUB, and DOCX exports; `export: true` keeps it even if the extension's default is `false`.
 - The block is ordinary Markdown: other apps show it as a code block.
 
 ## The sandbox

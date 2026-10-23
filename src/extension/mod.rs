@@ -91,32 +91,65 @@ pub struct Block {
 /// 앱이 읽는 블록 인자: 캔버스를 이 배율로 그린다(0.1~4, 기본 1). 확장에는 넘기지 않는다.
 pub const SCALE_ARG: &str = "scale";
 
+/// 앱이 읽는 블록 인자: 캔버스를 본문 폭 안 왼쪽·가운데·오른쪽에 둔다(`left`·`center`·`right`, 기본 가운데, ADR-0034).
+pub const ALIGN_ARG: &str = "align";
+
+/// 앱이 읽는 블록 인자: 책 미리보기·내보내기(PDF·ePub·DOCX)에 넣을지(`true`·`false`). 없으면 확장의 `export`를 따른다.
+pub const EXPORT_ARG: &str = "export";
+
+/// 앱이 읽고 확장에는 넘기지 않는 블록 인자.
+pub const RESERVED_ARGS: &[&str] = &[SCALE_ARG, ALIGN_ARG, EXPORT_ARG];
+
 impl Block {
     /// 블록의 배율(`scale:`). 숫자가 아니면 1이다.
     pub fn scale(&self) -> f32 {
         scale_of(&self.args)
     }
 
-    /// 확장에 넘길 인자(`scale` 뺌).
+    /// 확장에 넘길 인자(예약 인자 뺌).
     pub fn extension_args(&self) -> Vec<(String, String)> {
-        without_scale(&self.args)
+        without_reserved(&self.args)
+    }
+}
+
+/// 같은 인자가 여럿이면 마지막 값.
+fn last_arg<'a>(args: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    args.iter()
+        .rev()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.trim())
+}
+
+/// 인자의 정렬(`align:`). 없거나 모르는 값이면 가운데다.
+pub fn align_of(args: &[(String, String)]) -> Align {
+    match last_arg(args, ALIGN_ARG) {
+        Some("left") => Align::Left,
+        Some("right") => Align::Right,
+        _ => Align::Center,
+    }
+}
+
+/// 인자의 내보내기 설정(`export:`). 없거나 `true`·`false`가 아니면 `None`(확장을 따른다).
+pub fn export_arg(args: &[(String, String)]) -> Option<bool> {
+    match last_arg(args, EXPORT_ARG) {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => None,
     }
 }
 
 /// 인자의 배율(`scale:`). 없거나 숫자가 아니면 1이고, 0.1~4로 자른다.
 pub fn scale_of(args: &[(String, String)]) -> f32 {
-    args.iter()
-        .rev()
-        .find(|(key, _)| key == SCALE_ARG)
-        .and_then(|(_, value)| value.parse::<f32>().ok())
+    last_arg(args, SCALE_ARG)
+        .and_then(|value| value.parse::<f32>().ok())
         .filter(|scale| scale.is_finite())
         .map_or(1.0, |scale| scale.clamp(0.1, 4.0))
 }
 
-/// `scale`을 뺀 인자.
-pub fn without_scale(args: &[(String, String)]) -> Vec<(String, String)> {
+/// 예약 인자(`scale`·`align`·`export`)를 뺀 인자. 확장에 넘기는 것이다.
+pub fn without_reserved(args: &[(String, String)]) -> Vec<(String, String)> {
     args.iter()
-        .filter(|(key, _)| key != SCALE_ARG)
+        .filter(|(key, _)| !RESERVED_ARGS.contains(&key.as_str()))
         .cloned()
         .collect()
 }
@@ -235,23 +268,34 @@ pub struct Still {
     pub canvas: (f32, f32),
     /// 블록의 `scale:`.
     pub scale: f32,
+    /// 블록의 `align:`.
+    pub align: Align,
     pub shapes: std::sync::Arc<Vec<Shape>>,
 }
 
-/// 확장 블록(이름과 인자, `scale:` 포함)을 내보내기용으로 그린다.
-pub fn still(root: &Path, name: &str, args: &[(String, String)]) -> Result<Still, String> {
+/// 확장 블록(이름과 인자, 예약 인자 포함)을 내보내기용으로 그린다. 내보내기에서 빼는 블록이면 `Ok(None)`이다
+/// (블록의 `export: false`, 또는 `export:`가 없고 확장이 `export = false`). 그리지 못하면 `Err`(코드 블록으로 둔다).
+pub fn still(root: &Path, name: &str, args: &[(String, String)]) -> Result<Option<Still>, String> {
+    let chosen = export_arg(args);
+    if chosen == Some(false) {
+        return Ok(None);
+    }
     let extension = Extension::open(root, name)?;
+    if !chosen.unwrap_or(extension.export) {
+        return Ok(None);
+    }
     if !extension.draws {
         return Err(format!("{name}: no draw function"));
     }
-    let own = without_scale(args);
+    let own = without_reserved(args);
     let canvas = extension.size_for(&own)?;
     let shapes = extension.draw(0.0, &own, &Theme::default())?;
-    Ok(Still {
+    Ok(Some(Still {
         canvas,
         scale: scale_of(args),
+        align: align_of(args),
         shapes: std::sync::Arc::new(shapes),
-    })
+    }))
 }
 
 /// 확장 파일 경로.
@@ -445,6 +489,8 @@ pub struct Extension {
     pub draws: bool,
     /// 영역을 누르면 부르는 `click(id, args)`가 있는지.
     pub clicks: bool,
+    /// 책 미리보기·내보내기에 넣는지(반환 표의 `export`, 기본 `true`). 블록의 `export:`가 이긴다.
+    pub export: bool,
     /// 명령 제목(순서대로).
     pub commands: Vec<String>,
 }
@@ -594,6 +640,16 @@ impl Extension {
                 ));
             }
         };
+        let export = match module.get::<Value>("export").map_err(message)? {
+            Value::Nil => true,
+            Value::Boolean(export) => export,
+            other => {
+                return Err(format!(
+                    "export must be true or false, got {}",
+                    other.type_name()
+                ));
+            }
+        };
         let period = match module.get::<Value>("period").map_err(message)? {
             Value::Nil => None,
             Value::Integer(n) => Some(n as f32),
@@ -622,6 +678,7 @@ impl Extension {
             period,
             draws,
             clicks,
+            export,
             commands,
         })
     }
@@ -1250,6 +1307,60 @@ return {
         )
         .unwrap();
         assert!(bad.size_for(&[]).unwrap_err().contains("between 1 and"));
+    }
+
+    #[test]
+    fn reserved_args_choose_align_and_export() {
+        let args = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect()
+        };
+        let block = args(&[
+            ("r", "5"),
+            ("align", "left"),
+            ("export", "false"),
+            ("scale", "2"),
+        ]);
+        assert_eq!(without_reserved(&block), args(&[("r", "5")]));
+        assert_eq!(align_of(&block), Align::Left);
+        assert_eq!(align_of(&args(&[("align", "middle")])), Align::Center);
+        assert_eq!(export_arg(&block), Some(false));
+        assert_eq!(export_arg(&args(&[("export", "maybe")])), None);
+
+        let root = std::env::temp_dir().join(format!("writer-export-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(EXTENSIONS_DIR)).unwrap();
+        let dot = "return { size = { 10, 10 }, draw = function(g) g.circle('fill', 5, 5, 2) end }";
+        std::fs::write(path(&root, "dot"), dot).unwrap();
+        std::fs::write(
+            path(&root, "game"),
+            dot.replace("return {", "return { export = false,"),
+        )
+        .unwrap();
+        let drawn = still(&root, "dot", &args(&[("align", "right")]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(drawn.align, Align::Right);
+        assert!(
+            still(&root, "dot", &args(&[("export", "false")]))
+                .unwrap()
+                .is_none()
+        );
+        assert!(still(&root, "game", &[]).unwrap().is_none());
+        assert!(
+            still(&root, "game", &args(&[("export", "true")]))
+                .unwrap()
+                .is_some()
+        );
+        // 블록이 빼면 확장 파일이 없어도 코드 블록으로 남기지 않는다.
+        assert!(
+            still(&root, "missing", &args(&[("export", "false")]))
+                .unwrap()
+                .is_none()
+        );
+        assert!(still(&root, "missing", &[]).is_err());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

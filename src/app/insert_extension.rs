@@ -70,6 +70,9 @@ struct ExtensionPicker {
     edit: Option<EditBlock>,
     /// 원문을 직접 고치는 중이면 그 입력창. 미리보기와 저장이 이 글을 쓴다.
     source: Option<Entity<TextareaState>>,
+    /// 블록 자리(`align:`)와 내보내기(`export:`). `None`은 적지 않는다(가운데, 확장을 따름).
+    align: Option<extension::Align>,
+    export: Option<bool>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -128,6 +131,8 @@ impl ExtensionPicker {
             baseline: Vec::new(),
             edit,
             source: None,
+            align: None,
+            export: None,
             _subscriptions: Vec::new(),
         };
         picker.select(0, initial, window, cx);
@@ -156,6 +161,11 @@ impl ExtensionPicker {
         };
         self.baseline = initial.unwrap_or_else(|| meta.example.clone());
         let baseline = self.baseline.clone();
+        self.align = baseline
+            .iter()
+            .any(|(key, _)| key == extension::ALIGN_ARG)
+            .then(|| extension::align_of(&baseline));
+        self.export = extension::export_arg(&baseline);
         // 같은 인자가 여럿이면 마지막 것이 쓰인다(블록을 읽는 규칙과 같다).
         let initial = |key: &str| {
             baseline
@@ -167,7 +177,7 @@ impl ExtensionPicker {
         };
         let mut extra: Vec<(String, String)> = Vec::new();
         for (key, _) in &baseline {
-            if key != extension::SCALE_ARG
+            if !extension::RESERVED_ARGS.contains(&key.as_str())
                 && !meta.args.iter().any(|(arg, _)| arg == key)
                 && !extra.iter().any(|(seen, _)| seen == key)
             {
@@ -182,7 +192,7 @@ impl ExtensionPicker {
         let fields = meta
             .args
             .iter()
-            .filter(|(key, _)| key != extension::SCALE_ARG)
+            .filter(|(key, _)| !extension::RESERVED_ARGS.contains(&key.as_str()))
             .cloned()
             .chain(extra)
             .chain(std::iter::once(scale));
@@ -238,13 +248,24 @@ impl ExtensionPicker {
                 .map(|block| block.args)
                 .unwrap_or_default();
         }
-        self.fields
+        let mut args: Vec<(String, String)> = self
+            .fields
             .iter()
             .filter_map(|field| {
                 let value = field.input.read(cx).value().trim().to_string();
                 (!value.is_empty()).then(|| (field.key.clone(), value))
             })
-            .collect()
+            .collect();
+        if let Some(align) = self.align {
+            args.push((
+                extension::ALIGN_ARG.to_string(),
+                align_name(align).to_string(),
+            ));
+        }
+        if let Some(export) = self.export {
+            args.push((extension::EXPORT_ARG.to_string(), export.to_string()));
+        }
+        args
     }
 
     /// 저장할 블록 글. 원문을 고치는 중이면 그 글 그대로다.
@@ -267,6 +288,14 @@ impl ExtensionPicker {
             return;
         }
         for (key, value) in changes {
+            if key == extension::ALIGN_ARG {
+                self.align = Some(extension::align_of(&[(key.clone(), value.clone())]));
+                continue;
+            }
+            if key == extension::EXPORT_ARG {
+                self.export = extension::export_arg(&[(key.clone(), value.clone())]);
+                continue;
+            }
             match self.fields.iter().find(|field| field.key == *key) {
                 Some(field) => field
                     .input
@@ -306,6 +335,14 @@ impl ExtensionPicker {
     }
 }
 
+fn align_name(align: extension::Align) -> &'static str {
+    match align {
+        extension::Align::Left => "left",
+        extension::Align::Center => "center",
+        extension::Align::Right => "right",
+    }
+}
+
 /// 순서와 상관없이 비교하려고 정렬한 인자.
 fn sorted(mut pairs: Vec<(String, String)>) -> Vec<(String, String)> {
     pairs.sort();
@@ -330,7 +367,7 @@ pub(super) fn render_preview(
 ) -> AnyElement {
     let loaded = host.get(name);
     let scale = extension::scale_of(args);
-    let args = &extension::without_scale(args);
+    let args = &extension::without_reserved(args);
     let message = |text: String| {
         div()
             .size_full()
@@ -389,6 +426,69 @@ pub(super) fn render_preview(
         .justify_center()
         .child(canvas)
         .into_any_element()
+}
+
+impl ExtensionPicker {
+    /// 블록 자리(왼쪽·가운데·오른쪽)와 내보내기(확장을 따름·넣기·빼기) 고르기.
+    fn render_block_options(&self, pal: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let chip = |id: SharedString, label: std::borrow::Cow<'static, str>, on: bool| {
+            div()
+                .id(id)
+                .px_2()
+                .py(px(2.0))
+                .rounded_md()
+                .cursor_pointer()
+                .when(on, |this| this.bg(pal.active).text_color(pal.foreground))
+                .when(!on, |this| this.hover(move |style| style.bg(pal.hover)))
+                .child(label)
+        };
+        let align = self.align.unwrap_or(extension::Align::Center);
+        let aligns = [
+            (extension::Align::Left, t!("extensions.align_left")),
+            (extension::Align::Center, t!("extensions.align_center")),
+            (extension::Align::Right, t!("extensions.align_right")),
+        ]
+        .map(|(value, label)| {
+            chip(
+                format!("extension-align-{}", align_name(value)).into(),
+                label,
+                align == value,
+            )
+            .on_click(cx.listener(move |picker, _, _, cx| {
+                // 가운데는 기본값이라 적지 않는다.
+                picker.align = (value != extension::Align::Center).then_some(value);
+                cx.notify();
+            }))
+        });
+        let exports = [
+            (None, t!("extensions.export_default")),
+            (Some(true), t!("extensions.export_on")),
+            (Some(false), t!("extensions.export_off")),
+        ]
+        .map(|(value, label)| {
+            chip(
+                format!("extension-export-{value:?}").into(),
+                label,
+                self.export == value,
+            )
+            .on_click(cx.listener(move |picker, _, _, cx| {
+                picker.export = value;
+                cx.notify();
+            }))
+        });
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .text_xs()
+            .text_color(pal.muted)
+            .child(div().w(px(72.)).child(t!("extensions.align")))
+            .children(aligns)
+            .child(div().w(px(16.)))
+            .child(div().pr_1().child(t!("extensions.export")))
+            .children(exports)
+    }
 }
 
 impl Render for ExtensionPicker {
@@ -590,6 +690,9 @@ impl Render for ExtensionPicker {
                             }),
                         ))
                     })
+                })
+                .when(self.source.is_none() && !self.items.is_empty(), |this| {
+                    this.child(self.render_block_options(pal, cx))
                 });
         div()
             .flex()

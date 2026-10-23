@@ -265,6 +265,8 @@ struct EditorBlock {
     /// 확장에 넘길 인자(`scale` 뺌)와 앱이 적용할 배율.
     args: Vec<(String, String)>,
     scale: f32,
+    /// 본문 폭 안의 자리(`align:`).
+    align: extension::Align,
     /// 같은 자리의 블록이 고쳐져도(누르기로 인자가 바뀌어도) 이어 쓴다.
     player: Rc<Player>,
 }
@@ -314,6 +316,7 @@ impl ExtensionBlocks {
                         Rc::new(EditorBlock {
                             args: block.extension_args(),
                             scale: block.scale(),
+                            align: extension::align_of(&block.args),
                             block,
                             player,
                         })
@@ -393,7 +396,11 @@ impl ExtensionBlocks {
             .player
             .frame(&loaded, &block.args, theme(pal), &self.ticker, window, cx);
         let (width, height) = fit(scaled(canvas_size, block.scale), size.width);
-        let left = (size.width - width) / 2.;
+        let left = match block.align {
+            extension::Align::Left => px(0.),
+            extension::Align::Center => (size.width - width) / 2.,
+            extension::Align::Right => size.width - width,
+        };
         let shapes = match frame {
             Frame::Shapes(shapes) => Some(shapes),
             Frame::Pending => None,

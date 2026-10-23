@@ -46,6 +46,7 @@
 | [0031](./0031-assistant-conversation-history.md) | 어시스턴트 대화 기록은 라이브러리마다 하나로 모아 redb에 두고, 말마다 그때 열린 시트를 적는다 | Proposed | 2026-10-23 |
 | [0032](./0032-interactive-extension-blocks.md) | 확장 블록의 호버·클릭은 확장이 선언한 영역으로 앱이 판정하고, 누른 결과는 블록 인자에 쓴다 | Proposed | 2026-10-23 |
 | [0033](./0033-extension-block-edit-dialog.md) | 확장 블록은 삽입 대화상자의 편집 모드로 고치고, 캔버스를 눌러도 커서가 블록으로 들어가지 않는다 | Proposed | 2026-10-23 |
+| [0034](./0034-extension-block-align-export.md) | 확장 블록의 자리(`align:`)와 내보내기 제외(`export:`)는 앱이 읽는 예약 인자로 두고, 확장은 내보내기 기본값을 정한다 | Proposed | 2026-10-23 |
 
 ## 작성 규칙
 

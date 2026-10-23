@@ -300,6 +300,7 @@ mod tests {
         let still = Still {
             canvas: (100., 50.),
             scale: 2.,
+            align: crate::extension::Align::Center,
             shapes: Arc::new(vec![
                 Shape::Clip(Some([0., 0., 50., 50.])),
                 Shape::Fill {

@@ -237,7 +237,8 @@ struct DocBuilder<'a> {
     images: Vec<ImagePart>,
     image_ids: HashMap<PathBuf, usize>,
     /// 확장 블록 (이름, 인자) → 넣은 그림(그리지 못했으면 `None`).
-    drawing_ids: HashMap<DrawingKey, Option<usize>>,
+    /// 확장 그림 → 넣은 그림 번호. `Ok(None)`은 내보내기에서 빼는 블록, `Err`는 그리지 못한 블록이다.
+    drawing_ids: HashMap<DrawingKey, Result<Option<usize>, ()>>,
     /// 첫 본문 구역인지(쪽 번호를 1부터 시작).
     first_body_section: bool,
 }
@@ -459,7 +460,7 @@ impl<'a> DocBuilder<'a> {
                 }
             }
             Block::Extension { name, args, code } => {
-                if !self.extension(name, args, ctx) {
+                if self.extension(name, args, ctx).is_err() {
                     self.block(&Block::Code(code.clone()), ctx);
                 }
             }
@@ -656,9 +657,9 @@ impl<'a> DocBuilder<'a> {
         }
     }
 
-    /// 확장 블록 그림(`t = 0`, 밝은 테마)을 가운데 넣는다. 크기는 캔버스 × `scale:`(px)이고 칸보다 크면 줄인다.
-    /// 그리지 못했으면 `false`(코드 블록으로 둔다).
-    fn extension(&mut self, name: &str, args: &[(String, String)], ctx: Context) -> bool {
+    /// 확장 블록 그림(`t = 0`, 밝은 테마)을 `align:` 자리(기본 가운데)에 넣는다. 크기는 캔버스 × `scale:`(px)이고
+    /// 칸보다 크면 줄인다. 내보내기에서 빼는 블록은 넣지 않고, 그리지 못했으면 `Err`(코드 블록으로 둔다).
+    fn extension(&mut self, name: &str, args: &[(String, String)], ctx: Context) -> Result<(), ()> {
         let key = (name.to_string(), args.to_vec());
         let index = match self.drawing_ids.get(&key) {
             Some(index) => *index,
@@ -668,8 +669,14 @@ impl<'a> DocBuilder<'a> {
                 index
             }
         };
-        let Some((index, (w, h))) = index.map(|index| (index, self.drawing_size(index))) else {
-            return false;
+        let Some(index) = index? else {
+            return Ok(());
+        };
+        let (w, h) = self.drawing_size(index);
+        let jc = match crate::extension::align_of(args) {
+            crate::extension::Align::Left => "left",
+            crate::extension::Align::Center => "center",
+            crate::extension::Align::Right => "right",
         };
         let max_w = self.content_width() - self.em(ctx.indent);
         let max_h = self.content_height() - self.em(1.);
@@ -677,10 +684,12 @@ impl<'a> DocBuilder<'a> {
         let drawing = self.drawing(index, w * scale, h * scale, name);
         self.paragraph(
             "Normal",
-            r#"<w:spacing w:before="120" w:after="120" w:line="240" w:lineRule="auto"/><w:ind w:firstLine="0"/><w:jc w:val="center"/>"#,
+            &format!(
+                r#"<w:spacing w:before="120" w:after="120" w:line="240" w:lineRule="auto"/><w:ind w:firstLine="0"/><w:jc w:val="{jc}"/>"#
+            ),
             &format!("<w:r>{drawing}</w:r>"),
         );
-        true
+        Ok(())
     }
 
     /// 확장 그림의 기본 크기(pt): 캔버스 × `scale:`.
@@ -691,9 +700,13 @@ impl<'a> DocBuilder<'a> {
         (px(part.width), px(part.height))
     }
 
-    /// 확장 그림을 PNG(인쇄용 해상도)와 SVG로 만들어 넣는다.
-    fn load_drawing(&mut self, name: &str, args: &[(String, String)]) -> Option<usize> {
-        let still = crate::extension::still(&self.project.root, name, args).ok()?;
+    /// 확장 그림을 PNG(인쇄용 해상도)와 SVG로 만들어 넣는다. 내보내기에서 빼는 블록이면 `Ok(None)`이다.
+    fn load_drawing(&mut self, name: &str, args: &[(String, String)]) -> Result<Option<usize>, ()> {
+        let Some(still) =
+            crate::extension::still(&self.project.root, name, args).map_err(|_| ())?
+        else {
+            return Ok(None);
+        };
         let (w, h) = (still.canvas.0 * still.scale, still.canvas.1 * still.scale);
         let frame = crate::extension::raster::Frame {
             label: String::new(),
@@ -709,7 +722,7 @@ impl<'a> DocBuilder<'a> {
             f32::MAX,
             resolution,
         )
-        .ok()?;
+        .map_err(|_| ())?;
         let index = self.images.len();
         let id = index + 1;
         self.images.push(ImagePart {
@@ -725,7 +738,7 @@ impl<'a> DocBuilder<'a> {
                 crate::extension::svg::to_svg(&still).into_bytes(),
             )),
         });
-        Some(index)
+        Ok(Some(index))
     }
 
     fn load_image(&mut self, path: &Path) -> Option<usize> {

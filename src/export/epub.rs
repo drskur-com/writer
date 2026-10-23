@@ -211,13 +211,21 @@ impl<'a> EpubBuilder<'a> {
     }
 
     /// 확장 블록 그림(`t = 0`, 밝은 테마)을 SVG로 넣고 경로를 돌려준다. 같은 이름·인자는 한 번만 넣는다.
-    /// 그리지 못하면 `None`(코드 블록으로 둔다).
-    fn embed_drawing(&mut self, name: &str, args: &[(String, String)]) -> Option<String> {
+    /// 내보내기에서 빼는 블록이면 `Ok(None)`, 그리지 못하면 `Err`(코드 블록으로 둔다).
+    fn embed_drawing(
+        &mut self,
+        name: &str,
+        args: &[(String, String)],
+    ) -> Result<Option<String>, ()> {
         let key = format!("ext\u{0}{name}\u{0}{args:?}");
         if let Some(existing) = self.image_dest_map.get(&key) {
-            return Some(format!("../{existing}"));
+            return Ok(Some(format!("../{existing}")));
         }
-        let still = crate::extension::still(&self.project.root, name, args).ok()?;
+        let Some(still) =
+            crate::extension::still(&self.project.root, name, args).map_err(|_| ())?
+        else {
+            return Ok(None);
+        };
         self.image_counter += 1;
         let filename = format!("images/ext_{:04}.svg", self.image_counter);
         self.images.push(ImageAsset {
@@ -228,7 +236,7 @@ impl<'a> EpubBuilder<'a> {
             is_cover: false,
         });
         self.image_dest_map.insert(key, filename.clone());
-        Some(format!("../{filename}"))
+        Ok(Some(format!("../{filename}")))
     }
 
     /// 제목 블록을 스타일 설정에 맞춰 렌더링한다.
@@ -467,15 +475,21 @@ impl<'a> EpubBuilder<'a> {
                 sec.html_body.push_str(&format!("</{tag}>\n"));
             }
             Block::Extension { name, args, code } => match self.embed_drawing(name, args) {
-                Some(src) => {
+                Ok(Some(src)) => {
+                    let align = match crate::extension::align_of(args) {
+                        crate::extension::Align::Left => "left",
+                        crate::extension::Align::Center => "center",
+                        crate::extension::Align::Right => "right",
+                    };
                     let sec = self.ensure_section(&self.project.name);
                     sec.html_body.push_str(&format!(
-                        "<figure class=\"image align-center extension\">\n  <img src=\"{}\" alt=\"{}\"/>\n</figure>\n",
+                        "<figure class=\"image align-{align} extension\">\n  <img src=\"{}\" alt=\"{}\"/>\n</figure>\n",
                         escape_xml(&src),
                         escape_xml(name)
                     ));
                 }
-                None => self.render_block(&Block::Code(code.clone()), sheet_dir),
+                Ok(None) => {}
+                Err(()) => self.render_block(&Block::Code(code.clone()), sheet_dir),
             },
             Block::Code(code) => {
                 let sec = self.ensure_section(&self.project.name);

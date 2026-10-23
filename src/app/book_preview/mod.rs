@@ -62,9 +62,9 @@ pub(super) struct BookSource {
     pub drawings: Drawings,
 }
 
-/// 확장 블록 (이름, 인자)별 그림.
+/// 확장 블록 (이름, 인자)별 그림. `Ok(None)`은 내보내기에서 빼는 블록이다(ADR-0034).
 pub(super) type Drawings =
-    HashMap<(String, Vec<(String, String)>), Result<crate::extension::Still, String>>;
+    HashMap<(String, Vec<(String, String)>), Result<Option<crate::extension::Still>, String>>;
 
 /// 원고의 확장 블록을 모두 그린다(같은 이름·인자는 한 번).
 fn drawings(root: &Path, chunks: &[Chunk]) -> Drawings {

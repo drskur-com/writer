@@ -526,15 +526,18 @@ impl Workspace {
                 if meta.description.trim().is_empty() {
                     notes.push("The header has no description.".to_string());
                 }
-                let scale = crate::extension::SCALE_ARG;
-                if meta.args.iter().any(|(arg, _)| arg == scale) {
-                    notes.push(format!(
-                        "`{scale}` is reserved: the app scales every block by it and does not pass it to the \
-                         extension. Rename that argument."
-                    ));
+                let reserved = crate::extension::RESERVED_ARGS;
+                for name in reserved {
+                    if meta.args.iter().any(|(arg, _)| arg == name) {
+                        notes.push(format!(
+                            "`{name}` is reserved: the app reads it for every block (scale, align, export) and \
+                             does not pass it to the extension. Rename that argument."
+                        ));
+                    }
                 }
-                let described =
-                    |key: &str| key == scale || meta.args.iter().any(|(arg, _)| arg == key);
+                let described = |key: &str| {
+                    reserved.contains(&key) || meta.args.iter().any(|(arg, _)| arg == key)
+                };
                 let undocumented: Vec<&str> = arguments
                     .get("args")
                     .and_then(Value::as_object)
@@ -636,7 +639,7 @@ impl Workspace {
             })
             .unwrap_or_default();
         // 배율은 앱이 적용하고 확장에는 넘기지 않는다.
-        let mut args = crate::extension::without_scale(&args);
+        let mut args = crate::extension::without_reserved(&args);
         let mut ui = Ui {
             hover: arguments
                 .get("hover")
