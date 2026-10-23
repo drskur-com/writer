@@ -52,6 +52,7 @@
 | [0038](./0038-extension-play-window.md) | 상태·키보드·게임 루프가 필요한 확장은 `play` 표로 두고 따로 연 창에서 실행한다 | Proposed | 2026-10-23 |
 | [0039](./0039-folder-extensions.md) | 큰 확장은 `Extensions/<이름>/init.lua`와 모듈 폴더로 두고, `require`는 그 폴더 안만 부른다 | Proposed | 2026-10-23 |
 | [0040](./0040-extension-sound.md) | 플레이 창의 확장은 `sound.play{ … }`로 음표를 넘기고, 앱이 악기 소리로 합성해 재생한다 | Proposed | 2026-10-23 |
+| [0041](./0041-note-attachments.md) | 메모의 첨부파일은 `Notes/Attachments`에 두고 `Notes/` 기준 경로로 적는다 | Proposed | 2026-10-23 |
 
 ## 작성 규칙
 

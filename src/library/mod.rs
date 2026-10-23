@@ -12,6 +12,8 @@
 //!    └─ Extras/<Group>/…           # 추가자료(빌드에서 빠짐)
 //!       └─ Attachments/…         # 첨부파일: cover.<확장자>, <ULID>.<확장자>
 //! ```
+//!
+//! 메모의 첨부파일은 메모 그룹 모두가 함께 쓰는 `Notes/Attachments/`에 둔다(ADR-0041).
 
 mod book;
 mod document;
@@ -27,8 +29,8 @@ mod style;
 mod todos;
 
 pub use book::{
-    BookMeta, COVER_EXTENSIONS, COVER_STEM, add_attachment, attach_bytes, image_extension,
-    read_book, set_cover, write_book,
+    BookMeta, COVER_EXTENSIONS, COVER_STEM, add_attachment, attach_bytes, attachments_dir,
+    image_extension, read_book, set_cover, write_book,
 };
 pub use document::{count_words, read_sheet, write_sheet};
 pub use files::{FileItem, FileKind, GroupKind, format_size, move_file};
@@ -50,7 +52,7 @@ use std::borrow::Cow;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use layout::{ensure_layout, write_default_meta};
+use layout::{ensure_layout, has_marker, write_default_meta};
 use meta::{GroupMeta, read_group_meta};
 
 /// 라이브러리 표식 디렉터리/파일.
@@ -72,8 +74,28 @@ pub const EXTRAS_DIR: &str = "Extras";
 /// 새 프로젝트의 기본 추가자료 그룹.
 pub const TEMPLATES_GROUP: &str = "Templates";
 
-/// 첨부파일(표지 등) 추가자료 그룹. 처음 첨부할 때 만든다.
+/// 첨부파일(표지 등) 추가자료 그룹. 처음 첨부할 때 만든다. 메모는 `Notes/` 바로 아래에 같은 이름으로 둔다.
 pub const ATTACHMENTS_GROUP: &str = "Attachments";
+
+/// 라이브러리의 메모 섹션 폴더(`<라이브러리>/Notes`)인지.
+pub(crate) fn is_notes_dir(dir: &Path) -> bool {
+    dir.ends_with(SectionKind::Notes.dir()) && dir.parent().is_some_and(has_marker)
+}
+
+/// 앱이 폴더 이름으로 찾는 기본 그룹인지: 추가자료의 템플릿·첨부파일, 메모의 첨부파일.
+/// 옮기면 기능이 깨지고, 이름을 바꿔도 폴더는 그대로 둔다(표시 이름만 바꾼다).
+pub fn is_reserved_group(dir: &Path) -> bool {
+    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
+        return false;
+    };
+    if parent
+        .file_name()
+        .is_some_and(|parent| parent == EXTRAS_DIR)
+    {
+        return name == TEMPLATES_GROUP || name == ATTACHMENTS_GROUP;
+    }
+    name == ATTACHMENTS_GROUP && is_notes_dir(parent)
+}
 
 /// 라이브러리 최상위 섹션.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -311,6 +333,16 @@ impl Library {
         let projects = self.root.join(SectionKind::Projects.dir());
         let name = path.strip_prefix(&projects).ok()?.components().next()?;
         Some(projects.join(name))
+    }
+
+    /// 시트가 첨부파일을 둘 기준 폴더: 프로젝트 시트는 프로젝트 폴더, 메모는 `Notes/`(ADR-0041).
+    /// 첨부파일은 이 폴더 기준 경로로 적는다. 라이브러리 밖이면 `None`.
+    pub fn attachment_base_of(&self, path: &Path) -> Option<PathBuf> {
+        let notes = self.root.join(SectionKind::Notes.dir());
+        if path.starts_with(&notes) {
+            return Some(notes);
+        }
+        self.project_of(path)
     }
 
     /// 그룹(또는 섹션 폴더)의 정렬 방법과, 사용자가 고를 수 있는지.

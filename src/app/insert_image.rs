@@ -3,10 +3,11 @@
 //!
 //! 프로젝트 시트에 고른 파일은 첨부파일 그룹에 복사하고 프로젝트 폴더 기준 경로
 //! (`Extras/Attachments/…`)로 잇는다. 시트를 옮겨도 경로가 바뀌지 않는다(ADR-0022).
+//! 메모에 고른 파일은 메모가 함께 쓰는 첨부파일 그룹(`Notes/Attachments`)에 복사하고 `Notes/`
+//! 기준 경로(`Attachments/…`)로 잇는다(ADR-0041).
 //! 이미 첨부파일 그룹에 있는 이미지는 "첨부파일" 탭에서 골라 복사 없이 다시 쓴다.
-//! 프로젝트 밖(메모)에는 첨부파일 그룹이 없어서 원본 파일의 절대 경로를 쓴다.
-//! 웹 주소 이미지도 프로젝트 시트에서는 내려받아 첨부파일로 넣는다(미리보기·PDF·ePub이 오프라인에서
-//! 같도록). 메모에는 주소를 그대로 쓴다.
+//! 웹 주소 이미지도 내려받아 첨부파일로 넣는다(미리보기·PDF·ePub이 오프라인에서 같도록).
+//! 라이브러리 밖의 시트에는 첨부파일 그룹이 없어서 원본 파일의 절대 경로와 주소를 그대로 쓴다.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -347,15 +348,15 @@ impl InsertImageForm {
         let Some(image) = self.image(cx) else {
             return;
         };
-        // 프로젝트 시트의 웹 이미지는 먼저 내려받는다(이미 넣은 웹 이미지를 고쳐 저장할 때도).
-        let in_project = self.tabs.contains(&Source::Attachment);
+        // 첨부파일 그룹이 있는 시트의 웹 이미지는 먼저 내려받는다(이미 넣은 웹 이미지를 고쳐 저장할 때도).
+        let attachable = self.tabs.contains(&Source::Attachment);
         let web = match &image {
             ImageSource::Url(url) | ImageSource::Existing(url) if library::is_web_address(url) => {
                 Some(url.clone())
             }
             _ => None,
         };
-        if in_project && let Some(url) = web {
+        if attachable && let Some(url) = web {
             self.start_download(url, window, cx);
             return;
         }
@@ -841,11 +842,8 @@ impl WriterApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let attachments = self.project_of(&sheet).map(|project| {
-            let dir = project
-                .join(library::EXTRAS_DIR)
-                .join(library::ATTACHMENTS_GROUP);
-            self.find_group(&dir)
+        let attachments = self.attachment_base_of(&sheet).map(|base| {
+            self.find_group(&library::attachments_dir(&base))
                 .map(|group| {
                     group
                         .files
@@ -979,8 +977,8 @@ impl WriterApp {
         let destination = match image {
             ImageSource::Existing(destination) => destination,
             ImageSource::Url(url) => url,
-            ImageSource::Downloaded(bytes, extension) => match self.project_of(sheet) {
-                Some(project) => match library::attach_bytes(&project, &bytes, extension) {
+            ImageSource::Downloaded(bytes, extension) => match self.attachment_base_of(sheet) {
+                Some(base) => match library::attach_bytes(&base, &bytes, extension) {
                     Ok(relative) => relative,
                     Err(err) => {
                         self.notify(t!("insert.image.attach_failed", err = err), window, cx);
@@ -989,8 +987,8 @@ impl WriterApp {
                 },
                 None => return false,
             },
-            ImageSource::File(path) => match self.project_of(sheet) {
-                Some(project) => match library::add_attachment(&project, &path) {
+            ImageSource::File(path) => match self.attachment_base_of(sheet) {
+                Some(base) => match library::add_attachment(&base, &path) {
                     // 첨부파일 그룹의 변화는 폴더 감시가 다시 읽어 반영한다.
                     Ok(relative) => relative,
                     Err(err) => {
@@ -1022,15 +1020,9 @@ impl WriterApp {
         true
     }
 
-    /// 시트가 든 프로젝트 폴더(`Projects/<프로젝트>`). 프로젝트 밖이면 `None`.
-    fn project_of(&self, sheet: &Path) -> Option<PathBuf> {
-        let projects = self
-            .library
-            .as_ref()?
-            .root
-            .join(library::SectionKind::Projects.dir());
-        let name = sheet.strip_prefix(&projects).ok()?.components().next()?;
-        Some(projects.join(name))
+    /// 시트의 첨부파일 기준 폴더(프로젝트 폴더나 `Notes/`). 라이브러리 밖이면 `None`.
+    fn attachment_base_of(&self, sheet: &Path) -> Option<PathBuf> {
+        self.library.as_ref()?.attachment_base_of(sheet)
     }
 }
 

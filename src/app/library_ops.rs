@@ -252,24 +252,11 @@ impl WriterApp {
             .as_ref()
             .is_some_and(|lib| lib.find_group(path).is_some());
         is_group
-            && !self.is_reserved_group(path)
+            && !library::is_reserved_group(path)
             && !matches!(
                 self.group_family(path),
                 None | Some(GroupFamily::Project(_))
             )
-    }
-
-    /// 앱이 이름으로 찾는 기본 추가자료 그룹(템플릿·첨부파일). 옮기면 기능이 깨진다.
-    fn is_reserved_group(&self, path: &Path) -> bool {
-        let Some(parent) = path.parent() else {
-            return false;
-        };
-        parent
-            .file_name()
-            .is_some_and(|name| name == library::EXTRAS_DIR)
-            && path.file_name().is_some_and(|name| {
-                name == library::TEMPLATES_GROUP || name == library::ATTACHMENTS_GROUP
-            })
     }
 
     /// 지금 화면에 보이는 그룹 줄(경로, 위에서 아래 순서).

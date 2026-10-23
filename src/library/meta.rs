@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     ATTACHMENTS_GROUP, EXTRAS_DIR, GROUP_META_FILE, Group, GroupKind, Sheet, SortMode,
-    TEMPLATES_GROUP, file_name, sheet_file_name,
+    TEMPLATES_GROUP, file_name, is_notes_dir, is_reserved_group, sheet_file_name,
 };
 
 /// 그룹 폴더의 `.writer.toml` 스키마.
@@ -519,9 +519,16 @@ pub(super) fn ensure_project_layout(project_dir: &Path) -> io::Result<()> {
     write_group_meta_if_absent(&templates, Some("layout-template"), Some("템플릿"))
 }
 
+/// 메모 첨부파일 자리(`Notes/Attachments`)의 이름인지. 시트 그룹이 이 이름을 쓰면 첨부할 때
+/// 파일 그룹으로 바뀌어 메모가 목록에서 사라진다.
+fn is_note_attachments_name(parent: &Path, base: &str) -> bool {
+    base == ATTACHMENTS_GROUP && is_notes_dir(parent)
+}
+
 /// `parent` 아래에 새 그룹 폴더(+ `.writer.toml`)를 만들고 경로를 돌려준다.
 ///
-/// 이름 규칙은 프로젝트와 같고, `Extras`는 추가자료 자리라 피한다.
+/// 이름 규칙은 프로젝트와 같고, `Extras`는 추가자료 자리라, 메모의 `Attachments`는 첨부파일
+/// 자리라 피한다.
 /// 새 그룹은 `parent`의 그룹 순서(`groups`) 맨 뒤에 붙는다.
 pub fn create_group(
     parent: &Path,
@@ -531,7 +538,7 @@ pub fn create_group(
 ) -> io::Result<PathBuf> {
     std::fs::create_dir_all(parent)?;
     let mut base = project_dir_name(name);
-    if base == EXTRAS_DIR {
+    if base == EXTRAS_DIR || is_note_attachments_name(parent, &base) {
         base.push_str(" 2");
     }
     let dir = create_unique_dir(parent, &base)?;
@@ -767,9 +774,7 @@ pub fn update_group(
             t!("core.error.no_parent").into_owned(),
         )
     })?;
-    let reserved = file_name(parent) == EXTRAS_DIR
-        && [TEMPLATES_GROUP, ATTACHMENTS_GROUP].contains(&file_name(dir).as_str());
-    if reserved {
+    if is_reserved_group(dir) {
         let text = |value: &str| Some(toml::Value::String(value.to_string()));
         write_meta_values(
             dir,
@@ -783,7 +788,8 @@ pub fn update_group(
     }
 
     let mut name = name.to_string();
-    if project_dir_name(&name) == EXTRAS_DIR {
+    let base = project_dir_name(&name);
+    if base == EXTRAS_DIR || is_note_attachments_name(parent, &base) {
         name.push_str(" 2");
     }
     let mut order = group_order(parent)?;
@@ -930,6 +936,35 @@ mod tests {
         assert_eq!(meta.title.as_deref(), Some("양식"));
         assert_eq!(meta.icon, None);
         assert_eq!(meta.color.as_deref(), Some("blue"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn note_groups_avoid_attachments_name() {
+        let root = temp_dir("note-attachments-name");
+        initialize(&root).unwrap();
+        let notes = root.join(SectionKind::Notes.dir());
+
+        // 메모의 `Attachments`는 첨부파일 자리라 시트 그룹 이름으로 쓸 수 없다.
+        let clash = create_group(&notes, ATTACHMENTS_GROUP, None, None).unwrap();
+        assert_eq!(clash, notes.join("Attachments 2"));
+        let diary = create_group(&notes, "일기", None, None).unwrap();
+        let renamed = update_group(&diary, ATTACHMENTS_GROUP, None, None).unwrap();
+        assert_eq!(renamed, notes.join("Attachments 2 2"));
+        // 메모 그룹 아래나 프로젝트에서는 보통 이름이다.
+        let nested = create_group(&renamed, ATTACHMENTS_GROUP, None, None).unwrap();
+        assert_eq!(nested, renamed.join(ATTACHMENTS_GROUP));
+
+        // 첨부파일 그룹은 폴더를 두고 표시 이름만 바꾼다.
+        let attachments = notes.join(ATTACHMENTS_GROUP);
+        crate::library::attach_bytes(&notes, b"png", "png").unwrap();
+        assert!(is_reserved_group(&attachments));
+        assert_eq!(
+            update_group(&attachments, "그림", None, None).unwrap(),
+            attachments
+        );
+        assert_eq!(read_group_meta(&attachments).title.as_deref(), Some("그림"));
 
         std::fs::remove_dir_all(&root).ok();
     }

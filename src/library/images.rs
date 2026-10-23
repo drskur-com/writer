@@ -6,14 +6,18 @@
 //! 프로젝트 시트에 넣는 그림은 프로젝트 폴더 기준 경로(`Extras/Attachments/…`)로 적는다
 //! (ADR-0022). 시트나 그룹을 옮겨도 경로가 바뀌지 않는다.
 //!
+//! 메모에 넣는 그림은 `Notes/` 기준 경로(`Attachments/…`)로 적는다(ADR-0041). 메모를 다른
+//! 그룹으로 옮겨도 경로가 바뀌지 않는다.
+//!
 //! 예전에 넣은 시트 기준 경로(`../Extras/…`)는 옮기면 `../` 깊이가 어긋난다(ADR-0021).
 //! 그런 경로도 찾을 수 있도록 `../` 뒤의 꼬리를 시트의 위 폴더들(프로젝트 폴더까지)에서
 //! 한 번 더 찾는다.
 
 use std::path::{Component, Path, PathBuf};
 
+use super::is_notes_dir;
 use super::layout::has_marker;
-use super::{ATTACHMENTS_GROUP, EXTRAS_DIR, GROUP_META_FILE, SECTIONS, SectionKind};
+use super::{GROUP_META_FILE, SECTIONS, SectionKind, attachments_dir};
 
 /// 웹 주소인지. 웹 이미지는 파일이 아니라 주소를 그대로 쓴다.
 pub fn is_web_address(destination: &str) -> bool {
@@ -24,7 +28,7 @@ pub fn is_web_address(destination: &str) -> bool {
 /// 찾은 경로는 `..`를 푼 실제 경로라 같은 파일이면 같은 값이다(내보내기에서 한 번만 넣는다).
 ///
 /// `project_dir`는 프로젝트 폴더(원고·추가자료의 기준)다. 모르면 `None`을 주고,
-/// 그때는 시트 폴더가 라이브러리 프로젝트 안이면 그 프로젝트 폴더를 쓴다(`project_dir_of`).
+/// 그때는 시트 폴더가 든 라이브러리 프로젝트 폴더나 메모 섹션 폴더(`Notes/`)를 쓴다(`base_dir_of`).
 pub fn resolve_image_path(
     sheet_dir: &Path,
     project_dir: Option<&Path>,
@@ -38,18 +42,13 @@ pub fn resolve_image_path(
         return path.is_file().then(|| path.to_path_buf());
     }
 
-    let project_dir = project_dir.or_else(|| project_dir_of(sheet_dir));
+    let project_dir = project_dir.or_else(|| base_dir_of(sheet_dir));
     let mut candidates = vec![sheet_dir.join(path)];
-    // 프로젝트 기준 경로는 프로젝트 안을 가리킨다. `..`가 있으면 프로젝트 밖으로 나가므로 보지 않는다.
+    // 기준 폴더 기준 경로는 그 안을 가리킨다. `..`가 있으면 밖으로 나가므로 보지 않는다.
     let inside = !path.components().any(|part| part == Component::ParentDir);
     if let Some(project_dir) = project_dir.filter(|_| inside) {
         candidates.push(project_dir.join(path));
-        candidates.push(
-            project_dir
-                .join(EXTRAS_DIR)
-                .join(ATTACHMENTS_GROUP)
-                .join(path),
-        );
+        candidates.push(attachments_dir(project_dir).join(path));
     }
     let found = candidates
         .into_iter()
@@ -68,13 +67,15 @@ pub fn resolve_image_path(
     Some(found.canonicalize().unwrap_or(found))
 }
 
-/// 폴더가 든 라이브러리 프로젝트 폴더(`<라이브러리>/Projects/<프로젝트>`). 프로젝트 밖이면 `None`.
-fn project_dir_of(dir: &Path) -> Option<&Path> {
+/// 폴더가 든 첨부 경로의 기준 폴더: 라이브러리 프로젝트 폴더(`<라이브러리>/Projects/<프로젝트>`)나
+/// 메모 섹션 폴더(`<라이브러리>/Notes`). 라이브러리 밖이면 `None`.
+fn base_dir_of(dir: &Path) -> Option<&Path> {
     dir.ancestors().find(|dir| {
-        dir.parent().is_some_and(|section| {
-            section.ends_with(SectionKind::Projects.dir())
-                && section.parent().is_some_and(has_marker)
-        })
+        is_notes_dir(dir)
+            || dir.parent().is_some_and(|section| {
+                section.ends_with(SectionKind::Projects.dir())
+                    && section.parent().is_some_and(has_marker)
+            })
     })
 }
 
@@ -117,6 +118,7 @@ fn without_leading_parents(path: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::library::test_util::temp_dir;
+    use crate::library::{ATTACHMENTS_GROUP, EXTRAS_DIR};
 
     /// `Projects/책/본문/1장` 아래 시트, `Projects/책/Extras/Attachments`의 이미지.
     fn project() -> (PathBuf, PathBuf) {
@@ -216,12 +218,33 @@ mod tests {
         std::fs::create_dir_all(&attachments).unwrap();
         std::fs::create_dir_all(&sheet_dir).unwrap();
         std::fs::write(attachments.join("a.png"), "png").unwrap();
-        assert_eq!(project_dir_of(&sheet_dir), Some(project.as_path()));
-        assert_eq!(project_dir_of(&root.join("Notes").join("Inbox")), None);
+        assert_eq!(base_dir_of(&sheet_dir), Some(project.as_path()));
+        assert_eq!(base_dir_of(&root.join("Projects")), None);
         assert_eq!(
             resolve_image_path(&sheet_dir, None, "Extras/Attachments/a.png"),
             Some(attachment(&project))
         );
+    }
+
+    #[test]
+    fn finds_note_relative_path_from_any_note_group() {
+        // 메모 그림(`Attachments/…`)은 메모가 어느 그룹에 있든 `Notes/Attachments`에서 찾는다.
+        let root = temp_dir("images-notes");
+        crate::library::initialize(&root).unwrap();
+        let notes = root.join("Notes");
+        let attachments = notes.join("Attachments");
+        let group = notes.join("일기").join("2026");
+        std::fs::create_dir_all(&attachments).unwrap();
+        std::fs::create_dir_all(&group).unwrap();
+        std::fs::write(attachments.join("a.png"), "png").unwrap();
+        let found = Some(attachments.join("a.png").canonicalize().unwrap());
+        assert_eq!(base_dir_of(&group), Some(notes.as_path()));
+        assert_eq!(resolve_image_path(&group, None, "Attachments/a.png"), found);
+        assert_eq!(
+            resolve_image_path(&notes.join("Inbox"), None, "Attachments/a.png"),
+            found
+        );
+        assert_eq!(resolve_image_path(&notes, None, "Attachments/a.png"), found);
     }
 
     #[test]

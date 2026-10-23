@@ -2,6 +2,7 @@
 //!
 //! ePub(OPF)·DOCX(`core.xml`)·PDF·HTML 내보내기가 같은 값을 형식에 맞게 옮겨 쓴다.
 //! 첨부 파일은 `<Project>/Extras/Attachments/`에 두고 프로젝트 기준 상대 경로로 가리킨다.
+//! 메모의 첨부 파일은 `Notes/Attachments/`에 두고 `Notes/` 기준 상대 경로로 가리킨다(ADR-0041).
 //! 표지는 `cover.<확장자>`로 고정하고, 다른 첨부는 `<ULID>.<확장자>`로 둔다.
 
 use std::io;
@@ -10,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use super::meta::{
     group_order, read_group_meta, write_group_meta_if_absent, write_meta_list, write_meta_values,
 };
-use super::{ATTACHMENTS_GROUP, EXTRAS_DIR, GROUP_META_FILE, GroupKind, file_name};
+use super::{ATTACHMENTS_GROUP, EXTRAS_DIR, GROUP_META_FILE, GroupKind, file_name, is_notes_dir};
 
 /// 표지로 쓸 수 있는 이미지 확장자(ePub 핵심 미디어 형식).
 pub const COVER_EXTENSIONS: [&str; 6] = ["jpg", "jpeg", "png", "gif", "webp", "svg"];
@@ -105,15 +106,26 @@ pub fn set_cover(project_dir: &Path, source: &Path) -> io::Result<String> {
     ))
 }
 
-/// 파일을 프로젝트 첨부파일 그룹에 `<ULID>.<확장자>`로 넣고 프로젝트 기준 상대 경로를 돌려준다.
+/// 첨부파일 그룹 폴더. `base_dir`가 프로젝트 폴더면 `<Project>/Extras/Attachments`,
+/// 메모 섹션 폴더(`Notes/`)면 `Notes/Attachments`다(ADR-0041).
+pub fn attachments_dir(base_dir: &Path) -> PathBuf {
+    if is_notes_dir(base_dir) {
+        base_dir.join(ATTACHMENTS_GROUP)
+    } else {
+        base_dir.join(EXTRAS_DIR).join(ATTACHMENTS_GROUP)
+    }
+}
+
+/// 파일을 첨부파일 그룹에 `<ULID>.<확장자>`로 넣고 기준 폴더(`base_dir`: 프로젝트 폴더나 `Notes/`)
+/// 기준 상대 경로를 돌려준다.
 ///
-/// 파일 이름은 시트처럼 바뀌지 않는 식별자다. 이미 프로젝트 안에 있는 파일이면 복사하지 않고
-/// 그 경로를 쓴다. 첨부파일 그룹이 없으면 만들고 추가자료 순서 맨 뒤에 붙인다.
-pub fn add_attachment(project_dir: &Path, source: &Path) -> io::Result<String> {
-    if let Ok(relative) = source.strip_prefix(project_dir) {
+/// 파일 이름은 시트처럼 바뀌지 않는 식별자다. 이미 기준 폴더 안에 있는 파일이면 복사하지 않고
+/// 그 경로를 쓴다. 첨부파일 그룹이 없으면 만들고, 프로젝트면 추가자료 순서 맨 뒤에 붙인다.
+pub fn add_attachment(base_dir: &Path, source: &Path) -> io::Result<String> {
+    if let Ok(relative) = source.strip_prefix(base_dir) {
         return Ok(relative_string(relative));
     }
-    let dir = ensure_attachments(project_dir)?;
+    let dir = ensure_attachments(base_dir)?;
     let extension = normalized_extension(source);
     let name = ulid::Ulid::generate().to_string();
     let target = if extension.is_empty() {
@@ -123,18 +135,19 @@ pub fn add_attachment(project_dir: &Path, source: &Path) -> io::Result<String> {
     };
     std::fs::copy(source, &target)?;
     Ok(relative_string(
-        target.strip_prefix(project_dir).unwrap_or(&target),
+        target.strip_prefix(base_dir).unwrap_or(&target),
     ))
 }
 
-/// 내려받은 이미지 바이트를 첨부파일 그룹에 `<ULID>.<확장자>`로 쓰고, 프로젝트 기준 상대 경로를
-/// 돌려준다. 웹 주소 이미지도 파일로 두어 미리보기·PDF·ePub이 오프라인에서 같게 한다.
-pub fn attach_bytes(project_dir: &Path, bytes: &[u8], extension: &str) -> io::Result<String> {
-    let dir = ensure_attachments(project_dir)?;
+/// 내려받은 이미지 바이트를 첨부파일 그룹에 `<ULID>.<확장자>`로 쓰고, 기준 폴더(`add_attachment`와
+/// 같다) 기준 상대 경로를 돌려준다. 웹 주소 이미지도 파일로 두어 미리보기·PDF·ePub이 오프라인에서
+/// 같게 한다.
+pub fn attach_bytes(base_dir: &Path, bytes: &[u8], extension: &str) -> io::Result<String> {
+    let dir = ensure_attachments(base_dir)?;
     let target = dir.join(format!("{}.{extension}", ulid::Ulid::generate()));
     std::fs::write(&target, bytes)?;
     Ok(relative_string(
-        target.strip_prefix(project_dir).unwrap_or(&target),
+        target.strip_prefix(base_dir).unwrap_or(&target),
     ))
 }
 
@@ -169,10 +182,9 @@ fn normalized_extension(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// `<Project>/Extras/Attachments`가 없으면 메타(아이콘·표시 이름)와 함께 만든다(멱등).
-fn ensure_attachments(project_dir: &Path) -> io::Result<PathBuf> {
-    let extras = project_dir.join(EXTRAS_DIR);
-    let dir = extras.join(ATTACHMENTS_GROUP);
+/// 첨부파일 그룹(`attachments_dir`)이 없으면 메타(아이콘·표시 이름)와 함께 만든다(멱등).
+fn ensure_attachments(base_dir: &Path) -> io::Result<PathBuf> {
+    let dir = attachments_dir(base_dir);
     let files = GroupKind::Files.key();
     if dir.is_dir() {
         // 파일 그룹 표시가 없는 옛 폴더도 파일 그룹으로 맞춘다.
@@ -184,6 +196,11 @@ fn ensure_attachments(project_dir: &Path) -> io::Result<PathBuf> {
     std::fs::create_dir_all(&dir)?;
     write_group_meta_if_absent(&dir, Some("paperclip"), Some("첨부파일"))?;
     write_meta_values(&dir, [("kind", Some(toml::Value::String(files.into())))])?;
+    // 메모 섹션 폴더는 그룹 순서를 두지 않는다(이름순).
+    if is_notes_dir(base_dir) {
+        return Ok(dir);
+    }
+    let extras = base_dir.join(EXTRAS_DIR);
     let mut order = group_order(&extras)?;
     order.retain(|name| *name != file_name(&dir));
     order.push(file_name(&dir));
@@ -316,6 +333,31 @@ mod tests {
         let name = relative.strip_prefix("Extras/Attachments/").unwrap();
         assert!(name.ends_with(".png"), "{relative}");
         assert_eq!(std::fs::read(dir.join(&relative)).unwrap(), b"png");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn note_attachments_go_to_shared_notes_group() {
+        let root = temp_dir("note-attachments");
+        initialize(&root).unwrap();
+        let notes = root.join(SectionKind::Notes.dir());
+        let source = root.join("사진.JPG");
+        std::fs::write(&source, "jpg").unwrap();
+
+        let relative = add_attachment(&notes, &source).unwrap();
+        let name = relative.strip_prefix("Attachments/").unwrap();
+        assert!(name.ends_with(".jpg"), "{relative}");
+        assert_eq!(std::fs::read(notes.join(&relative)).unwrap(), b"jpg");
+        let bytes = attach_bytes(&notes, b"png", "png").unwrap();
+        assert!(bytes.starts_with("Attachments/"), "{bytes}");
+
+        // 메모 섹션에는 파일 그룹으로 보인다.
+        let library = crate::library::scan(&root).unwrap();
+        let group = library.find_group(&notes.join(ATTACHMENTS_GROUP)).unwrap();
+        assert_eq!(group.kind, GroupKind::Files);
+        assert_eq!(group.name, "첨부파일");
+        assert_eq!(group.files.len(), 2);
 
         std::fs::remove_dir_all(&root).ok();
     }
