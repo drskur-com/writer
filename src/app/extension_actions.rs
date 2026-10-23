@@ -73,7 +73,7 @@ impl WriterApp {
         let missing = missing_grants(&root, extension, &actions);
         if missing.is_empty() {
             for action in actions {
-                self.run_extension_action(action, window, cx);
+                self.run_extension_action(extension, action, window, cx);
             }
             return;
         }
@@ -120,7 +120,7 @@ impl WriterApp {
                             app.notify(t!("extensions.consent_save_failed", err = err), window, cx);
                         }
                         for action in actions {
-                            app.run_extension_action(action, window, cx);
+                            app.run_extension_action(&extension, action, window, cx);
                         }
                     })
                     .ok();
@@ -131,11 +131,13 @@ impl WriterApp {
 
     fn run_extension_action(
         &mut self,
+        extension_name: &str,
         action: Action,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match action {
+            Action::Play(args) => self.play_extension(extension_name, args, cx),
             // 블록 인자는 에디터 블록이 이미 썼다.
             Action::Set { .. } => {}
             Action::Command { extension, command } => {

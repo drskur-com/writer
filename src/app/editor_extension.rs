@@ -727,6 +727,37 @@ impl ExtensionBlocks {
                 on_changes,
             )
         };
+        // `play`가 있는 확장은 캔버스 오른쪽 위에 ▶(창에서 실행)를 둔다(ADR-0038).
+        let plays = matches!(&*self.host.get(&block.block.name), Ok(worker) if worker.info.plays);
+        let play_button = plays.then(|| {
+            let (app, name, args) = (app.clone(), block.block.name.clone(), block.args.clone());
+            div()
+                .id(("extension-play", block.block.rows.start))
+                .absolute()
+                .top(px(4.))
+                .right(px(4.))
+                .size(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(pal.background.opacity(0.85))
+                .border_1()
+                .border_color(pal.border)
+                .text_xs()
+                .cursor_pointer()
+                .hover(move |style| style.bg(pal.hover))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    let (app, name, args) = (app.clone(), name.clone(), args.clone());
+                    window.defer(cx, move |_, cx| {
+                        app.update(cx, |app, cx| app.play_extension(&name, args, cx))
+                            .ok();
+                    });
+                })
+                .child("▶")
+        });
         let (app, first_row) = (app.clone(), block.block.rows.start);
         Some(
             div()
@@ -737,6 +768,7 @@ impl ExtensionBlocks {
                 .child(
                     div()
                         .id(("extension-canvas", first_row))
+                        .relative()
                         .w(width)
                         .h(height)
                         // 영역을 누른 것은 안쪽(`interactive`)이 먼저 받아 여기까지 오지 않는다.
@@ -753,7 +785,8 @@ impl ExtensionBlocks {
                                 });
                             }
                         })
-                        .child(canvas),
+                        .child(canvas)
+                        .children(play_button),
                 )
                 .into_any_element(),
         )

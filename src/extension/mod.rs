@@ -34,7 +34,7 @@ pub use canvas::{
     Align, Color, FillRule, LineCap, LineJoin, Paint, Region, Segment, Shape, StrokeStyle, Theme,
     region_at,
 };
-pub use worker::{Info, Worker};
+pub use worker::{Info, PlayEvent, PlayWorker, Worker};
 
 /// 선분 목록의 lyon 경로(화면 테셀레이션에 쓴다).
 pub fn lyon_path(segments: &[Segment]) -> lyon::path::Path {
@@ -677,6 +677,8 @@ pub enum Action {
     Open(String),
     /// 앱 메뉴 동작([`MENU_ACTIONS`]).
     Menu(String),
+    /// 이 확장의 `play`를 창에서 실행한다(인자는 `play.load(args)`로, ADR-0038).
+    Play(Vec<(String, String)>),
 }
 
 /// 명령을 가리키는 번호(0부터) 또는 제목.
@@ -697,6 +699,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "editor.replaceSelection",
     "open",
     "menu",
+    "play",
 ];
 
 /// 한 번 누를 때 돌려줄 수 있는 동작 수.
@@ -711,6 +714,7 @@ impl Action {
             Action::ReplaceSelection(_) => "editor.replaceSelection",
             Action::Open(_) => "open",
             Action::Menu(_) => "menu",
+            Action::Play(_) => "play",
         }
     }
 
@@ -745,6 +749,7 @@ impl Action {
             Action::ReplaceSelection(text) => format!("editor.replaceSelection {text:?}"),
             Action::Open(sheet) => format!("open {sheet}"),
             Action::Menu(menu) => format!("menu {menu}"),
+            Action::Play(args) => format!("play ({})", pairs(args)),
         }
     }
 }
@@ -792,6 +797,8 @@ pub struct Extension {
     pub clicks: bool,
     /// 인라인 확장으로 글을 보이는 `value(args, ctx)`가 있는지(ADR-0036).
     pub values: bool,
+    /// 창에서 실행하는 `play` 표가 있는지(ADR-0038).
+    pub plays: bool,
     /// 책 미리보기·내보내기에 넣는지(반환 표의 `export`, 기본 `true`). 블록의 `export:`가 이긴다.
     pub export: bool,
     /// 앞머리 `actions:`에 적은 동작. `click`은 이 동작만 돌려줄 수 있다.
@@ -870,6 +877,7 @@ impl Extension {
             draws: self.draws,
             clicks: self.clicks,
             values: self.values,
+            plays: self.plays,
             commands: self.commands.clone(),
         }
     }
@@ -917,6 +925,23 @@ impl Extension {
             ));
         };
         let draws = matches!(module.get::<Value>("draw"), Ok(Value::Function(_)));
+        let plays = match module.get::<Value>("play").map_err(message)? {
+            Value::Nil => false,
+            Value::Table(play) => {
+                if !matches!(play.get::<Value>("draw"), Ok(Value::Function(_))) {
+                    return Err(
+                        "play needs a draw function: play = { draw = function(g) ... end }".into(),
+                    );
+                }
+                true
+            }
+            other => {
+                return Err(format!(
+                    "play must be a table of functions (load, update, draw, keypressed, ...), got {}",
+                    other.type_name()
+                ));
+            }
+        };
         let values = match module.get::<Value>("value").map_err(message)? {
             Value::Nil => false,
             Value::Function(_) => true,
@@ -939,8 +964,8 @@ impl Extension {
             }
         };
         let commands = command_titles(&module)?;
-        if !draws && !values && commands.is_empty() {
-            return Err("the returned table has none of draw, value, or commands".into());
+        if !draws && !values && !plays && commands.is_empty() {
+            return Err("the returned table has none of draw, value, play, or commands".into());
         }
         let (size, size_fn) = match module.get::<Value>("size").map_err(message)? {
             Value::Function(size_fn) => (None, Some(size_fn)),
@@ -995,6 +1020,7 @@ impl Extension {
             draws,
             clicks,
             values,
+            plays,
             export,
             actions: parse_meta(name, source)
                 .map(|meta| meta.actions)
@@ -1164,6 +1190,53 @@ impl Extension {
         }
     }
 
+    /// 플레이 창의 캔버스 크기: `play.size`, 없으면 블록 크기(`size`).
+    pub fn play_size(&self, args: &[(String, String)]) -> Result<(f32, f32), String> {
+        let play: Table = self.module.get("play").map_err(message)?;
+        match play.get::<Value>("size").map_err(message)? {
+            Value::Nil => self.size_for(args),
+            value => canvas_size(value).map_err(|err| format!("play.size: {err}")),
+        }
+    }
+
+    /// 플레이 콜백 `name`을 부른다(없으면 아무것도 하지 않는다).
+    pub fn play_call(&self, name: &str, args: impl mlua::IntoLuaMulti) -> Result<(), String> {
+        let play: Table = self.module.get("play").map_err(message)?;
+        let Ok(Value::Function(function)) = play.get::<Value>(name) else {
+            return Ok(());
+        };
+        self.deadline.set(Instant::now() + DRAW_TIMEOUT);
+        function
+            .call::<()>(args)
+            .map_err(|err| format!("play.{name}: {}", message(err)))
+    }
+
+    /// 플레이를 시작한다: `play.load(args)`.
+    pub fn play_load(&self, args: &[(String, String)]) -> Result<(), String> {
+        let table = self.args_table(args).map_err(message)?;
+        self.play_call("load", table)
+    }
+
+    /// 플레이 화면 한 장: `play.draw(g)`. 그 사이의 상태는 확장(Lua)이 들고 있다.
+    pub fn play_draw(&self, size: (f32, f32), theme: &Theme) -> Result<Vec<Shape>, String> {
+        self.recorder.borrow_mut().reset(
+            size.0,
+            size.1,
+            theme.foreground,
+            canvas::ANIMATED_SHAPE_LIMIT,
+        );
+        self.g
+            .raw_set(
+                "theme",
+                canvas::theme_table(&self.lua, theme).map_err(message)?,
+            )
+            .map_err(message)?;
+        self.play_call("draw", self.g.clone())?;
+        let mut recorder = self.recorder.borrow_mut();
+        recorder.regions.clear();
+        Ok(std::mem::take(&mut recorder.shapes))
+    }
+
     /// 블록 인자 `args`일 때의 캔버스 크기.
     pub fn size_for(&self, args: &[(String, String)]) -> Result<(f32, f32), String> {
         let Some(size_fn) = &self.size_fn else {
@@ -1313,6 +1386,14 @@ fn parse_action(entry: &Table) -> Result<Action, String> {
             }
             Ok(Action::Menu(menu))
         }
+        "play" => match entry.raw_get::<Value>("args").unwrap_or(Value::Nil) {
+            Value::Nil => Ok(Action::Play(Vec::new())),
+            Value::Table(args) => Ok(Action::Play(arg_changes(&args)?)),
+            other => Err(format!(
+                "click: play args must be a table, got {}",
+                other.type_name()
+            )),
+        },
         other => Err(format!(
             "click: unknown action \"{other}\" (available: {})",
             ACTION_NAMES.join(", ")
@@ -1680,7 +1761,10 @@ return {
         let err = Extension::load("x", "return 1").unwrap_err();
         assert!(err.contains("must return a table"), "{err}");
         let err = Extension::load("x", "return {}").unwrap_err();
-        assert!(err.contains("none of draw, value, or commands"), "{err}");
+        assert!(
+            err.contains("none of draw, value, play, or commands"),
+            "{err}"
+        );
         let err = Extension::load("x", "return { draw = function(g) g.fooBar() end }")
             .unwrap()
             .draw(0.0, &[], &Theme::default())
@@ -2030,6 +2114,7 @@ return {
             include_str!("../../resources/skills/extension/references/examples/pick-chart.md"),
             include_str!("../../resources/skills/extension/references/examples/chart-remote.md"),
             include_str!("../../resources/skills/extension/references/examples/today.md"),
+            include_str!("../../resources/skills/extension/references/examples/dodge.md"),
         ]
         .concat();
         let sources: Vec<&str> = doc
@@ -2037,7 +2122,7 @@ return {
             .skip(1)
             .filter_map(|rest| rest.split("\n```").next())
             .collect();
-        assert_eq!(sources.len(), 10);
+        assert_eq!(sources.len(), 11);
         let theme = Theme::default();
         let args = [
             ("values".to_string(), "12, 30, 21, 8".to_string()),
@@ -2060,6 +2145,26 @@ return {
             }
             if extension.values {
                 assert!(extension.value(&meta.example, "a.md").unwrap().is_some());
+            }
+            // 플레이는 몇 초 동안 입력과 함께 돌려 본다.
+            if extension.plays {
+                let size = extension.play_size(&meta.example).unwrap();
+                extension.play_load(&meta.example).unwrap();
+                for (frame, key) in ["left", "right", "space", "", "", "left"]
+                    .iter()
+                    .cycle()
+                    .take(300)
+                    .enumerate()
+                {
+                    if frame % 7 == 0 && !key.is_empty() {
+                        extension.play_call("keypressed", key.to_string()).unwrap();
+                    }
+                    if frame % 11 == 0 && !key.is_empty() {
+                        extension.play_call("keyreleased", key.to_string()).unwrap();
+                    }
+                    extension.play_call("update", 1.0_f32 / 60.0).unwrap();
+                    extension.play_draw(size, &theme).unwrap();
+                }
             }
             // 누를 수 있으면 영역마다 눌러 보고, 돌려준 인자로도 그린다. 바꾸는 인자는 앞머리에 있다.
             if extension.clicks {

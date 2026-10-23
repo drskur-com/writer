@@ -29,6 +29,8 @@ pub struct Info {
     pub clicks: bool,
     /// 인라인 확장으로 글을 보인다(`value`).
     pub values: bool,
+    /// 창에서 실행한다(`play`).
+    pub plays: bool,
     pub commands: Vec<String>,
 }
 
@@ -279,6 +281,112 @@ impl Worker {
     }
 }
 
+/// 플레이 창의 입력(LÖVE 콜백 이름을 따른다, ADR-0038). 좌표는 캔버스 좌표다.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlayEvent {
+    KeyPressed(String),
+    KeyReleased(String),
+    MousePressed { x: f32, y: f32, button: u8 },
+    MouseReleased { x: f32, y: f32, button: u8 },
+    MouseMoved { x: f32, y: f32 },
+}
+
+struct PlayFrame {
+    dt: f32,
+    events: Vec<PlayEvent>,
+    theme: Theme,
+}
+
+/// 창에서 실행하는 확장(ADR-0038): 블록과 따로 Lua 상태를 하나 들고 있는 작업 스레드. UI는 한 프레임마다 그 사이의
+/// 입력과 지난 시간을 보내고, 확장은 입력 콜백 → `update(dt)` → `draw(g)` 순으로 돌아 모양을 돌려준다. 버리면(창을
+/// 닫으면) 스레드가 끝난다.
+pub struct PlayWorker {
+    /// 캔버스 크기.
+    pub size: (f32, f32),
+    frames: Sender<PlayFrame>,
+    replies: Receiver<Result<Vec<super::Shape>, String>>,
+}
+
+impl PlayWorker {
+    /// `source`를 읽고 `play.load(args)`를 부른다. 끝날 때까지 기다린다.
+    pub fn spawn(name: &str, source: String, args: Vec<(String, String)>) -> Result<Self, String> {
+        let (frame_tx, frame_rx) = channel::<PlayFrame>();
+        let (reply_tx, reply_rx) = channel::<Result<Vec<super::Shape>, String>>();
+        let (ready_tx, ready_rx) = channel::<Result<(f32, f32), String>>();
+        let thread_name = name.to_string();
+        std::thread::Builder::new()
+            .name(format!("play-{name}"))
+            .spawn(move || {
+                let started = Extension::load(&thread_name, &source).and_then(|extension| {
+                    if !extension.plays {
+                        return Err(format!("{thread_name}.lua has no play table"));
+                    }
+                    let size = extension.play_size(&args)?;
+                    extension.play_load(&args)?;
+                    Ok((extension, size))
+                });
+                let (extension, size) = match started {
+                    Ok(started) => started,
+                    Err(err) => {
+                        ready_tx.send(Err(err)).ok();
+                        return;
+                    }
+                };
+                if ready_tx.send(Ok(size)).is_err() {
+                    return;
+                }
+                while let Ok(frame) = frame_rx.recv() {
+                    let result = (|| {
+                        for event in frame.events {
+                            match event {
+                                PlayEvent::KeyPressed(key) => {
+                                    extension.play_call("keypressed", key)?
+                                }
+                                PlayEvent::KeyReleased(key) => {
+                                    extension.play_call("keyreleased", key)?
+                                }
+                                PlayEvent::MousePressed { x, y, button } => {
+                                    extension.play_call("mousepressed", (x, y, button))?
+                                }
+                                PlayEvent::MouseReleased { x, y, button } => {
+                                    extension.play_call("mousereleased", (x, y, button))?
+                                }
+                                PlayEvent::MouseMoved { x, y } => {
+                                    extension.play_call("mousemoved", (x, y))?
+                                }
+                            }
+                        }
+                        extension.play_call("update", frame.dt)?;
+                        extension.play_draw(size, &frame.theme)
+                    })();
+                    let failed = result.is_err();
+                    if reply_tx.send(result).is_err() || failed {
+                        break;
+                    }
+                }
+            })
+            .map_err(|err| format!("{name}.lua: could not start: {err}"))?;
+        let size = ready_rx
+            .recv_timeout(LOAD_WAIT)
+            .map_err(|_| format!("{name}.lua: took too long to start"))??;
+        Ok(Self {
+            size,
+            frames: frame_tx,
+            replies: reply_rx,
+        })
+    }
+
+    /// 다음 프레임을 요청한다. 답은 [`Self::take`]로 가져간다.
+    pub fn frame(&self, dt: f32, events: Vec<PlayEvent>, theme: Theme) {
+        self.frames.send(PlayFrame { dt, events, theme }).ok();
+    }
+
+    /// 온 프레임이 있으면 가장 새 것을 가져간다.
+    pub fn take(&self) -> Option<Result<Vec<super::Shape>, String>> {
+        self.replies.try_iter().last()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +439,42 @@ mod tests {
                 ("on".into(), "false".into())
             ])
         );
+    }
+
+    #[test]
+    fn plays_with_state_and_input() {
+        let worker = PlayWorker::spawn(
+            "counter",
+            "local n = 0 \
+             return { draw = function() end, play = { size = { 30, 10 }, \
+               load = function(args) n = args.start or 0 end, \
+               keypressed = function(key) if key == 'space' then n = n + 10 end end, \
+               update = function(dt) n = n + 1 end, \
+               draw = function(g) for i = 1, n do g.rectangle('fill', i, 0, 1, 1) end end } }"
+                .into(),
+            vec![("start".into(), "2".into())],
+        )
+        .unwrap();
+        assert_eq!(worker.size, (30.0, 10.0));
+        let next = |events: Vec<PlayEvent>| {
+            worker.frame(0.016, events, Theme::default());
+            loop {
+                if let Some(shapes) = worker.take() {
+                    return shapes.unwrap().len();
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        assert_eq!(next(Vec::new()), 3);
+        assert_eq!(next(vec![PlayEvent::KeyPressed("space".into())]), 14);
+        let err = PlayWorker::spawn(
+            "none",
+            "return { draw = function() end }".into(),
+            Vec::new(),
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("no play table"), "{err}");
     }
 
     #[test]

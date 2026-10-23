@@ -13,6 +13,7 @@ An extension is one Lua (Luau) file, `Extensions/<name>.lua`, that returns a tab
 | Interactive drawing (hover, buttons, clicking to change the block) | `draw(g, t, args, ui)`, `g.region`, `click(id, args)` | `references/draw.md`, then `references/interactive.md` |
 | Buttons that change other blocks or run app actions (insert text, run a command, open a sheet) | `click` returning `actions` | also `references/actions.md` |
 | Command in the Extensions menu | `commands` | `references/commands.md` |
+| Game or anything with running state, keyboard, or dragging, in its own window | `play = { load, update, draw, keypressed, … }` | `references/draw.md`, then `references/play.md` |
 | Inline text or a small picture inside a paragraph (`{{today}}`) | `value(args, ctx)`, or `draw` inline | `references/inline.md` |
 
 Read only the references for the kinds you are writing; this file has what they all share. Paths are relative to this skill's folder.
@@ -40,12 +41,13 @@ Answer in the user's language. Write code, comments, and file names in English u
 | `animated` | boolean | `true`: redraw while the block is visible, 30 times a second. Default `false`: draw once at `t = 0`. |
 | `period` | number | Seconds after which an animation repeats exactly (0–10). The app keeps the frames of one period and stops calling `draw` after the first loop, so set it for every looping animation. |
 | `draw` | `function(g, t, args, ui)` | Draws the block. `ui` is the mouse state (`references/interactive.md`). |
+| `play` | table of functions | Runs in its own window with state and input (`references/play.md`). |
 | `value` | `function(args, ctx)` | Text shown in place of an inline call `{{name ...}}` (`references/inline.md`). |
 | `click` | `function(id, args)` | Called when a region is clicked; returns block arguments to change. Needs `draw`. |
 | `export` | boolean | Default for the book preview and exports. Default `true`. Set `false` for things that make no sense on paper (games, buttons); a block's `export:` overrides it. |
 | `commands` | list of `{ title = string, run = function(ctx) }` | Items in the Extensions menu, in this order. |
 
-The table needs at least one of `draw`, `value`, or `commands`. Other fields are ignored. Code outside the returned functions (helpers, constants) runs once at load; keep it free of side effects. The canvas `g` is also a global there, so build paths and gradients once at the top of the file (`local LEAF = g.newPath(...)`) and reuse them in every `draw`; drawing at load time does nothing.
+The table needs at least one of `draw`, `value`, `play`, or `commands`. Other fields are ignored. Code outside the returned functions (helpers, constants) runs once at load; keep it free of side effects. The canvas `g` is also a global there, so build paths and gradients once at the top of the file (`local LEAF = g.newPath(...)`) and reuse them in every `draw`; drawing at load time does nothing.
 
 ## The header
 
@@ -118,7 +120,7 @@ local first3 = s:sub(1, (utf8.offset(s, 4) or #s + 1) - 1)   -- first 3 characte
 ## Shared rules
 
 - **Arguments.** Every argument needs a default (`local power = args.power or 1`). Numbers, `true`, and `false` arrive as numbers and booleans; everything else as strings. Split lists with `string.split(args.values or "", ",")` and convert each item with `tonumber`.
-- **Limits.** Each draw call has 0.1 s (an animation frame at most 2,000 shapes), loading the file 0.1 s, and each command 2 s; the script has no files, network, `io`, `os.execute`, or `require`. If the user asks for something the API cannot do (images, dragging or typing into a drawing, reading other files, network, realistic 3D with textures, soft shadows or blur, text along a path, or smooth 3D shading), say so and offer the closest thing it can do.
+- **Limits.** Each draw call has 0.1 s (an animation frame at most 2,000 shapes), loading the file 0.1 s, and each command 2 s; the script has no files, network, `io`, `os.execute`, or `require`. If the user asks for something the API cannot do (images, reading other files, network, realistic 3D with textures, soft shadows or blur, text along a path, or smooth 3D shading), say so and offer the closest thing it can do.
 
 ## Fixing an extension
 

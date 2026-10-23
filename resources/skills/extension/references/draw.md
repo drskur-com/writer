@@ -142,7 +142,7 @@ Gradient coordinates follow the transform at the time you draw, like a shape's. 
 
 ## Not available
 
-Anything else in LÖVE: images, canvases, shaders, GPU meshes, textures, per-pixel lighting, fonts from files, `love.update`/`love.draw` callbacks, keyboard input, dragging, sound. (Hover and clicking on regions are available: `interactive.md`.) Also: blend modes, blur and soft shadows (layer a few translucent copies, or `p:offset` with fading colors), text along a path, clipping text to a shape. Calling a function that does not exist fails with a list of the available ones.
+Anything else in LÖVE: images, canvases, shaders, GPU meshes, textures, per-pixel lighting, fonts from files, `love.update`/`love.draw` callbacks, keyboard input, dragging, sound in a block. (Hover and clicking on regions are available: `interactive.md`; a running game with keyboard and mouse runs in a window: `play.md`.) Also: blend modes, blur and soft shadows (layer a few translucent copies, or `p:offset` with fading colors), text along a path, clipping text to a shape. Calling a function that does not exist fails with a list of the available ones.
 
 ## Design rules
 

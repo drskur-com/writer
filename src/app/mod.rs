@@ -28,6 +28,7 @@ mod library_panel;
 mod manage_extensions;
 mod new_project;
 mod onboarding;
+mod play_window;
 mod project_panel;
 mod sheet_list;
 pub(crate) mod style;

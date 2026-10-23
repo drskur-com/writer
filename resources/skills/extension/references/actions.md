@@ -26,6 +26,7 @@ Returning a plain table (`{ page = 2 }`) still means "change these arguments of 
 | `editor.replaceSelection` | `text` | Replaces the selection with the text (inserts at the cursor if nothing is selected). | Yes, once |
 | `open` | `sheet` (path from the library root, for example `Notes/Ideas/plan.md`) | Opens that sheet. | No |
 | `menu` | `action`: `"preview"` or `"compile"` | Toggles the book preview, or opens the compile (export) dialog. | No |
+| `play` | `args` (optional) | Opens this extension's `play` in a window (`play.md`). | No |
 
 ## Declaring actions
 
