@@ -691,6 +691,7 @@ impl WriterApp {
                                 block.line,
                                 size(block.size.width, drawn),
                                 &block_editor,
+                                &image_app,
                                 window,
                                 cx,
                             ))

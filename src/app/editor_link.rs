@@ -5,6 +5,8 @@
 //! - 상대·절대 경로 → 시트 폴더 기준으로 찾아(이미지와 같은 규칙), 라이브러리의 시트면 앱에서 열고
 //!   그 밖의 파일은 시스템 기본 앱으로 연다
 //! - `#제목`(문서 안 이동)은 아직 없다
+//!
+//! 링크가 아니고 확장 블록 안이면 블록 편집 대화상자를 연다.
 
 use std::path::{Path, PathBuf};
 
@@ -18,7 +20,20 @@ use crate::{library, markdown};
 pub(super) fn install(state: &mut EditorState, app: WeakEntity<WriterApp>) {
     state.set_secondary_click(move |text, offset, window, cx| {
         let Some(url) = markdown::link_at(text, offset) else {
-            return false;
+            // 확장 블록(펼친 펜스 글)이면 블록 편집 대화상자를 연다(ADR-0033).
+            let row = text[..offset.min(text.len())].matches('\n').count();
+            if !crate::extension::blocks(text)
+                .iter()
+                .any(|block| block.rows.contains(&row))
+            {
+                return false;
+            }
+            let app = app.clone();
+            window.defer(cx, move |window, cx| {
+                app.update(cx, |app, cx| app.edit_extension_block(row, window, cx))
+                    .ok();
+            });
+            return true;
         };
         // 에디터를 고치는 중이라 시트 열기(에디터 교체)는 이 처리가 끝난 뒤에 한다.
         let app = app.clone();

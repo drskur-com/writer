@@ -134,6 +134,16 @@ impl Player {
         self.cache.clone()
     }
 
+    /// 그린 자리를 적어 둘 곳(마우스 위치를 캔버스 좌표로 바꾼다).
+    pub(super) fn bounds(&self) -> Rc<Cell<Option<Bounds<Pixels>>>> {
+        self.bounds.clone()
+    }
+
+    /// 마지막으로 받은 그림에 영역이 있는지.
+    pub(super) fn has_regions(&self) -> bool {
+        !self.regions().is_empty()
+    }
+
     /// 지금 그릴 프레임. 필요하면 작업 스레드에 다음 프레임을 요청하고, 다시 그릴 때를 예약한다.
     pub(super) fn frame(
         &self,
@@ -259,6 +269,9 @@ struct EditorBlock {
     player: Rc<Player>,
 }
 
+/// 누르기(`click`)가 돌려준 인자 변경을 쓰는 곳. 에디터 블록은 블록 본문에, 편집 대화상자는 인자 칸에 쓴다.
+pub(super) type OnChanges = Rc<dyn Fn(&[(String, String)], &mut Window, &mut App)>;
+
 /// 열린 시트의 확장 블록 목록. 줄 스타일·줄 블록의 측정·그리기에서 함께 쓴다.
 pub(super) struct ExtensionBlocks {
     host: Host,
@@ -353,11 +366,15 @@ impl ExtensionBlocks {
 
     /// 블록 닫는 줄 아래에 캔버스를 그린다. 블록이 아니면 `None`이다. 영역(`g.region`)이 있으면 마우스를
     /// 받는다: 올라가면 그 상태로 다시 그리고, 누르면 `click`이 돌려준 인자를 `editor`의 블록 본문에 쓴다.
+    ///
+    /// 캔버스를 누르면 커서를 옮기지 않는다(펜스가 펼쳐지지 않는다). 영역 밖을 두 번 누르거나 보조 키(⌘)와
+    /// 누르면 `app`의 블록 편집 대화상자를 연다.
     pub(super) fn render(
         &self,
         row: usize,
         size: Size<Pixels>,
         editor: &WeakEntity<EditorState>,
+        app: &WeakEntity<super::WriterApp>,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
@@ -403,15 +420,51 @@ impl ExtensionBlocks {
         let canvas = if block.player.regions().is_empty() {
             canvas.into_any_element()
         } else {
-            interactive(canvas, &block, loaded, canvas_size.0, editor.clone())
+            let (editor, rows) = (editor.clone(), block.block.rows.clone());
+            let on_changes: OnChanges = Rc::new(move |changes, window, cx| {
+                let rows = rows.clone();
+                editor
+                    .update(cx, |state, cx| write_args(state, rows, changes, window, cx))
+                    .ok();
+            });
+            interactive(
+                canvas,
+                ("extension-block", block.block.rows.start).into(),
+                block.player.clone(),
+                loaded,
+                block.args.clone(),
+                canvas_size.0,
+                on_changes,
+            )
         };
+        let (app, first_row) = (app.clone(), block.block.rows.start);
         Some(
             div()
                 .w(size.width)
                 .h(size.height)
                 .pt(px(PADDING_TOP))
                 .pl(left)
-                .child(div().w(width).h(height).child(canvas))
+                .child(
+                    div()
+                        .id(("extension-canvas", first_row))
+                        .w(width)
+                        .h(height)
+                        // 영역을 누른 것은 안쪽(`interactive`)이 먼저 받아 여기까지 오지 않는다.
+                        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            if event.click_count >= 2 || event.modifiers.secondary() {
+                                let app = app.clone();
+                                window.defer(cx, move |window, cx| {
+                                    app.update(cx, |app, cx| {
+                                        app.edit_extension_block(first_row, window, cx);
+                                    })
+                                    .ok();
+                                });
+                            }
+                        })
+                        .child(canvas),
+                )
                 .into_any_element(),
         )
     }
@@ -431,51 +484,50 @@ impl ExtensionBlocks {
     }
 }
 
-/// 영역이 있는 블록의 캔버스: 포인터가 영역에 오가면 그 상태로 다시 그리고, 영역을 눌렀다 떼면 `click`을
-/// 불러 돌려준 인자를 블록 본문에 쓴다. 영역 밖을 누르면 에디터가 받는다(커서가 블록으로 들어간다).
-fn interactive(
+/// 영역이 있는 캔버스(에디터 블록, 편집 대화상자의 미리보기): 포인터가 영역에 오가면 그 상태로 다시 그리고,
+/// 영역을 눌렀다 떼면 `click`을 불러 돌려준 인자를 `on_changes`로 넘긴다. 영역 밖을 누른 것은 바깥이 받는다.
+pub(super) fn interactive(
     canvas: Div,
-    block: &Rc<EditorBlock>,
+    id: ElementId,
+    player: Rc<Player>,
     loaded: Rc<Loaded>,
+    args: Vec<(String, String)>,
     canvas_width: f32,
-    editor: WeakEntity<EditorState>,
+    on_changes: OnChanges,
 ) -> AnyElement {
-    let hovering = block.player.ui.borrow().hover.is_some();
-    let (moved, left, pressed, released) =
-        (block.clone(), block.clone(), block.clone(), block.clone());
+    let hovering = player.ui.borrow().hover.is_some();
+    let (moved, left, pressed, released) = (player.clone(), player.clone(), player.clone(), player);
     canvas
-        .id(("extension-block", block.block.rows.start))
+        .id(id)
         .when(hovering, |this| this.cursor_pointer())
         .on_mouse_move(move |event, window, _| {
-            let player = &moved.player;
             let ui = Ui {
-                hover: player.region_at(event.position, canvas_width),
-                pressed: player.ui.borrow().pressed.clone(),
+                hover: moved.region_at(event.position, canvas_width),
+                pressed: moved.ui.borrow().pressed.clone(),
             };
-            if player.set_ui(ui) {
+            if moved.set_ui(ui) {
                 window.refresh();
             }
         })
         .on_hover(move |hovered, window, _| {
-            if !hovered && left.player.set_ui(Ui::default()) {
+            if !hovered && left.set_ui(Ui::default()) {
                 window.refresh();
             }
         })
         .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-            let player = &pressed.player;
-            let Some(region) = player.region_at(event.position, canvas_width) else {
+            let Some(region) = pressed.region_at(event.position, canvas_width) else {
                 return;
             };
             window.prevent_default();
             cx.stop_propagation();
-            player.set_ui(Ui {
+            pressed.set_ui(Ui {
                 hover: Some(region.clone()),
                 pressed: Some(region),
             });
             window.refresh();
         })
         .on_mouse_up(MouseButton::Left, move |event, window, cx| {
-            let player = &released.player;
+            let player = &released;
             let Some(region) = player.ui.borrow().pressed.clone() else {
                 return;
             };
@@ -493,15 +545,8 @@ fn interactive(
             let Ok(worker) = &*loaded else {
                 return;
             };
-            match worker.click(&region, &released.args) {
-                Ok(changes) if !changes.is_empty() => {
-                    let rows = released.block.rows.clone();
-                    editor
-                        .update(cx, |state, cx| {
-                            write_args(state, rows, &changes, window, cx);
-                        })
-                        .ok();
-                }
+            match worker.click(&region, &args) {
+                Ok(changes) if !changes.is_empty() => on_changes(&changes, window, cx),
                 Ok(_) => {}
                 Err(err) => {
                     *player.click_error.borrow_mut() = Some((loaded.clone(), err));
@@ -509,6 +554,21 @@ fn interactive(
             }
         })
         .into_any_element()
+}
+
+/// 줄마다 시작 바이트(첫 줄은 0). 줄 번호를 바이트 위치로 바꾸는 데 쓴다.
+pub(super) fn line_starts(text: &str) -> Vec<usize> {
+    std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(ix, _)| ix + 1))
+        .collect()
+}
+
+/// 확장 블록(`rows`, 펜스 포함)의 바이트 범위. 닫는 줄 끝의 줄바꿈은 넣지 않는다.
+pub(super) fn block_range(text: &str, rows: &Range<usize>) -> Option<Range<usize>> {
+    let starts = line_starts(text);
+    let start = *starts.get(rows.start)?;
+    let end = starts.get(rows.end).map_or(text.len(), |next| next - 1);
+    (start <= end).then_some(start..end)
 }
 
 /// 블록(`rows`, 펜스 포함) 본문에 인자 변경을 쓴다. 되돌리기 한 번으로 돌아가고, 커서는 그대로 둔다.
@@ -520,9 +580,7 @@ fn write_args(
     cx: &mut Context<EditorState>,
 ) {
     let text = state.value();
-    let starts: Vec<usize> = std::iter::once(0)
-        .chain(text.match_indices('\n').map(|(ix, _)| ix + 1))
-        .collect();
+    let starts = line_starts(&text);
     // 본문: 여는 줄 다음 줄부터 닫는 줄 앞까지.
     let (Some(&start), Some(&end)) = (starts.get(rows.start + 1), starts.get(rows.end - 1)) else {
         return;
@@ -612,4 +670,23 @@ fn error_box(name: &str, err: &str, size: Size<Pixels>, pal: Palette) -> AnyElem
                 .child(t!("extensions.block_error", name = name, err = err)),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{block_range, line_starts};
+    use crate::extension;
+
+    #[test]
+    fn block_range_covers_the_fence_without_the_last_newline() {
+        let text = "앞\n```ext dot\nr: 5\n```\n뒤";
+        let block = &extension::blocks(text)[0];
+        let range = block_range(text, &block.rows).unwrap();
+        assert_eq!(&text[range], "```ext dot\nr: 5\n```");
+        // 문서 끝의 블록.
+        let text = "```ext dot\n```";
+        let block = &extension::blocks(text)[0];
+        assert_eq!(block_range(text, &block.rows), Some(0..text.len()));
+        assert_eq!(line_starts("a\nbc\n"), [0, 2, 5]);
+    }
 }

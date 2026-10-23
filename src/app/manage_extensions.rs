@@ -69,7 +69,7 @@ struct ExtensionManager {
     items: Vec<Item>,
     selected: usize,
     /// 미리보기 캔버스. 확장을 고를 때마다 처음부터 다시 그린다.
-    player: Player,
+    player: std::rc::Rc<Player>,
     ticker: Ticker,
     /// 확장 이름 → 쓰는 시트 수. 세는 동안은 `None`.
     usage: Option<HashMap<String, usize>>,
@@ -100,7 +100,7 @@ impl ExtensionManager {
             host: Host::new(root),
             items: Vec::new(),
             selected: 0,
-            player: Player::new(),
+            player: std::rc::Rc::new(Player::new()),
             ticker: Ticker::default(),
             usage: None,
             _count: count,
@@ -125,7 +125,7 @@ impl ExtensionManager {
 
     fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.selected = ix;
-        self.player = Player::new();
+        self.player = std::rc::Rc::new(Player::new());
         cx.notify();
     }
 
@@ -285,6 +285,7 @@ impl Render for ExtensionManager {
                 &name,
                 &item.meta.example,
                 (PREVIEW_WIDTH, PREVIEW_HEIGHT),
+                None,
                 pal,
                 window,
                 cx,

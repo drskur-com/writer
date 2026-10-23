@@ -46,6 +46,7 @@ actions!(
         InsertFootnote,
         InsertTable,
         InsertExtension,
+        EditExtensionBlock,
         InsertSpecialChar,
         ManageExtensions,
         ToggleLineGroup,
