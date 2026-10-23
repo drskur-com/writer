@@ -3,6 +3,9 @@
 //! 새 대화는 설정의 Bedrock 프로필로 실제 모델과 주고받고, 답을 받는 대로 조금씩 그린다
 //! ([`crate::agent`]). 대화 상태와 프롬프트는 에이전트가 맡고, 여기서는 그리기만 한다. 기록의 지난 대화는 아직 저장하지 않아 샘플을 보여 준다.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use futures::StreamExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
@@ -25,6 +28,8 @@ pub(super) struct LiveChat {
     reply: Option<Task<()>>,
     /// 답이 자랄 때 맨 아래로 따라가는 스크롤.
     scroll: ScrollHandle,
+    /// 승인 카드마다 diff 칸의 스크롤. 넘칠 때만 휠을 가져가 대화가 같이 움직이지 않게 한다.
+    change_scrolls: RefCell<HashMap<u64, ScrollHandle>>,
     /// 입력창 아래의 모델 고르기. 리전에서 쓸 수 있는 모델만 담는다.
     model_picker: Entity<SelectState<SearchableVec<ModelItem>>>,
     models: ModelLookup,
@@ -112,6 +117,7 @@ impl LiveChat {
             conversation: agent::Conversation::default(),
             reply: None,
             scroll: ScrollHandle::new(),
+            change_scrolls: RefCell::default(),
             model_picker,
             models: ModelLookup::Idle,
             models_for: None,
@@ -947,6 +953,7 @@ impl WriterApp {
         let chat = &mut self.assistant_chat;
         chat.reply = None;
         chat.conversation.clear();
+        chat.change_scrolls.get_mut().clear();
         cx.notify();
     }
 
@@ -1003,7 +1010,14 @@ impl WriterApp {
                     .child(SharedString::from(summary.clone()))
                     .into_any_element(),
                 agent::Activity::Change(card) => {
-                    change_card(card, pending == Some(card.id), cx, pal)
+                    let scroll = self
+                        .assistant_chat
+                        .change_scrolls
+                        .borrow_mut()
+                        .entry(card.id)
+                        .or_default()
+                        .clone();
+                    change_card(card, pending == Some(card.id), &scroll, cx, pal)
                 }
             })
             .collect();
@@ -1015,6 +1029,7 @@ impl WriterApp {
 fn change_card(
     card: &agent::ChangeCard,
     waiting: bool,
+    scroll: &ScrollHandle,
     cx: &mut Context<WriterApp>,
     pal: Palette,
 ) -> AnyElement {
@@ -1066,8 +1081,18 @@ fn change_card(
         .child(
             div()
                 .id(("change-lines", id))
+                .track_scroll(scroll)
                 .max_h(px(260.0))
                 .overflow_y_scroll()
+                // 바깥 대화 목록도 같은 휠을 받으므로, diff가 넘쳐 스스로 스크롤할 때는 넘기지 않는다.
+                .on_scroll_wheel({
+                    let scroll = scroll.clone();
+                    move |_, _, cx| {
+                        if scroll.max_offset().y > px(0.0) {
+                            cx.stop_propagation();
+                        }
+                    }
+                })
                 .py_1()
                 .flex()
                 .flex_col()
