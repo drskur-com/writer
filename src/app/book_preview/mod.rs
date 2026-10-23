@@ -58,6 +58,43 @@ pub(super) struct BookSource {
     pub cover: Option<PathBuf>,
     pub styles: library::Styles,
     pub chunks: Vec<Chunk>,
+    /// 원고의 확장 블록 그림(ADR-0026): (이름, 인자) → 그림 또는 오류.
+    pub drawings: Drawings,
+}
+
+/// 확장 블록 (이름, 인자)별 그림.
+pub(super) type Drawings =
+    HashMap<(String, Vec<(String, String)>), Result<crate::extension::Still, String>>;
+
+/// 원고의 확장 블록을 모두 그린다(같은 이름·인자는 한 번).
+fn drawings(root: &Path, chunks: &[Chunk]) -> Drawings {
+    fn walk(root: &Path, blocks: &[Block], out: &mut Drawings) {
+        for block in blocks {
+            match block {
+                Block::Extension { name, args, .. } => {
+                    out.entry((name.clone(), args.clone()))
+                        .or_insert_with(|| crate::extension::still(root, name, args));
+                }
+                Block::Quote(inner) => walk(root, inner, out),
+                Block::List { items, .. } => {
+                    for item in items {
+                        walk(root, &item.blocks, out);
+                    }
+                }
+                Block::Footnotes(notes) => {
+                    for (_, inner) in notes {
+                        walk(root, inner, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Drawings::new();
+    for chunk in chunks {
+        walk(root, &chunk.blocks, &mut out);
+    }
+    out
 }
 
 /// 시트 하나의 블록.
@@ -104,8 +141,9 @@ fn load_source(project_dir: &Path) -> io::Result<BookSource> {
                 blocks: markdown::manuscript_blocks(&text, preserve_line_breaks),
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
     Ok(BookSource {
+        drawings: drawings(root, &chunks),
         title: if book.title.trim().is_empty() {
             project.name.clone()
         } else {
@@ -137,8 +175,9 @@ fn load_selection(root: &Path, selected: &[PathBuf]) -> io::Result<BookSource> {
             glued: sheet.glued,
             blocks: markdown::manuscript_blocks(&sheet.content, preserve_line_breaks),
         })
-        .collect();
+        .collect::<Vec<_>>();
     Ok(BookSource {
+        drawings: drawings(root, &chunks),
         title: project.name,
         authors: Vec::new(),
         cover: None,

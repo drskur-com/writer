@@ -16,8 +16,9 @@
 //! 도구 설명과 결과(오류 포함)는 모델이 읽으므로 영어로 쓴다. 화면에 보이는 요약 줄(`summary`)만
 //! 사용자 언어다.
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rig_core::completion::ToolDefinition;
 use rig_core::message::ToolName;
@@ -52,10 +53,13 @@ pub struct Workspace {
     skills: Vec<Skill>,
     /// 확장 앞머리(ADR-0026). 시스템 프롬프트에 목록으로 넣는다.
     extensions: Vec<crate::extension::Meta>,
+    /// 확장 초안(ADR-0029): 이번 답에서 고친 확장 파일(경로 → 처음 내용과 지금 내용). 디스크에는 쓰지 않고,
+    /// 답이 끝나면 [`Workspace::take_drafts`]로 꺼내 확장마다 한 번 승인받는다.
+    drafts: Arc<Mutex<BTreeMap<String, PendingChange>>>,
 }
 
 /// 파일을 바꾸는 도구의 계획. 사용자가 승인하면 [`Workspace::commit`]으로 쓴다.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct PendingChange {
     /// 바꿀 파일(라이브러리 루트 기준). 새 시트면 그룹 폴더.
     pub path: String,
@@ -69,7 +73,7 @@ pub struct PendingChange {
     verb: &'static str,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Target {
     File(PathBuf),
     /// `dir`에 새 시트를 만든다. `group`은 루트 기준 그룹 경로.
@@ -108,6 +112,20 @@ pub struct ToolOutput {
     pub text: String,
     /// 화면에 보일 한 줄(예: `읽음 · Projects/소설/1장.md`). 실패해도 까닭은 넣지 않는다(모델용 영어다).
     pub summary: String,
+    /// 모델에 함께 보여 줄 그림. `run_extension`이 그린 결과다.
+    pub image: Option<Drawing>,
+}
+
+/// `run_extension`이 그린 그림과, 검토(ADR-0030)에 넘길 것.
+#[derive(Debug)]
+pub struct Drawing {
+    pub png: Vec<u8>,
+    /// 캔버스 크기(캔버스 좌표).
+    pub canvas: (f32, f32),
+    /// 격자에 넣은 프레임 수.
+    pub frames: usize,
+    /// 그린 소스. 그 뒤에 초안을 고쳤는지 알아보는 데 쓴다.
+    pub source: String,
 }
 
 impl Workspace {
@@ -120,6 +138,7 @@ impl Workspace {
             root,
             skills,
             extensions,
+            drafts: Arc::default(),
         }
     }
 
@@ -217,15 +236,28 @@ impl Workspace {
             ),
             (
                 RUN_EXTENSION,
-                "Test an extension (Extensions/<name>.lua). Without command, calls draw(g, t, args) once and reports \
-                 errors, the number of shapes, and the bounds of what was drawn compared with the canvas. With command, \
-                 runs that command (1-based index or title) with the given selection and returns its result. Nothing \
-                 in the library changes.",
+                "Test an extension (Extensions/<name>.lua). Without command, calls draw(g, t, args) and reports \
+                 errors, the number of shapes, and the bounds of what was drawn compared with the canvas, and attaches \
+                 a picture of the canvas so you can see the drawing. Pass times to see several animation frames in one \
+                 picture. With command, runs that command (1-based index or title) with the given selection and \
+                 returns its result. Nothing in the library changes.",
                 json!({
                     "type": "object",
                     "properties": {
                         "name": { "type": "string", "description": "Extension name (the file name without .lua)." },
                         "t": { "type": "number", "description": "Time in seconds for draw. Default 0." },
+                        "times": {
+                            "type": "array",
+                            "items": { "type": "number" },
+                            "maxItems": MAX_FRAMES,
+                            "description": "Instead of t: several times in seconds (at most 8), drawn as a grid of frames in one picture.",
+                        },
+                        "image": { "type": "boolean", "description": "Attach a picture of the drawing. Default true." },
+                        "goal": {
+                            "type": "string",
+                            "description": "What the drawing should look like, in concrete visual terms (subject, pose, composition, \
+                                            style, colors). An independent reviewer compares the picture with this and the user's request.",
+                        },
                         "args": {
                             "type": "object",
                             "description": "Block arguments for draw, as in the ```ext block's key: value lines.",
@@ -277,11 +309,14 @@ impl Workspace {
         if name == RUN_EXTENSION {
             let extension = arguments.get("name").and_then(Value::as_str).unwrap_or("");
             let path = format!("{}/{extension}.lua", crate::extension::EXTENSIONS_DIR);
-            return Planned::Done(output(
-                &path,
-                "assistant.tool.ran",
-                self.run_extension(arguments),
-            ));
+            let (result, image) = match self.run_extension(arguments) {
+                Ok((report, image)) => (Ok(report), image),
+                Err(err) => (Err(err), None),
+            };
+            return Planned::Done(ToolOutput {
+                image,
+                ..output(&path, "assistant.tool.ran", result)
+            });
         }
         if name == LOAD_SKILL {
             return Planned::Done(
@@ -314,8 +349,108 @@ impl Workspace {
             _ => Err(format!("Unknown tool: {name}")),
         };
         match change {
-            Ok(change) => Planned::Change(change),
+            Ok(change) => match draft_key(path) {
+                Some(key) if name != CREATE_SHEET => Planned::Done(self.save_draft(key, change)),
+                _ => Planned::Change(change),
+            },
             Err(err) => Planned::Done(output(path, "", Err(err))),
+        }
+    }
+
+    /// 확장 파일의 변경을 초안에 담는다. 처음 내용은 첫 변경 때의 것을 지킨다.
+    fn save_draft(&self, key: String, change: PendingChange) -> ToolOutput {
+        let Ok(mut drafts) = self.drafts.lock() else {
+            return output(&key, "", Err("The draft could not be saved.".into()));
+        };
+        let before = drafts
+            .get(&key)
+            .map_or_else(|| change.before.clone(), |draft| draft.before.clone());
+        let text = if before.as_ref() == Some(&change.after) {
+            drafts.remove(&key);
+            format!(
+                "{} The draft now matches the file, so there is nothing to approve.",
+                change.done
+            )
+        } else {
+            let done = format!(
+                "{} Saved as a draft: read_file and run_extension use it, the sheets do not yet. After your \
+                 reply the user reviews each extension's drafts once, as one change, so test and improve freely \
+                 without asking.",
+                change.done
+            );
+            drafts.insert(
+                key.clone(),
+                PendingChange {
+                    path: key.clone(),
+                    before,
+                    ..change
+                },
+            );
+            done
+        };
+        ToolOutput {
+            text,
+            summary: format!("{} · {key}", t!("assistant.tool.drafted")),
+            image: None,
+        }
+    }
+
+    /// 승인을 묻기 전에 다시 볼 확장 초안의 문제(ADR-0030). `reviews`는 확장 이름 → (마지막으로 검토한 소스, 점수).
+    /// 점수가 없으면(검토하지 못했으면) 통과로 본다.
+    pub fn draft_problems(
+        &self,
+        reviews: &std::collections::HashMap<String, (String, Option<u8>)>,
+    ) -> Vec<String> {
+        let Ok(drafts) = self.drafts.lock() else {
+            return Vec::new();
+        };
+        drafts
+            .iter()
+            .filter_map(|(key, draft)| {
+                let name = key.rsplit('/').next()?.strip_suffix(".lua")?;
+                let extension = match crate::extension::Extension::load(name, &draft.after) {
+                    Ok(extension) => extension,
+                    Err(err) => return Some(format!("{key} does not load: {err}")),
+                };
+                if !extension.draws {
+                    return None;
+                }
+                match reviews.get(name) {
+                    Some((source, _)) if *source != draft.after => Some(format!(
+                        "{key} changed after its last run_extension, so nobody has looked at the current picture."
+                    )),
+                    None => Some(format!(
+                        "{key} was never drawn with run_extension, so nobody has looked at the picture."
+                    )),
+                    Some((_, Some(score))) if *score < super::review::PASS_SCORE => Some(format!(
+                        "{key} scored {score}/10 in its last review (passing is {}).",
+                        super::review::PASS_SCORE
+                    )),
+                    Some(_) => None,
+                }
+            })
+            .collect()
+    }
+
+    /// 이번 답의 확장 초안을 꺼낸다(답이 끝날 때 승인받는다).
+    pub fn take_drafts(&self) -> Vec<PendingChange> {
+        self.drafts
+            .lock()
+            .map(|mut drafts| std::mem::take(&mut *drafts).into_values().collect())
+            .unwrap_or_default()
+    }
+
+    fn draft(&self, path: &str) -> Option<PendingChange> {
+        let key = draft_key(path)?;
+        self.drafts.lock().ok()?.get(&key).cloned()
+    }
+
+    /// 확장 소스: 초안이 있으면 초안, 없으면 파일.
+    fn extension_source(&self, name: &str) -> Result<String, String> {
+        let key = format!("{}/{name}.lua", crate::extension::EXTENSIONS_DIR);
+        match self.draft(&key) {
+            Some(draft) if crate::extension::valid_name(name) => Ok(draft.after),
+            _ => crate::extension::read_source(&self.root, name),
         }
     }
 
@@ -353,22 +488,29 @@ impl Workspace {
             Some(skill) => ToolOutput {
                 text: skills::instructions(skill),
                 summary: t!("assistant.tool.skill", name = name).into(),
+                image: None,
             },
             None => ToolOutput {
                 text: format!("Error: no such skill: {name}"),
                 summary: t!("assistant.tool.skill_failed", name = name).into(),
+                image: None,
             },
         }
     }
 
     /// 확장을 시험하고, 성공하면 앞머리에서 빠진 것을 덧붙인다(목록·Insert 대화상자가 앞머리를 쓴다).
-    fn run_extension(&self, arguments: &Map<String, Value>) -> Result<String, String> {
-        let report = self.try_extension(arguments)?;
+    fn run_extension(
+        &self,
+        arguments: &Map<String, Value>,
+    ) -> Result<(String, Option<Drawing>), String> {
+        let (report, image) = self.try_extension(arguments)?;
         let name = arguments.get("name").and_then(Value::as_str).unwrap_or("");
-        let draws = crate::extension::Extension::open(&self.root, name).is_ok_and(|ext| ext.draws);
-        let meta = std::fs::read_to_string(crate::extension::path(&self.root, name))
-            .ok()
-            .and_then(|source| crate::extension::parse_meta(name, &source));
+        let source = self.extension_source(name).ok();
+        let draws = source
+            .as_deref()
+            .and_then(|source| crate::extension::Extension::load(name, source).ok())
+            .is_some_and(|ext| ext.draws);
+        let meta = source.and_then(|source| crate::extension::parse_meta(name, &source));
         let mut notes = Vec::new();
         match &meta {
             None => notes.push(
@@ -414,17 +556,23 @@ impl Workspace {
                 }
             }
         }
-        Ok(if notes.is_empty() {
+        let report = if notes.is_empty() {
             report
         } else {
             format!("{report}\nNote: {}", notes.join(" "))
-        })
+        };
+        Ok((report, image))
     }
 
-    fn try_extension(&self, arguments: &Map<String, Value>) -> Result<String, String> {
-        use crate::extension::{CommandContext, Extension, Shape, Theme};
+    /// 확장을 실행한 보고와, 그렸으면 그 그림(PNG).
+    fn try_extension(
+        &self,
+        arguments: &Map<String, Value>,
+    ) -> Result<(String, Option<Drawing>), String> {
+        use crate::extension::{CommandContext, Extension, Theme};
         let name = arguments.get("name").and_then(Value::as_str).unwrap_or("");
-        let extension = Extension::open(&self.root, name)?;
+        let source = self.extension_source(name)?;
+        let extension = Extension::load(name, &source)?;
         let commands = if extension.commands.is_empty() {
             "none".to_string()
         } else {
@@ -452,12 +600,22 @@ impl Workspace {
                     .to_string(),
                 ..CommandContext::default()
             };
-            return Ok(match extension.run_command(index, &ctx)? {
+            let report = match extension.run_command(index, &ctx)? {
                 Some(text) => format!("The command returned: {text:?}"),
                 None => "The command returned nil (nothing is inserted).".into(),
-            });
+            };
+            return Ok((report, None));
         }
-        let t = arguments.get("t").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let times: Vec<f32> = match arguments.get("times").and_then(Value::as_array) {
+            Some(times) => times
+                .iter()
+                .map(|t| t.as_f64().map(|t| t as f32).ok_or("times must be numbers."))
+                .collect::<Result<_, _>>()?,
+            None => vec![arguments.get("t").and_then(Value::as_f64).unwrap_or(0.0) as f32],
+        };
+        if times.is_empty() || times.len() > MAX_FRAMES {
+            return Err(format!("times must hold 1 to {MAX_FRAMES} numbers."));
+        }
         let args: Vec<(String, String)> = arguments
             .get("args")
             .and_then(Value::as_object)
@@ -481,60 +639,51 @@ impl Workspace {
             extension.animated
         );
         if !extension.draws {
-            return Ok(format!("{header} No draw function."));
+            return Ok((format!("{header} No draw function."), None));
         }
-        let shapes = extension.draw(t, &args, &Theme::default())?;
-        let (mut fills, mut strokes, mut texts, mut gradients) = (0, 0, 0, 0);
-        let mut bounds: Option<[f32; 4]> = None;
-        let mut extend = |[x, y]: [f32; 2]| {
-            let b = bounds.get_or_insert([x, y, x, y]);
-            *b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
-        };
-        for shape in &shapes {
-            match shape {
-                Shape::Fill { path, paint, .. } | Shape::Stroke { path, paint, .. } => {
-                    if !matches!(paint, crate::extension::Paint::Solid(_)) {
-                        gradients += 1;
-                    }
-                    if matches!(shape, Shape::Fill { .. }) {
-                        fills += 1;
+        let theme = Theme::default();
+        let mut frames = Vec::with_capacity(times.len());
+        for &t in &times {
+            frames.push((t, extension.draw(t, &args, &theme)?));
+        }
+        let lines: Vec<String> = frames
+            .iter()
+            .map(|(t, shapes)| describe(*t, shapes, width, height))
+            .collect();
+        let mut report = format!("{header} {}", lines.join(" "));
+        let image = if arguments.get("image").and_then(Value::as_bool) == Some(false) {
+            None
+        } else {
+            let frames: Vec<_> = frames
+                .iter()
+                .map(|(t, shapes)| crate::extension::raster::Frame {
+                    label: format!("t = {t}"),
+                    shapes,
+                })
+                .collect();
+            match crate::extension::raster::render_png(&frames, width, height, theme.background) {
+                Ok(png) => {
+                    report.push_str(if frames.len() > 1 {
+                        " The attached image shows the frames in order, each labeled with its t, on the light theme. \
+                         Text uses a fallback font, so its width can differ slightly from the editor."
                     } else {
-                        strokes += 1;
-                    }
-                    for segment in path {
-                        use crate::extension::Segment;
-                        match *segment {
-                            Segment::Move(p) | Segment::Line(p) => extend(p),
-                            Segment::Cubic(a, b, p) => {
-                                extend(a);
-                                extend(b);
-                                extend(p);
-                            }
-                            Segment::Close => {}
-                        }
-                    }
+                        " The attached image shows the canvas on the light theme. Text uses a fallback font, so its \
+                         width can differ slightly from the editor."
+                    });
+                    Some(Drawing {
+                        png,
+                        canvas: (width, height),
+                        frames: frames.len(),
+                        source,
+                    })
                 }
-                Shape::Text { origin, .. } => {
-                    texts += 1;
-                    extend(*origin);
+                Err(err) => {
+                    report.push_str(&format!(" The picture could not be rendered: {err}"));
+                    None
                 }
-                Shape::Clip(_) | Shape::ClipPath(_) => {}
             }
-        }
-        let Some([x0, y0, x1, y1]) = bounds else {
-            return Ok(format!("{header} At t = {t}: drew nothing."));
         };
-        let outside = x0 < 0.0 || y0 < 0.0 || x1 > width || y1 > height;
-        Ok(format!(
-            "{header} At t = {t}: {} shapes ({fills} fills, {strokes} strokes, {texts} texts, {gradients} with gradients). \
-             Drawing bounds x {x0:.1}..{x1:.1}, y {y0:.1}..{y1:.1} (text counts its top-left corner only).{}",
-            fills + strokes + texts,
-            if outside {
-                " Part of the drawing is outside the canvas and will be cut off."
-            } else {
-                ""
-            }
-        ))
+        Ok((report, image))
     }
 
     fn list(&self, path: &str) -> Result<String, String> {
@@ -554,6 +703,17 @@ impl Workspace {
                 Some(if is_dir { format!("{name}/") } else { name })
             })
             .collect();
+        // 아직 파일이 없는 확장 초안도 보인다.
+        if relative_path(path).is_ok_and(|dir| dir == Path::new(crate::extension::EXTENSIONS_DIR))
+            && let Ok(drafts) = self.drafts.lock()
+        {
+            for key in drafts.keys() {
+                let name = key.rsplit('/').next().unwrap_or(key).to_string();
+                if !entries.contains(&name) {
+                    entries.push(name);
+                }
+            }
+        }
         entries.sort();
         Ok(if entries.is_empty() {
             "(empty)".into()
@@ -563,6 +723,9 @@ impl Workspace {
     }
 
     fn read(&self, path: &str) -> Result<String, String> {
+        if let Some(draft) = self.draft(path) {
+            return Ok(draft.after);
+        }
         let file = self.resolve_existing(path)?;
         let meta = std::fs::metadata(&file).map_err(|err| err.to_string())?;
         if !meta.is_file() {
@@ -712,8 +875,14 @@ impl Workspace {
     }
 
     fn plan_edit(&self, path: &str, edits: &[Edit]) -> Result<PendingChange, String> {
-        let file = self.resolve_existing(path)?;
-        let text = self.read(path)?;
+        let (file, text) = match self.draft(path) {
+            Some(PendingChange {
+                target: Target::File(file),
+                after,
+                ..
+            }) => (file, after),
+            _ => (self.resolve_existing(path)?, self.read(path)?),
+        };
         let edited = edit::apply(&text, edits)?;
         check_content(&file, &edited.text)?;
         let places: Vec<String> = edited
@@ -755,6 +924,19 @@ impl Workspace {
     }
 }
 
+/// 초안으로 고치는 확장 파일(`Extensions/<이름>.lua`)이면 그 경로(초안의 열쇠).
+fn draft_key(path: &str) -> Option<String> {
+    let relative = relative_path(path).ok()?;
+    let mut parts = relative.components().map(|part| part.as_os_str().to_str());
+    let (Some(Some(dir)), Some(Some(file)), None) = (parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let name = file.strip_suffix(".lua")?;
+    (dir == crate::extension::EXTENSIONS_DIR && crate::extension::valid_name(name))
+        .then(|| format!("{dir}/{file}"))
+}
+
 /// 화면과 모델에 보일 경로. 비면 루트.
 fn shown(path: &str) -> String {
     let path = path.trim().trim_matches('/');
@@ -766,16 +948,76 @@ fn shown(path: &str) -> String {
 }
 
 /// 도구 결과. `verb`는 화면 요약 줄 동사의 번역 키다. 실패해도 요약 줄에는 까닭을 넣지 않는다(모델용 영어다).
+/// `run_extension`이 한 번에 그려 보는 프레임 수의 상한(이미지 한 장에 격자로 넣는다).
+const MAX_FRAMES: usize = 8;
+
+/// 그린 결과 한 프레임의 요약: 모양 수와 범위, 캔버스를 벗어나는지.
+fn describe(t: f32, shapes: &[crate::extension::Shape], width: f32, height: f32) -> String {
+    use crate::extension::{Paint, Segment, Shape};
+    let (mut fills, mut strokes, mut texts, mut gradients) = (0, 0, 0, 0);
+    let mut bounds: Option<[f32; 4]> = None;
+    let mut extend = |[x, y]: [f32; 2]| {
+        let b = bounds.get_or_insert([x, y, x, y]);
+        *b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+    };
+    for shape in shapes {
+        match shape {
+            Shape::Fill { path, paint, .. } | Shape::Stroke { path, paint, .. } => {
+                if !matches!(paint, Paint::Solid(_)) {
+                    gradients += 1;
+                }
+                if matches!(shape, Shape::Fill { .. }) {
+                    fills += 1;
+                } else {
+                    strokes += 1;
+                }
+                for segment in path {
+                    match *segment {
+                        Segment::Move(p) | Segment::Line(p) => extend(p),
+                        Segment::Cubic(a, b, p) => {
+                            extend(a);
+                            extend(b);
+                            extend(p);
+                        }
+                        Segment::Close => {}
+                    }
+                }
+            }
+            Shape::Text { origin, .. } => {
+                texts += 1;
+                extend(*origin);
+            }
+            Shape::Clip(_) | Shape::ClipPath(_) => {}
+        }
+    }
+    let Some([x0, y0, x1, y1]) = bounds else {
+        return format!("At t = {t}: drew nothing.");
+    };
+    let outside = x0 < 0.0 || y0 < 0.0 || x1 > width || y1 > height;
+    format!(
+        "At t = {t}: {} shapes ({fills} fills, {strokes} strokes, {texts} texts, {gradients} with gradients). \
+         Drawing bounds x {x0:.1}..{x1:.1}, y {y0:.1}..{y1:.1} (text counts its top-left corner only).{}",
+        fills + strokes + texts,
+        if outside {
+            " Part of the drawing is outside the canvas and will be cut off."
+        } else {
+            ""
+        }
+    )
+}
+
 fn output(path: &str, verb: &str, result: Result<String, String>) -> ToolOutput {
     let path = shown(path);
     match result {
         Ok(text) => ToolOutput {
             text,
             summary: format!("{} · {path}", t!(verb)),
+            image: None,
         },
         Err(err) => ToolOutput {
             text: format!("Error: {err}"),
             summary: t!("assistant.tool.failed", path = path).into(),
+            image: None,
         },
     }
 }
@@ -1176,10 +1418,25 @@ mod tests {
         );
         assert!(out.text.contains("1 shapes (1 fills"), "{}", out.text);
         assert!(!out.text.contains("outside"), "{}", out.text);
+        assert!(
+            out.image
+                .as_ref()
+                .is_some_and(|drawing| drawing.png.starts_with(b"\x89PNG"))
+        );
+        // 여러 시간은 한 그림에 격자로 넣는다.
+        let out = run(json!({ "name": "dot", "times": [0, 1, 2], "args": { "r": 5 } }));
+        assert_eq!(out.text.matches("1 shapes").count(), 3, "{}", out.text);
+        assert!(out.image.is_some());
+        assert!(
+            run(json!({ "name": "dot", "args": { "r": 5 }, "image": false }))
+                .image
+                .is_none()
+        );
         let out = run(json!({ "name": "dot", "t": 100, "args": { "r": 5 } }));
         assert!(out.text.contains("outside the canvas"), "{}", out.text);
         let out = run(json!({ "name": "dot", "command": "Shout", "selection": "hi" }));
         assert_eq!(out.text, "The command returned: \"hi!\"");
+        assert!(out.image.is_none());
         let out = run(json!({ "name": "dot", "command": 2 }));
         assert!(
             out.text.starts_with("Error: No such command"),
@@ -1215,6 +1472,63 @@ mod tests {
             "{}",
             out.text
         );
+    }
+
+    #[test]
+    fn keeps_extension_changes_as_drafts_until_the_reply_ends() {
+        let (ws, root) = workspace();
+        std::fs::create_dir_all(root.join("Extensions")).unwrap();
+        let file = root.join("Extensions/dot.lua");
+        let source =
+            "return { size = { 10, 10 }, draw = function(g) g.circle('fill', 5, 5, 1) end }";
+        std::fs::write(&file, source).unwrap();
+        let call = |name: &str, arguments: Value| ws.plan(name, arguments.as_object().unwrap());
+        // 고치기는 승인 없이 초안에 담기고, 파일은 그대로다.
+        let edit = json!({ "path": "Extensions/dot.lua", "edits": [{ "old": "5, 5, 1", "new": "5, 5, 3" }] });
+        let Planned::Done(out) = call(EDIT, edit) else {
+            panic!("an extension edit must not wait for approval");
+        };
+        assert!(out.text.contains("draft"), "{}", out.text);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
+        // 읽기와 실행은 초안을 쓰고, 초안을 또 고칠 수 있다.
+        let Planned::Done(read) = call(READ, json!({ "path": "Extensions/dot.lua" })) else {
+            panic!()
+        };
+        assert!(read.text.contains("5, 5, 3"));
+        let edit = json!({ "path": "Extensions/dot.lua", "edits": [{ "old": "5, 5, 3", "new": "5, 5, 4" }] });
+        assert!(matches!(call(EDIT, edit), Planned::Done(_)));
+        // 새 확장 파일도 초안이고 목록에 보인다.
+        let write = json!({ "path": "Extensions/new.lua", "content": "return { commands = { { title = 'X', run = function() return nil end } } }" });
+        assert!(matches!(call(WRITE, write), Planned::Done(_)));
+        let Planned::Done(list) = call(LIST, json!({ "path": "Extensions" })) else {
+            panic!()
+        };
+        assert_eq!(list.text, "dot.lua\nnew.lua");
+        // 다른 파일은 지금처럼 승인을 기다린다.
+        let other = json!({ "path": "Extensions/notes.txt", "content": "x" });
+        assert!(matches!(call(WRITE, other), Planned::Change(_)));
+        // 그리는 확장은 지금 초안을 검토해 통과해야 문제가 없다(ADR-0030). 그리지 않는 확장은 보지 않는다.
+        let mut reviews = std::collections::HashMap::new();
+        let problems = ws.draft_problems(&reviews);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("never drawn"), "{problems:?}");
+        let draft = ws.draft("Extensions/dot.lua").unwrap().after;
+        reviews.insert("dot".to_string(), (draft.clone(), Some(4)));
+        assert!(ws.draft_problems(&reviews)[0].contains("scored 4/10"));
+        reviews.insert("dot".to_string(), ("old".to_string(), Some(9)));
+        assert!(ws.draft_problems(&reviews)[0].contains("changed after"));
+        reviews.insert("dot".to_string(), (draft, Some(8)));
+        assert!(ws.draft_problems(&reviews).is_empty());
+        // 답이 끝나면 확장마다 하나의 변경(처음 내용 → 마지막 내용)으로 꺼낸다.
+        let drafts = ws.take_drafts();
+        assert_eq!(drafts.len(), 2);
+        assert_eq!(drafts[0].before.as_deref(), Some(source));
+        assert!(drafts[0].after.contains("5, 5, 4"));
+        assert!(drafts[1].is_new());
+        assert!(ws.take_drafts().is_empty());
+        let out = ws.commit(drafts.into_iter().next().unwrap());
+        assert!(!out.text.starts_with("Error"), "{}", out.text);
+        assert!(std::fs::read_to_string(&file).unwrap().contains("5, 5, 4"));
     }
 
     #[cfg(unix)]

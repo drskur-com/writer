@@ -38,7 +38,9 @@ and extensions (Lua scripts that draw in sheets or add menu commands) are Extens
 - Every file change (edit_file, create_sheet, write_file) is shown to the user as a diff and applied only if they approve it. \
 So when the request calls for changes (fixing, proofreading, revising, rewriting, adding text, changing settings), propose \
 them directly with the tools instead of writing the changed text out in your reply. Put all changes to one file in a \
-single edit_file call. In your reply, briefly give the reasons; do not repeat the changed text.
+single edit_file call. In your reply, briefly give the reasons; do not repeat the changed text. \
+Exception: changes to Extensions/<name>.lua are kept as a draft that read_file and run_extension use; after your reply the \
+user approves each extension once, as one change. So iterate on an extension (edit, run, look, fix) as often as it needs.
 - When the request does not call for changes (questions, feedback, summaries, ideas), answer without proposing changes.
 - Sheet changes target the open sheet by default. If you propose a change to another sheet, say so in your reply.
 - The <sheet> above is the file's exact content, so you can edit the open sheet without read_file. For other files, \

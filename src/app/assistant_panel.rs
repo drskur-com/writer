@@ -385,9 +385,20 @@ impl WriterApp {
                 .flex()
                 .flex_col()
                 .gap_3()
-                .children(conversation.messages.iter().map(|message| {
-                    message_bubble(message.role == Role::User, message.text.into(), pal)
-                }))
+                .children(
+                    conversation
+                        .messages
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, message)| {
+                            message_bubble(
+                                ("assistant-sample-message", ix),
+                                message.role == Role::User,
+                                message.text.into(),
+                                pal,
+                            )
+                        }),
+                )
                 .into_any_element(),
             None if live.conversation.is_empty() => self
                 .render_assistant_empty(configured, cx, pal)
@@ -415,10 +426,11 @@ impl WriterApp {
                         } else {
                             turn.text.trim_end().to_string().into()
                         };
+                        let id = ("assistant-live-message", ix);
                         if turn.user {
-                            message_bubble(true, text, pal)
+                            message_bubble(id, true, text, pal)
                         } else {
-                            self.render_reply(text, &turn.activity, cx, pal)
+                            self.render_reply(id, text, &turn.activity, cx, pal)
                         }
                     }))
                     .children(live.conversation.error().map(|error| {
@@ -999,6 +1011,7 @@ impl WriterApp {
     /// 어시스턴트 답: 한 일(도구 줄, 승인 카드)과 글.
     fn render_reply(
         &self,
+        id: impl Into<ElementId>,
         text: SharedString,
         activity: &[agent::Activity],
         cx: &mut Context<Self>,
@@ -1027,7 +1040,7 @@ impl WriterApp {
                 agent::Activity::Fetch(card) => fetch_card(card, pending == Some(card.id), cx, pal),
             })
             .collect();
-        assistant_reply(false, text, activity, pal)
+        assistant_reply(id, false, text, activity, pal)
     }
 }
 
@@ -1287,11 +1300,19 @@ fn ai_configured(cx: &App) -> bool {
 
 /// 대화 한 줄. 내 말은 오른쪽 말풍선, 어시스턴트 말은 왼쪽 본문으로 그린다.
 /// 말풍선. 어시스턴트 답이면 한 일(`activity`: 부른 도구, 승인 카드)을 글 위에 둔다.
-fn message_bubble(user: bool, text: SharedString, pal: Palette) -> AnyElement {
-    assistant_reply(user, text, Vec::new(), pal)
+fn message_bubble(
+    id: impl Into<ElementId>,
+    user: bool,
+    text: SharedString,
+    pal: Palette,
+) -> AnyElement {
+    assistant_reply(id, user, text, Vec::new(), pal)
 }
 
+/// 말 하나. 어시스턴트 답은 마크다운으로 그리고, 드래그해 고른 부분을 복사할 수 있다(한 서식 안이면 글자만,
+/// 여러 서식에 걸치면 마크다운 원문).
 fn assistant_reply(
+    id: impl Into<ElementId>,
     user: bool,
     text: SharedString,
     activity: Vec<AnyElement>,
@@ -1331,7 +1352,13 @@ fn assistant_reply(
                     .gap_1()
                     .children(activity)
                     .when(!text.is_empty(), |this| {
-                        this.child(div().text_sm().line_height(relative(1.5)).child(text))
+                        this.child(
+                            div().text_sm().line_height(relative(1.5)).child(
+                                text::TextView::markdown(id, text)
+                                    .selectable(true)
+                                    .selection_format(text::SelectionFormat::SourceAcrossStyles),
+                            ),
+                        )
                     }),
             )
             .into_any_element()

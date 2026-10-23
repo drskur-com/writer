@@ -150,6 +150,9 @@ pub fn build<W: Write + Seek>(
     )?;
     for image in &doc.images {
         put(&format!("word/{}", image.name), &image.data)?;
+        if let Some((_, name, svg)) = &image.svg {
+            put(&format!("word/{name}"), svg)?;
+        }
     }
     zip.finish()?;
     Ok(())
@@ -169,6 +172,9 @@ fn emu(pt: f32) -> i64 {
 
 /// 이미지 속성의 px → pt(96dpi).
 const PT_PER_PX: f32 = 0.75;
+
+/// 확장 그림 PNG의 해상도(캔버스 px당 픽셀). 인쇄에 쓸 만하게 3배(약 288dpi)로 그린다.
+const DRAWING_RESOLUTION: f32 = 3.0;
 
 fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -197,7 +203,13 @@ struct ImagePart {
     data: Vec<u8>,
     width: u32,
     height: u32,
+    /// 같은 그림의 SVG(관계 id, `media/imageN.svg`, 내용). Word 2016 이상은 이것을 벡터로 보이고, 다른 앱은
+    /// PNG를 쓴다(확장 그림).
+    svg: Option<(String, String, Vec<u8>)>,
 }
+
+/// 확장 블록 (이름, 인자).
+type DrawingKey = (String, Vec<(String, String)>);
 
 /// 블록을 놓는 자리.
 #[derive(Clone, Copy, Default)]
@@ -224,6 +236,8 @@ struct DocBuilder<'a> {
     footnotes: Vec<String>,
     images: Vec<ImagePart>,
     image_ids: HashMap<PathBuf, usize>,
+    /// 확장 블록 (이름, 인자) → 넣은 그림(그리지 못했으면 `None`).
+    drawing_ids: HashMap<DrawingKey, Option<usize>>,
     /// 첫 본문 구역인지(쪽 번호를 1부터 시작).
     first_body_section: bool,
 }
@@ -241,6 +255,7 @@ impl<'a> DocBuilder<'a> {
             footnotes: Vec::new(),
             images: Vec::new(),
             image_ids: HashMap::new(),
+            drawing_ids: HashMap::new(),
             first_body_section: true,
         }
     }
@@ -443,6 +458,11 @@ impl<'a> DocBuilder<'a> {
                     self.list_item(&marker, &item.blocks, ctx);
                 }
             }
+            Block::Extension { name, args, code } => {
+                if !self.extension(name, args, ctx) {
+                    self.block(&Block::Code(code.clone()), ctx);
+                }
+            }
             Block::Code(code) => {
                 for line in code.split('\n') {
                     let runs = text_run("", &line.replace('\t', "    "));
@@ -636,6 +656,78 @@ impl<'a> DocBuilder<'a> {
         }
     }
 
+    /// 확장 블록 그림(`t = 0`, 밝은 테마)을 가운데 넣는다. 크기는 캔버스 × `scale:`(px)이고 칸보다 크면 줄인다.
+    /// 그리지 못했으면 `false`(코드 블록으로 둔다).
+    fn extension(&mut self, name: &str, args: &[(String, String)], ctx: Context) -> bool {
+        let key = (name.to_string(), args.to_vec());
+        let index = match self.drawing_ids.get(&key) {
+            Some(index) => *index,
+            None => {
+                let index = self.load_drawing(name, args);
+                self.drawing_ids.insert(key, index);
+                index
+            }
+        };
+        let Some((index, (w, h))) = index.map(|index| (index, self.drawing_size(index))) else {
+            return false;
+        };
+        let max_w = self.content_width() - self.em(ctx.indent);
+        let max_h = self.content_height() - self.em(1.);
+        let scale = (max_w / w).min(max_h / h).min(1.);
+        let drawing = self.drawing(index, w * scale, h * scale, name);
+        self.paragraph(
+            "Normal",
+            r#"<w:spacing w:before="120" w:after="120" w:line="240" w:lineRule="auto"/><w:ind w:firstLine="0"/><w:jc w:val="center"/>"#,
+            &format!("<w:r>{drawing}</w:r>"),
+        );
+        true
+    }
+
+    /// 확장 그림의 기본 크기(pt): 캔버스 × `scale:`.
+    fn drawing_size(&self, index: usize) -> (f32, f32) {
+        let part = &self.images[index];
+        // PNG는 DRAWING_RESOLUTION배로 그렸다.
+        let px = |v: u32| v as f32 / DRAWING_RESOLUTION * PT_PER_PX;
+        (px(part.width), px(part.height))
+    }
+
+    /// 확장 그림을 PNG(인쇄용 해상도)와 SVG로 만들어 넣는다.
+    fn load_drawing(&mut self, name: &str, args: &[(String, String)]) -> Option<usize> {
+        let still = crate::extension::still(&self.project.root, name, args).ok()?;
+        let (w, h) = (still.canvas.0 * still.scale, still.canvas.1 * still.scale);
+        let frame = crate::extension::raster::Frame {
+            label: String::new(),
+            shapes: &still.shapes,
+        };
+        // 캔버스 좌표로 그리고 배율(scale × 해상도)을 한 번에 준다.
+        let resolution = DRAWING_RESOLUTION * still.scale;
+        let png = crate::extension::raster::render_png_at(
+            std::slice::from_ref(&frame),
+            still.canvas.0,
+            still.canvas.1,
+            crate::extension::Theme::default().background,
+            f32::MAX,
+            resolution,
+        )
+        .ok()?;
+        let index = self.images.len();
+        let id = index + 1;
+        self.images.push(ImagePart {
+            rel_id: format!("rIdImage{id}"),
+            name: format!("media/image{id}.png"),
+            extension: "png",
+            data: png,
+            width: (w * DRAWING_RESOLUTION).ceil().max(1.) as u32,
+            height: (h * DRAWING_RESOLUTION).ceil().max(1.) as u32,
+            svg: Some((
+                format!("rIdImage{id}Svg"),
+                format!("media/image{id}.svg"),
+                crate::extension::svg::to_svg(&still).into_bytes(),
+            )),
+        });
+        Some(index)
+    }
+
     fn load_image(&mut self, path: &Path) -> Option<usize> {
         if let Some(index) = self.image_ids.get(path) {
             return Some(*index);
@@ -665,6 +757,7 @@ impl<'a> DocBuilder<'a> {
             data,
             width: size.width.max(1) as u32,
             height: size.height.max(1) as u32,
+            svg: None,
         });
         self.image_ids.insert(path.to_path_buf(), index);
         Some(index)
@@ -677,8 +770,11 @@ impl<'a> DocBuilder<'a> {
         let id = index + 1;
         let description = escape(description);
         format!(
-            r#"<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="{id}" name="그림 {id}" descr="{description}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="{id}" name="image{id}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{rel}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+            r#"<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="{id}" name="그림 {id}" descr="{description}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="{id}" name="image{id}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{rel}">{svg}</a:blip><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
             rel = part.rel_id,
+            svg = part.svg.as_ref().map_or(String::new(), |(svg_rel, _, _)| format!(
+                r#"<a:extLst><a:ext uri="{{96DAC541-7B7A-43D3-8B79-37D633B846F1}}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="{svg_rel}"/></a:ext></a:extLst>"#
+            )),
         )
     }
 
@@ -1100,6 +1196,10 @@ fn content_types(images: &[ImagePart]) -> String {
                 image.extension
             ));
         }
+        if image.svg.is_some() && !seen.contains(&"svg") {
+            seen.push("svg");
+            defaults.push_str(r#"<Default Extension="svg" ContentType="image/svg+xml"/>"#);
+        }
     }
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -1117,6 +1217,11 @@ fn document_rels(images: &[ImagePart]) -> String {
             r#"<Relationship Id="{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{}"/>"#,
             image.rel_id, image.name
         ));
+        if let Some((rel, name, _)) = &image.svg {
+            out.push_str(&format!(
+                r#"<Relationship Id="{rel}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{name}"/>"#
+            ));
+        }
     }
     out.push_str("</Relationships>");
     out
@@ -1170,6 +1275,7 @@ mod tests {
         styles.chapter.page_break = Some(true);
         styles.part.placement = Some(Placement::Page);
         ExportProject {
+            root: Default::default(),
             name: "시험".into(),
             dir: std::env::temp_dir(),
             book: BookMeta {
@@ -1194,6 +1300,56 @@ mod tests {
             .read_to_string(&mut text)
             .unwrap();
         text
+    }
+
+    #[test]
+    fn extension_blocks_become_png_with_svg_or_stay_code() {
+        let root = std::env::temp_dir().join(format!("docx-ext-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("Extensions")).unwrap();
+        std::fs::write(
+            root.join("Extensions/dot.lua"),
+            "return { size = { 40, 20 }, draw = function(g) g.circle('fill', 10, 10, 5) end }",
+        )
+        .unwrap();
+        let mut project = project(
+            "```ext dot\nscale: 2\n```\n\n```ext dot\nscale: 2\n```\n\n```ext missing\nr: 1\n```\n",
+        );
+        project.root = root.clone();
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        build(&project, &DocxOptions::default(), &mut bytes).unwrap();
+        let bytes = bytes.into_inner();
+        let document = read(&bytes, "word/document.xml");
+        // 같은 블록은 그림 하나를 같이 쓰고, Word 2016 이상용 SVG를 함께 단다.
+        assert_eq!(
+            document.matches(r#"r:embed="rIdImage1""#).count(),
+            2,
+            "{document}"
+        );
+        assert!(document.contains(r#"<asvg:svgBlip"#), "{document}");
+        // 40 × 2 px = 60pt = 762000 EMU.
+        assert!(
+            document.contains(r#"<wp:extent cx="762000" cy="381000"/>"#),
+            "{document}"
+        );
+        assert!(document.contains("r: 1"), "{document}");
+        assert!(
+            read(&bytes, "[Content_Types].xml")
+                .contains(r#"Extension="svg" ContentType="image/svg+xml""#)
+        );
+        assert!(
+            read(&bytes, "word/_rels/document.xml.rels").contains(r#"Target="media/image1.svg""#)
+        );
+        assert!(read(&bytes, "word/media/image1.svg").contains("<svg"));
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let mut png = Vec::new();
+        zip.by_name("word/media/image1.png")
+            .unwrap()
+            .read_to_end(&mut png)
+            .unwrap();
+        let image = image::load_from_memory(&png).unwrap();
+        // 캔버스 × scale 2 × 해상도 3.
+        assert_eq!((image.width(), image.height()), (240, 120));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

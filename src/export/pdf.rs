@@ -64,6 +64,15 @@ pub enum PdfItem {
         height: f32,
         color: [u8; 3],
     },
+    /// 확장 블록 그림(ADR-0026): `canvas` 크기의 모양 목록을 칸에 맞춰 벡터로 그린다.
+    Drawing {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        canvas: (f32, f32),
+        shapes: Arc<Vec<crate::extension::Shape>>,
+    },
 }
 
 /// 같은 모양의 글자 조각(바이트 길이).
@@ -78,7 +87,7 @@ pub struct PdfRun {
 }
 
 /// 서체에 없는 글자를 그릴 대체 서체(앞에서부터 찾는다).
-const FALLBACK_FAMILIES: [&str; 6] = [
+pub(crate) const FALLBACK_FAMILIES: [&str; 6] = [
     "Apple SD Gothic Neo",
     "Hiragino Sans",
     "PingFang SC",
@@ -88,7 +97,8 @@ const FALLBACK_FAMILIES: [&str; 6] = [
 ];
 
 /// 이름을 찾지 못한 서체(시스템 UI 서체 등) 대신 쓸 서체.
-const DEFAULT_FAMILIES: [&str; 3] = ["Apple SD Gothic Neo", "Helvetica Neue", "Malgun Gothic"];
+pub(crate) const DEFAULT_FAMILIES: [&str; 3] =
+    ["Apple SD Gothic Neo", "Helvetica Neue", "Malgun Gothic"];
 
 /// PDF로 쓴다.
 pub fn write(document: &PdfDocument, target: &Path) -> Result<(), ExportError> {
@@ -157,6 +167,14 @@ pub fn render(document: &PdfDocument) -> Result<Vec<u8>, ExportError> {
                         draw_image(&mut surface, image, *x, *y, *width, *height, *cover);
                     }
                 }
+                PdfItem::Drawing {
+                    x,
+                    y,
+                    width,
+                    canvas,
+                    shapes,
+                    ..
+                } => draw_shapes(&mut surface, &mut fonts, *x, *y, *width, *canvas, shapes),
             }
         }
         surface.finish();
@@ -304,6 +322,258 @@ fn draw_image(
     surface.pop();
     if clip.is_some() {
         surface.pop();
+    }
+}
+
+/// 확장 그림을 벡터로 그린다. 캔버스 좌표를 (`x`, `y`)에서 폭 `width`로 맞추고, 캔버스 밖은 자른다.
+fn draw_shapes(
+    surface: &mut Surface,
+    fonts: &mut Fonts,
+    x: f32,
+    y: f32,
+    width: f32,
+    canvas: (f32, f32),
+    shapes: &[crate::extension::Shape],
+) {
+    use crate::extension::{Align, Shape};
+    if canvas.0 <= 0. || canvas.1 <= 0. {
+        return;
+    }
+    let scale = width / canvas.0;
+    surface.push_transform(&Transform::from_row(scale, 0., 0., scale, x, y));
+    let canvas_clip = Rect::from_xywh(0., 0., canvas.0, canvas.1).and_then(|rect| {
+        let mut builder = PathBuilder::new();
+        builder.push_rect(rect);
+        builder.finish()
+    });
+    if let Some(clip) = &canvas_clip {
+        surface.push_clip_path(clip, &FillRule::NonZero);
+    }
+    // 지금 걸린 자르기(사각형 하나 + 경로들). 바뀌면 모두 풀고 다시 건다.
+    let mut clip_rect: Option<[f32; 4]> = None;
+    let mut clip_paths: Vec<(krilla::geom::Path, FillRule)> = Vec::new();
+    let mut pushed = 0;
+    for shape in shapes {
+        match shape {
+            Shape::Clip(rect) => {
+                clip_rect = *rect;
+                pushed = reclip(surface, pushed, clip_rect, &clip_paths);
+            }
+            Shape::ClipPath(next) => {
+                match next {
+                    Some((path, rule)) => match krilla_path(path) {
+                        Some(path) => clip_paths.push((path, fill_rule(*rule))),
+                        // 빈 경로로 자르면 아무것도 보이지 않는다.
+                        None => clip_rect = Some([0., 0., 0., 0.]),
+                    },
+                    None => clip_paths.clear(),
+                }
+                pushed = reclip(surface, pushed, clip_rect, &clip_paths);
+            }
+            Shape::Fill { path, paint, rule } => {
+                if let Some(path) = krilla_path(path) {
+                    let (paint, opacity) = krilla_paint(paint);
+                    surface.set_stroke(None);
+                    surface.set_fill(Some(Fill {
+                        paint,
+                        opacity,
+                        rule: fill_rule(*rule),
+                    }));
+                    surface.draw_path(&path);
+                }
+            }
+            Shape::Stroke { path, paint, style } => {
+                use crate::extension::{LineCap, LineJoin};
+                if let Some(path) = krilla_path(path) {
+                    let (paint, opacity) = krilla_paint(paint);
+                    surface.set_fill(None);
+                    surface.set_stroke(Some(krilla::paint::Stroke {
+                        paint,
+                        width: style.width,
+                        miter_limit: style.miter_limit,
+                        line_cap: match style.cap {
+                            LineCap::Butt => krilla::paint::LineCap::Butt,
+                            LineCap::Round => krilla::paint::LineCap::Round,
+                            LineCap::Square => krilla::paint::LineCap::Square,
+                        },
+                        line_join: match style.join {
+                            LineJoin::Miter => krilla::paint::LineJoin::Miter,
+                            LineJoin::Round => krilla::paint::LineJoin::Round,
+                            LineJoin::Bevel => krilla::paint::LineJoin::Bevel,
+                        },
+                        opacity,
+                        dash: None,
+                    }));
+                    surface.draw_path(&path);
+                    surface.set_stroke(None);
+                }
+            }
+            Shape::Text {
+                text,
+                origin,
+                size,
+                color,
+                align,
+                width,
+            } => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let run = PdfRun {
+                    len: text.len(),
+                    family: String::new(),
+                    weight: 400,
+                    italic: false,
+                    color: rgb8(*color),
+                    strike: false,
+                };
+                let shift = match (align, width) {
+                    (Align::Center, Some(width)) => (width - fonts.width(text, *size)) / 2.,
+                    (Align::Right, Some(width)) => width - fonts.width(text, *size),
+                    _ => 0.,
+                };
+                draw_text(
+                    surface,
+                    fonts,
+                    origin[0] + shift,
+                    origin[1],
+                    size * crate::extension::canvas::LINE_HEIGHT,
+                    *size,
+                    text,
+                    &[run],
+                );
+            }
+        }
+    }
+    for _ in 0..pushed {
+        surface.pop();
+    }
+    if canvas_clip.is_some() {
+        surface.pop();
+    }
+    surface.pop();
+}
+
+/// 걸린 자르기를 풀고 새로 건다. 건 수를 돌려준다.
+fn reclip(
+    surface: &mut Surface,
+    pushed: usize,
+    rect: Option<[f32; 4]>,
+    paths: &[(krilla::geom::Path, FillRule)],
+) -> usize {
+    for _ in 0..pushed {
+        surface.pop();
+    }
+    let mut count = 0;
+    if let Some([x, y, w, h]) = rect {
+        let mut builder = PathBuilder::new();
+        match Rect::from_xywh(x, y, w.max(0.), h.max(0.)) {
+            Some(rect) => builder.push_rect(rect),
+            // 넓이가 없는 사각형: 아무것도 보이지 않게 아주 작은 곳으로 자른다.
+            None => {
+                if let Some(rect) = Rect::from_xywh(-10., -10., 0.001, 0.001) {
+                    builder.push_rect(rect);
+                }
+            }
+        }
+        if let Some(path) = builder.finish() {
+            surface.push_clip_path(&path, &FillRule::NonZero);
+            count += 1;
+        }
+    }
+    for (path, rule) in paths {
+        surface.push_clip_path(path, rule);
+        count += 1;
+    }
+    count
+}
+
+fn krilla_path(segments: &[crate::extension::Segment]) -> Option<krilla::geom::Path> {
+    use crate::extension::Segment;
+    let mut builder = PathBuilder::new();
+    for segment in segments {
+        match *segment {
+            Segment::Move([x, y]) => builder.move_to(x, y),
+            Segment::Line([x, y]) => builder.line_to(x, y),
+            Segment::Cubic([ax, ay], [bx, by], [x, y]) => builder.cubic_to(ax, ay, bx, by, x, y),
+            Segment::Close => builder.close(),
+        }
+    }
+    builder.finish()
+}
+
+fn fill_rule(rule: crate::extension::FillRule) -> FillRule {
+    match rule {
+        crate::extension::FillRule::NonZero => FillRule::NonZero,
+        crate::extension::FillRule::EvenOdd => FillRule::EvenOdd,
+    }
+}
+
+fn rgb8([r, g, b, _]: crate::extension::Color) -> [u8; 3] {
+    let channel = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+    [channel(r), channel(g), channel(b)]
+}
+
+fn normalized(value: f32) -> NormalizedF32 {
+    NormalizedF32::new(value.clamp(0., 1.)).unwrap_or(NormalizedF32::ONE)
+}
+
+/// 확장의 칠을 PDF 칠과 불투명도로. 그라디언트의 투명도는 멈춤마다 둔다.
+fn krilla_paint(paint: &crate::extension::Paint) -> (krilla::paint::Paint, NormalizedF32) {
+    use crate::extension::Paint;
+    use krilla::paint::{LinearGradient, RadialGradient, SpreadMethod, Stop};
+    let stops = |stops: &[(f32, crate::extension::Color)]| -> Vec<Stop> {
+        stops
+            .iter()
+            .map(|(offset, color)| {
+                let [r, g, b] = rgb8(*color);
+                Stop {
+                    offset: normalized(*offset),
+                    color: rgb::Color::new(r, g, b).into(),
+                    opacity: normalized(color[3]),
+                }
+            })
+            .collect()
+    };
+    match paint {
+        Paint::Solid(color) => {
+            let [r, g, b] = rgb8(*color);
+            (rgb::Color::new(r, g, b).into(), normalized(color[3]))
+        }
+        Paint::Linear { from, to, stops: s } => (
+            LinearGradient {
+                x1: from[0],
+                y1: from[1],
+                x2: to[0],
+                y2: to[1],
+                transform: Transform::identity(),
+                spread_method: SpreadMethod::Pad,
+                stops: stops(s),
+                anti_alias: true,
+            }
+            .into(),
+            NormalizedF32::ONE,
+        ),
+        Paint::Radial {
+            center,
+            radius,
+            stops: s,
+        } => (
+            RadialGradient {
+                fx: center[0],
+                fy: center[1],
+                fr: 0.,
+                cx: center[0],
+                cy: center[1],
+                cr: *radius,
+                transform: Transform::identity(),
+                spread_method: SpreadMethod::Pad,
+                stops: stops(s),
+                anti_alias: true,
+            }
+            .into(),
+            NormalizedF32::ONE,
+        ),
     }
 }
 
@@ -470,6 +740,26 @@ impl Fonts {
             .unwrap_or(face)
     }
 
+    /// 기본 서체(대체 서체 포함)로 쓴 한 줄의 폭.
+    fn width(&mut self, text: &str, size: f32) -> f32 {
+        let Some(face) = self.face("", 400, false) else {
+            return 0.;
+        };
+        text.chars()
+            .map(|c| {
+                let chosen = self.face_for_char(face, c);
+                let info = &self.faces[chosen];
+                ttf_parser::Face::parse(&info.data, info.index)
+                    .ok()
+                    .and_then(|parsed| {
+                        let glyph = parsed.glyph_index(c)?;
+                        parsed.glyph_hor_advance(glyph)
+                    })
+                    .map_or(0., |units| f32::from(units) / info.units_per_em * size)
+            })
+            .sum()
+    }
+
     /// 한 서체로 글자를 그리고 그린 폭을 돌려준다.
     #[allow(clippy::too_many_arguments)]
     fn draw(
@@ -557,5 +847,54 @@ mod tests {
         };
         let bytes = render(&document).unwrap();
         assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn draws_extension_shapes_as_vectors() {
+        use crate::extension::{Paint, Segment, Shape};
+        let square = vec![
+            Segment::Move([0., 0.]),
+            Segment::Line([50., 0.]),
+            Segment::Line([50., 50.]),
+            Segment::Close,
+        ];
+        let shapes = vec![
+            Shape::Clip(Some([0., 0., 40., 40.])),
+            Shape::Fill {
+                path: square.clone(),
+                paint: Paint::Radial {
+                    center: [25., 25.],
+                    radius: 25.,
+                    stops: vec![(0., [1., 0., 0., 1.]), (1., [1., 0., 0., 0.])],
+                },
+                rule: crate::extension::FillRule::NonZero,
+            },
+            Shape::Clip(None),
+            Shape::Text {
+                text: "가a".into(),
+                origin: [0., 60.],
+                size: 12.,
+                color: [0., 0., 0., 1.],
+                align: crate::extension::Align::Center,
+                width: Some(100.),
+            },
+        ];
+        let document = PdfDocument {
+            title: "그림".into(),
+            authors: Vec::new(),
+            pages: vec![PdfPage {
+                width: 200.,
+                height: 200.,
+                items: vec![PdfItem::Drawing {
+                    x: 10.,
+                    y: 10.,
+                    width: 100.,
+                    height: 80.,
+                    canvas: (100., 80.),
+                    shapes: Arc::new(shapes),
+                }],
+            }],
+        };
+        assert!(render(&document).unwrap().starts_with(b"%PDF"));
     }
 }

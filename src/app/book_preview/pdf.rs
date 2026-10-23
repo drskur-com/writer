@@ -70,6 +70,14 @@ fn item(item: &Item) -> Option<PdfItem> {
             source: ImageFile::Url(_),
             ..
         } => return None,
+        Item::Drawing { bounds, drawing } => PdfItem::Drawing {
+            x: f32::from(bounds.origin.x),
+            y: f32::from(bounds.origin.y),
+            width: f32::from(bounds.size.width),
+            height: f32::from(bounds.size.height),
+            canvas: drawing.still.canvas,
+            shapes: drawing.still.shapes.clone(),
+        },
         Item::Rule { bounds, color } => PdfItem::Rule {
             x: f32::from(bounds.origin.x),
             y: f32::from(bounds.origin.y),

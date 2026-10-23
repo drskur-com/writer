@@ -9714,6 +9714,7 @@ dependencies = [
  "serde_json",
  "similar 3.2.0",
  "sys-locale",
+ "tiny-skia",
  "tokio",
  "toml 0.8.23",
  "trash",

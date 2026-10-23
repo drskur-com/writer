@@ -85,6 +85,27 @@ pub(super) enum Item {
     },
     /// 가는 선.
     Rule { bounds: Bounds<Pixels>, color: Hsla },
+    /// 확장 블록 그림(ADR-0026). 캔버스를 `bounds`에 비율대로 맞춰 그린다.
+    Drawing {
+        bounds: Bounds<Pixels>,
+        drawing: PageDrawing,
+    },
+}
+
+/// 페이지에 놓은 확장 그림과, 미리보기에서 다시 쓰는 삼각형 캐시.
+#[derive(Clone)]
+pub(super) struct PageDrawing {
+    pub still: crate::extension::Still,
+    pub cache: std::rc::Rc<std::cell::RefCell<crate::app::extension_painter::TessCache>>,
+}
+
+impl std::fmt::Debug for PageDrawing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PageDrawing")
+            .field("canvas", &self.still.canvas)
+            .field("shapes", &self.still.shapes.len())
+            .finish()
+    }
 }
 
 /// 그릴 이미지.
@@ -126,6 +147,7 @@ pub(super) fn layout_book(
 ) -> BookLayout {
     let mut front = Vec::new();
     let mut flow = Flow::new(setup, fonts, &source.styles, text_system);
+    flow.drawings = Some(&source.drawings);
 
     if let Some(cover) = &source.cover
         && let Some(file) = image_file(cover)
@@ -251,6 +273,8 @@ struct Flow<'a> {
     numbers: library::HeadingNumbers,
     /// 상대 경로 이미지의 기준(시트 폴더).
     dir: PathBuf,
+    /// 확장 블록 그림. 없으면 확장 블록은 코드 블록이다.
+    drawings: Option<&'a super::Drawings>,
 }
 
 impl<'a> Flow<'a> {
@@ -273,6 +297,7 @@ impl<'a> Flow<'a> {
             no_folio: Vec::new(),
             numbers: library::HeadingNumbers::default(),
             dir: PathBuf::new(),
+            drawings: None,
         }
     }
 
@@ -565,6 +590,7 @@ impl<'a> Flow<'a> {
                 self.space(self.em(0.5));
             }
             Block::Code(code) => self.code(code, ctx),
+            Block::Extension { name, args, code } => self.extension(name, args, code, ctx),
             Block::Image(image) => self.image(image, ctx),
             Block::Rule => {
                 let style = TextStyle {
@@ -941,6 +967,39 @@ impl<'a> Flow<'a> {
             widest = widest.max(layout.x_for_index(segment.len()));
         }
         widest
+    }
+
+    /// 확장 그림: 캔버스(배율 `scale:`, 이미지 px처럼 판형 단위로 바꾼다)를 가운데 두고, 칸보다 크면 줄인다.
+    /// 그리지 못했으면 지금처럼 코드 블록으로 둔다.
+    fn extension(&mut self, name: &str, args: &[(String, String)], code: &str, ctx: &Context) {
+        let still = self
+            .drawings
+            .and_then(|drawings| drawings.get(&(name.to_string(), args.to_vec())))
+            .and_then(|drawing| drawing.as_ref().ok())
+            .filter(|still| still.canvas.0 > 0. && still.canvas.1 > 0.);
+        let Some(still) = still else {
+            self.code(code, ctx);
+            return;
+        };
+        let unit = still.scale * self.setup.px;
+        let natural = size(px(still.canvas.0 * unit), px(still.canvas.1 * unit));
+        let max = size(ctx.width, self.content_height());
+        let shown = if natural.width > max.width || natural.height > max.height {
+            fit(natural, max)
+        } else {
+            natural
+        };
+        self.space(self.em(1.));
+        let top = self.reserve(shown.height, px(0.));
+        let left = ctx.left + (ctx.width - shown.width) / 2.;
+        self.page.items.push(Item::Drawing {
+            bounds: Bounds::new(point(left, top), shown),
+            drawing: PageDrawing {
+                still: still.clone(),
+                cache: Default::default(),
+            },
+        });
+        self.space(self.em(1.));
     }
 
     fn image(&mut self, image: &ImageLine, ctx: &Context) {

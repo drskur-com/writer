@@ -5,6 +5,7 @@ mod bedrock;
 mod diff;
 mod edit;
 mod prompt;
+mod review;
 pub mod skills;
 mod tools;
 mod web;
@@ -335,7 +336,27 @@ impl Conversation {
 fn request_turns(turns: &[Turn]) -> Vec<Turn> {
     let mut merged: Vec<Turn> = Vec::new();
     for turn in turns.iter() {
-        let text = turn.text.trim_end();
+        // 거절했거나 쓰지 못한 변경은 다음 답에서도 알도록 답 끝에 적는다(도구 결과는 다시 보내지 않는다).
+        let notes: Vec<String> = turn
+            .activity
+            .iter()
+            .filter_map(|activity| match activity {
+                Activity::Change(card) if card.state == ChangeState::Declined => Some(format!(
+                    "[Not applied: the user declined the change to {}.]",
+                    card.path
+                )),
+                Activity::Change(card) if card.state == ChangeState::Failed => {
+                    Some(format!("[Not applied: writing {} failed.]", card.path))
+                }
+                _ => None,
+            })
+            .collect();
+        let text = std::iter::once(turn.text.trim_end())
+            .chain(notes.iter().map(String::as_str))
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let text = text.as_str();
         if text.is_empty() {
             continue;
         }

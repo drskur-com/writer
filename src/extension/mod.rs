@@ -16,7 +16,9 @@
 mod boolean;
 pub mod canvas;
 pub(crate) mod path;
+pub mod raster;
 mod scene;
+pub mod svg;
 mod worker;
 
 use std::cell::{Cell, RefCell};
@@ -184,7 +186,17 @@ pub fn valid_name(name: &str) -> bool {
             .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
 }
 
-fn parse_args(lines: &[&str]) -> Vec<(String, String)> {
+/// 펜스 info string(`ext <이름>`)이 확장 블록이면 그 이름.
+pub fn fence_name(info: &str) -> Option<&str> {
+    let mut words = info.split_whitespace();
+    (words.next() == Some(FENCE_TAG))
+        .then(|| words.next())
+        .flatten()
+        .filter(|name| valid_name(name))
+}
+
+/// 블록 본문의 `key: value` 줄.
+pub fn parse_args(lines: &[&str]) -> Vec<(String, String)> {
     lines
         .iter()
         .filter_map(|line| {
@@ -193,6 +205,32 @@ fn parse_args(lines: &[&str]) -> Vec<(String, String)> {
             (!key.is_empty()).then(|| (key.to_string(), value.trim().to_string()))
         })
         .collect()
+}
+
+/// 내보내기·책 미리보기에 넣는 확장 블록 그림: 밝은 테마, `t = 0` 한 장.
+#[derive(Clone, Debug)]
+pub struct Still {
+    /// 캔버스 크기(캔버스 좌표).
+    pub canvas: (f32, f32),
+    /// 블록의 `scale:`.
+    pub scale: f32,
+    pub shapes: std::sync::Arc<Vec<Shape>>,
+}
+
+/// 확장 블록(이름과 인자, `scale:` 포함)을 내보내기용으로 그린다.
+pub fn still(root: &Path, name: &str, args: &[(String, String)]) -> Result<Still, String> {
+    let extension = Extension::open(root, name)?;
+    if !extension.draws {
+        return Err(format!("{name}: no draw function"));
+    }
+    let own = without_scale(args);
+    let canvas = extension.size_for(&own)?;
+    let shapes = extension.draw(0.0, &own, &Theme::default())?;
+    Ok(Still {
+        canvas,
+        scale: scale_of(args),
+        shapes: std::sync::Arc::new(shapes),
+    })
 }
 
 /// 확장 파일 경로.

@@ -65,6 +65,8 @@ impl From<zip::result::ZipError> for ExportError {
 pub struct ExportProject {
     pub name: String,
     pub dir: PathBuf,
+    /// 라이브러리 루트(확장 블록을 그릴 때 `Extensions/`를 찾는다).
+    pub root: PathBuf,
     pub book: BookMeta,
     pub styles: Styles,
     pub sheets: Vec<ExportSheet>,
@@ -107,6 +109,7 @@ pub fn load_project(project_dir: &Path) -> Result<ExportProject, ExportError> {
     Ok(ExportProject {
         name: project.name.clone(),
         dir: project_dir.to_path_buf(),
+        root: root.to_path_buf(),
         book,
         styles,
         sheets,
@@ -156,6 +159,7 @@ pub fn load_selection(root: &Path, selected: &[PathBuf]) -> Result<ExportProject
         });
     }
     Ok(ExportProject {
+        root: root.to_path_buf(),
         name: title.clone(),
         dir: if first.is_dir() {
             first.to_path_buf()

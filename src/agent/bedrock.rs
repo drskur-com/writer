@@ -12,16 +12,17 @@ use rig_core::message::{
 };
 use rig_core::streaming::{Item, StreamEvent};
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::channel::oneshot;
 
-use super::tools::Planned;
-use super::web;
+use super::tools::{PendingChange, Planned};
 use super::{
     AllowedSites, Approval, Backend, ChangeCard, ChangeState, ChatEvent, FetchApproval, FetchCard,
     Turn, Workspace,
 };
+use super::{review, web};
 
 /// 설정에서 모델을 고르지 않았을 때 쓰는 모델(Bedrock 전역 교차 리전 추론 프로필).
 pub const DEFAULT_MODEL: &str = "global.anthropic.claude-opus-5-5";
@@ -41,6 +42,10 @@ pub const BEDROCK_MODELS: &[BedrockModel] = &[
     BedrockModel {
         name: "GPT-6.1 Sol",
         base: "openai.gpt-6.1-sol",
+    },
+    BedrockModel {
+        name: "GPT-6 Astra",
+        base: "openai.gpt-6-astra",
     },
     BedrockModel {
         name: "Claude Sonnet 5.5",
@@ -140,7 +145,7 @@ Tell the user you could not look at the image itself.";
 /// 도구 결과 뒤에 따로 붙인 이미지를 가리키는 글.
 const IMAGE_AFTER: &str = "The image is attached right after the tool results.";
 
-/// web_fetch가 가져온 이미지를 모델에 넣는 자리.
+/// 도구 결과의 이미지(web_fetch가 가져온 것, run_extension이 그린 것)를 모델에 넣는 자리.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImagePlacement {
     /// 도구 결과 안(Claude).
@@ -259,20 +264,93 @@ async fn web_fetch(
     };
     tx.unbounded_send(ChatEvent::Tool(summary)).ok()?;
     let mut content = vec![ToolResultContent::text(fetched.text)];
-    let mut after = None;
-    if let Some(image) = fetched.image {
-        match images {
-            ImagePlacement::InToolResult => {
-                content.push(ToolResultContent::Image(fetched_image(image)));
+    let after = fetched
+        .image
+        .and_then(|image| attach(&mut content, fetched_image(image), images));
+    Some((content, after))
+}
+
+/// 도구 결과에 이미지를 모델이 받는 자리로 넣는다. 도구 결과 뒤에 붙여야 하면 그 이미지를 돌려준다.
+fn attach(
+    content: &mut Vec<ToolResultContent>,
+    image: Image,
+    placement: ImagePlacement,
+) -> Option<Image> {
+    match placement {
+        ImagePlacement::InToolResult => content.push(ToolResultContent::Image(image)),
+        ImagePlacement::AfterToolResults => {
+            content.push(ToolResultContent::text(IMAGE_AFTER));
+            return Some(image);
+        }
+        ImagePlacement::None => content.push(ToolResultContent::text(NO_IMAGES)),
+    }
+    None
+}
+
+/// 확장 그림을 대화 맥락 없이 검토받는다(ADR-0030). 검토 글을 돌려준다.
+async fn critique(
+    model: &rig_core::Model<rig_bedrock::completion::Converse, BedrockRuntime>,
+    prompt: String,
+    png: Vec<u8>,
+) -> Result<String, String> {
+    let image = Image {
+        data: DocumentSourceKind::Raw(png),
+        media_type: Some(ImageMediaType::PNG),
+        ..Image::default()
+    };
+    let message = Message::User {
+        content: vec![UserContent::text(prompt), UserContent::Image(image)],
+    };
+    let completion = CompletionRequest::new(message)
+        .preamble(review::SYSTEM)
+        .max_tokens(REVIEW_MAX_TOKENS);
+    let mut stream = model.stream(completion).map_err(|err| err.to_string())?;
+    while let Some(item) = stream.next().await {
+        item.map_err(|err| err.to_string())?;
+    }
+    let response = stream.finish().await.map_err(|err| err.to_string())?;
+    Ok(response.text())
+}
+
+/// 검토 답의 최대 출력 토큰.
+const REVIEW_MAX_TOKENS: u64 = 4_000;
+
+/// 변경을 승인 카드로 묻고, 승인하면 쓴다. 모델에 돌려줄 글, 사용자가 답을 멈췄으면 `None`.
+async fn approve(
+    workspace: &Workspace,
+    change: PendingChange,
+    tx: &mpsc::UnboundedSender<ChatEvent>,
+) -> Option<String> {
+    let id = NEXT_CHANGE.fetch_add(1, Ordering::Relaxed);
+    let (reply, answer) = oneshot::channel();
+    let card = ChangeCard {
+        id,
+        path: change.path.clone(),
+        new_file: change.is_new(),
+        lines: change.diff(),
+        state: ChangeState::Pending,
+    };
+    tx.unbounded_send(ChatEvent::Approve(Approval { card, reply }))
+        .ok()?;
+    match answer.await.ok()? {
+        true => {
+            let output = workspace.commit(change);
+            if output.text.starts_with("Error:") {
+                tx.unbounded_send(ChatEvent::ChangeFailed(id)).ok();
             }
-            ImagePlacement::AfterToolResults => {
-                content.push(ToolResultContent::text(IMAGE_AFTER));
-                after = Some(fetched_image(image));
-            }
-            ImagePlacement::None => content.push(ToolResultContent::text(NO_IMAGES)),
+            Some(output.text)
+        }
+        false => Some(DECLINED.to_string()),
+    }
+}
+
+/// 답이 끝난 뒤 이번 답의 확장 초안(ADR-0029)을 확장마다 한 번 묻는다. 사용자가 멈추면 남은 초안은 버린다.
+async fn approve_drafts(workspace: &Workspace, tx: &mpsc::UnboundedSender<ChatEvent>) {
+    for draft in workspace.take_drafts() {
+        if approve(workspace, draft, tx).await.is_none() {
+            return;
         }
     }
-    Some((content, after))
 }
 
 /// tokio 런타임. 처음 대화를 보낼 때 만든다.
@@ -292,7 +370,11 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 pub fn stream(request: ChatRequest) -> mpsc::UnboundedReceiver<ChatEvent> {
     let (tx, rx) = mpsc::unbounded();
     runtime().spawn(async move {
-        let last = match run(request, &tx).await {
+        let result = run(&request, &tx).await;
+        if let Some(workspace) = &request.workspace {
+            approve_drafts(workspace, &tx).await;
+        }
+        let last = match result {
             Ok(()) => ChatEvent::Done,
             Err(message) => ChatEvent::Failed(message),
         };
@@ -311,9 +393,10 @@ const FETCH_DECLINED: &str = "The user did not allow reading this site. Do not t
 static NEXT_CHANGE: AtomicU64 = AtomicU64::new(1);
 
 /// 도구를 부르고 다시 묻기를 이만큼까지만 되풀이한다(끝없이 도는 것을 막는다).
-const MAX_TOOL_ROUNDS: usize = 24;
+/// 확장은 초안을 고치고 그려 보기를 여러 번 되풀이하므로 넉넉히 둔다.
+const MAX_TOOL_ROUNDS: usize = 60;
 
-async fn run(request: ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Result<(), String> {
+async fn run(request: &ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Result<(), String> {
     if request.turns.is_empty() {
         return Err(t!("assistant.error.nothing_to_send").into());
     }
@@ -342,9 +425,18 @@ async fn run(request: ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Res
         })
         .collect();
 
-    // web_fetch 이미지를 넣을 자리. 그래도 모델이 거절하면 이미지를 빼고 한 번 다시 보낸다.
+    // 도구 결과 이미지를 넣을 자리. 그래도 모델이 거절하면 이미지를 빼고 한 번 다시 보낸다.
     let mut tool_images = image_placement(&backend.model);
     let mut retried_without_images = false;
+    // 확장 이름 → (마지막으로 검토한 소스, 점수), 검토를 통과하지 못해 돌려보낸 횟수(ADR-0030).
+    let mut reviews: HashMap<String, (String, Option<u8>)> = HashMap::new();
+    let mut send_backs = 0;
+    let user_request = request
+        .turns
+        .iter()
+        .rev()
+        .find(|turn| turn.user)
+        .map_or("", |turn| turn.text.as_str());
     for _ in 0..MAX_TOOL_ROUNDS {
         let response = loop {
             let Some((prompt, history)) = messages.split_last() else {
@@ -389,9 +481,29 @@ async fn run(request: ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Res
             }
         };
         let calls: Vec<_> = response.tool_calls().cloned().collect();
-        let (Some(workspace), false) = (&request.workspace, calls.is_empty()) else {
+        let Some(workspace) = &request.workspace else {
             return Ok(());
         };
+        if calls.is_empty() {
+            // 끝내려는데 검토를 통과하지 못한 확장 초안이 있으면 몇 번은 돌려보낸다.
+            let problems = workspace.draft_problems(&reviews);
+            let Some(back) =
+                review::send_back(&problems).filter(|_| send_backs < review::MAX_SEND_BACKS)
+            else {
+                return Ok(());
+            };
+            send_backs += 1;
+            messages.extend(response.message());
+            messages.push(Message::user(back));
+            if tx.unbounded_send(ChatEvent::Text("\n\n".into())).is_err()
+                || tx
+                    .unbounded_send(ChatEvent::Tool(t!("assistant.tool.sent_back").into()))
+                    .is_err()
+            {
+                return Ok(());
+            }
+            continue;
+        }
         messages.extend(response.message());
         let mut results = Vec::with_capacity(calls.len());
         // 도구 결과 뒤에 붙일 이미지(`ImagePlacement::AfterToolResults`).
@@ -417,38 +529,79 @@ async fn run(request: ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Res
                     if tx.unbounded_send(ChatEvent::Tool(output.summary)).is_err() {
                         return Ok(());
                     }
+                    // run_extension이 그린 그림. 볼 수 있는 모델이면 따로 검토도 받는다(ADR-0030).
+                    if let Some(drawing) = output.image {
+                        let name = call
+                            .function
+                            .arguments
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let mut text = output.text;
+                        let score = if tool_images == ImagePlacement::None {
+                            None
+                        } else {
+                            let goal = call
+                                .function
+                                .arguments
+                                .get("goal")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let prompt = review::request(
+                                user_request,
+                                goal,
+                                name,
+                                drawing.canvas,
+                                drawing.frames,
+                            );
+                            let shown = format!("{}/{name}.lua", crate::extension::EXTENSIONS_DIR);
+                            match critique(&model, prompt, drawing.png.clone()).await {
+                                Ok(review) => {
+                                    let score = review::score(&review);
+                                    let summary = match score {
+                                        Some(n) => format!(
+                                            "{} · {shown} · {n}/10",
+                                            t!("assistant.tool.reviewed")
+                                        ),
+                                        None => {
+                                            format!("{} · {shown}", t!("assistant.tool.reviewed"))
+                                        }
+                                    };
+                                    if tx.unbounded_send(ChatEvent::Tool(summary)).is_err() {
+                                        return Ok(());
+                                    }
+                                    text.push_str(&review::report(&review, score));
+                                    score
+                                }
+                                Err(err) => {
+                                    let summary =
+                                        format!("{} · {shown}", t!("assistant.tool.review_failed"));
+                                    tx.unbounded_send(ChatEvent::Tool(summary)).ok();
+                                    text.push_str(&format!(
+                                        "\n\nThe independent review failed: {err}"
+                                    ));
+                                    None
+                                }
+                            }
+                        };
+                        reviews.insert(name.to_string(), (drawing.source, score));
+                        let mut content = vec![ToolResultContent::text(text)];
+                        let image = Image {
+                            data: DocumentSourceKind::Raw(drawing.png),
+                            media_type: Some(ImageMediaType::PNG),
+                            ..Image::default()
+                        };
+                        after_results.extend(attach(&mut content, image, tool_images));
+                        results.push(call.result(content));
+                        continue;
+                    }
                     output.text
                 }
                 // 파일을 바꾸는 도구는 승인 카드를 띄우고 사용자의 답을 기다린다.
-                Planned::Change(change) => {
-                    let id = NEXT_CHANGE.fetch_add(1, Ordering::Relaxed);
-                    let (reply, answer) = oneshot::channel();
-                    let card = ChangeCard {
-                        id,
-                        path: change.path.clone(),
-                        new_file: change.is_new(),
-                        lines: change.diff(),
-                        state: ChangeState::Pending,
-                    };
-                    if tx
-                        .unbounded_send(ChatEvent::Approve(Approval { card, reply }))
-                        .is_err()
-                    {
-                        return Ok(());
-                    }
-                    match answer.await {
-                        Ok(true) => {
-                            let output = workspace.commit(change);
-                            if output.text.starts_with("Error:") {
-                                tx.unbounded_send(ChatEvent::ChangeFailed(id)).ok();
-                            }
-                            output.text
-                        }
-                        Ok(false) => DECLINED.to_string(),
-                        // 사용자가 답을 멈췄다.
-                        Err(_) => return Ok(()),
-                    }
-                }
+                Planned::Change(change) => match approve(workspace, change, tx).await {
+                    Some(text) => text,
+                    None => return Ok(()),
+                },
             };
             results.push(call.result(vec![ToolResultContent::text(text)]));
         }
@@ -518,6 +671,7 @@ mod tests {
             "global.anthropic.claude-opus-5-5",
             "eu.anthropic.claude-sonnet-5-5",
             "global.openai.gpt-6-sol",
+            "us.openai.gpt-6-astra",
         ]
         .map(String::from)
         .into();
@@ -526,6 +680,7 @@ mod tests {
         assert_eq!(
             picked,
             [
+                ("GPT-6 Astra", "us.openai.gpt-6-astra"),
                 ("Claude Sonnet 5.5", "eu.anthropic.claude-sonnet-5-5"),
                 ("Claude Opus 5.5", "global.anthropic.claude-opus-5-5"),
             ]
@@ -544,6 +699,25 @@ mod tests {
         let models = futures::executor::block_on(rx).expect("응답 없음");
         println!("models={models:?}");
         assert!(models.is_ok());
+    }
+
+    /// 실제 Bedrock으로 확장 그림을 검토받는다.
+    /// `WRITER_AI_PROFILE=<프로필> WRITER_AI_REGION=<리전> WRITER_REVIEW_PNG=<그림> cargo test -- --ignored live_review --nocapture`
+    #[test]
+    #[ignore]
+    fn live_review() {
+        let profile = std::env::var("WRITER_AI_PROFILE").expect("WRITER_AI_PROFILE");
+        let png =
+            std::fs::read(std::env::var("WRITER_REVIEW_PNG").expect("WRITER_REVIEW_PNG")).unwrap();
+        let mut builder = BedrockRuntime::builder().profile_name(&profile);
+        if let Ok(region) = std::env::var("WRITER_AI_REGION") {
+            builder = builder.region(&region);
+        }
+        let model = builder.build().completion(DEFAULT_MODEL);
+        let prompt = review::request("빨간 머리 여자를 그려 줘", "", "test", (400.0, 400.0), 1);
+        let review = runtime().block_on(critique(&model, prompt, png)).unwrap();
+        println!("{review}");
+        assert!(review::score(&review).is_some());
     }
 
     /// 실제 Bedrock을 부른다. `WRITER_AI_PROFILE=<프로필> cargo test -- --ignored live_stream`

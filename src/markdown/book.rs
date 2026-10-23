@@ -103,6 +103,13 @@ pub enum Block {
     },
     /// 코드·수식 블록(원문 그대로).
     Code(String),
+    /// 확장 블록(`` ```ext <이름> ``, ADR-0026). 그리지 못하는 곳(ePub·DOCX, 오류)은 `code`를 코드 블록으로 쓴다.
+    Extension {
+        name: String,
+        /// 본문의 `key: value`(`scale:` 포함).
+        args: Vec<(String, String)>,
+        code: String,
+    },
     Image(ImageLine),
     /// 구분선.
     Rule,
@@ -436,7 +443,21 @@ impl Walk<'_> {
                     items,
                 });
             }
-            Node::Code(code) => out.push(Block::Code(code.value.clone())),
+            Node::Code(code) => {
+                let info = format!(
+                    "{} {}",
+                    code.lang.as_deref().unwrap_or(""),
+                    code.meta.as_deref().unwrap_or("")
+                );
+                out.push(match crate::extension::fence_name(&info) {
+                    Some(name) => Block::Extension {
+                        name: name.to_string(),
+                        args: crate::extension::parse_args(&code.value.lines().collect::<Vec<_>>()),
+                        code: code.value.clone(),
+                    },
+                    None => Block::Code(code.value.clone()),
+                });
+            }
             Node::Math(math) => out.push(Block::Code(math.value.clone())),
             Node::ThematicBreak(_) => out.push(Block::Rule),
             Node::Table(table) => {
@@ -811,6 +832,22 @@ mod tests {
             }
         );
         assert_eq!(blocks[2], Block::Code("let a = 1;".into()));
+        // 확장 블록은 이름과 인자를 읽고, 원문도 둔다(그리지 못하는 곳은 코드 블록이다).
+        assert_eq!(
+            super::blocks("```ext bar-chart\nvalues: 1,2\nscale: 2\n```"),
+            vec![Block::Extension {
+                name: "bar-chart".into(),
+                args: vec![
+                    ("values".into(), "1,2".into()),
+                    ("scale".into(), "2".into())
+                ],
+                code: "values: 1,2\nscale: 2".into(),
+            }]
+        );
+        assert_eq!(
+            super::blocks("```ext\nx\n```"),
+            vec![Block::Code("x".into())]
+        );
         assert_eq!(blocks[3], Block::Rule);
         assert_eq!(
             blocks[4],

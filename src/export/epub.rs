@@ -73,9 +73,15 @@ struct Section {
 struct ImageAsset {
     id: String,
     zip_path: String,
-    source_path: PathBuf,
+    source: AssetSource,
     media_type: &'static str,
     is_cover: bool,
+}
+
+/// 에셋 내용: 파일, 또는 만든 바이트(확장 그림 SVG).
+enum AssetSource {
+    File(PathBuf),
+    Bytes(Vec<u8>),
 }
 
 /// ePub 생성 상태.
@@ -195,13 +201,34 @@ impl<'a> EpubBuilder<'a> {
         self.images.push(ImageAsset {
             id: format!("img_{}", self.image_counter),
             zip_path: filename.clone(),
-            source_path: path,
+            source: AssetSource::File(path),
             media_type: mime,
             is_cover: false,
         });
 
         self.image_dest_map.insert(key, filename.clone());
         format!("../{filename}")
+    }
+
+    /// 확장 블록 그림(`t = 0`, 밝은 테마)을 SVG로 넣고 경로를 돌려준다. 같은 이름·인자는 한 번만 넣는다.
+    /// 그리지 못하면 `None`(코드 블록으로 둔다).
+    fn embed_drawing(&mut self, name: &str, args: &[(String, String)]) -> Option<String> {
+        let key = format!("ext\u{0}{name}\u{0}{args:?}");
+        if let Some(existing) = self.image_dest_map.get(&key) {
+            return Some(format!("../{existing}"));
+        }
+        let still = crate::extension::still(&self.project.root, name, args).ok()?;
+        self.image_counter += 1;
+        let filename = format!("images/ext_{:04}.svg", self.image_counter);
+        self.images.push(ImageAsset {
+            id: format!("img_{}", self.image_counter),
+            zip_path: filename.clone(),
+            source: AssetSource::Bytes(crate::extension::svg::to_svg(&still).into_bytes()),
+            media_type: "image/svg+xml",
+            is_cover: false,
+        });
+        self.image_dest_map.insert(key, filename.clone());
+        Some(format!("../{filename}"))
     }
 
     /// 제목 블록을 스타일 설정에 맞춰 렌더링한다.
@@ -439,6 +466,17 @@ impl<'a> EpubBuilder<'a> {
                 let sec = self.ensure_section(&self.project.name);
                 sec.html_body.push_str(&format!("</{tag}>\n"));
             }
+            Block::Extension { name, args, code } => match self.embed_drawing(name, args) {
+                Some(src) => {
+                    let sec = self.ensure_section(&self.project.name);
+                    sec.html_body.push_str(&format!(
+                        "<figure class=\"image align-center extension\">\n  <img src=\"{}\" alt=\"{}\"/>\n</figure>\n",
+                        escape_xml(&src),
+                        escape_xml(name)
+                    ));
+                }
+                None => self.render_block(&Block::Code(code.clone()), sheet_dir),
+            },
             Block::Code(code) => {
                 let sec = self.ensure_section(&self.project.name);
                 sec.html_body.push_str("<pre><code>");
@@ -658,7 +696,7 @@ pub fn build<W: Write + Seek>(project: &ExportProject, writer: &mut W) -> Result
         builder.images.push(ImageAsset {
             id: "cover-image".to_string(),
             zip_path: zip_path.clone(),
-            source_path: path,
+            source: AssetSource::File(path),
             media_type: mime,
             is_cover: true,
         });
@@ -737,9 +775,13 @@ pub fn build<W: Write + Seek>(project: &ExportProject, writer: &mut W) -> Result
 
     // 8. 이미지 에셋 저장
     for img in &builder.images {
-        let mut image = File::open(&img.source_path)?;
         zip.start_file(format!("OEBPS/{}", img.zip_path), deflated_options)?;
-        std::io::copy(&mut image, &mut zip)?;
+        match &img.source {
+            AssetSource::File(path) => {
+                std::io::copy(&mut File::open(path)?, &mut zip)?;
+            }
+            AssetSource::Bytes(bytes) => zip.write_all(bytes)?,
+        }
     }
 
     // 9. 목차 생성 (toc.ncx)
@@ -1377,6 +1419,7 @@ mod tests {
         styles.chapter.page_break = Some(true);
 
         let project = ExportProject {
+            root: Default::default(),
             name: "테스트 프로젝트".to_string(),
             dir: PathBuf::from("fake/project"),
             book: BookMeta {
@@ -1458,6 +1501,7 @@ mod tests {
     /// 원고 시트들로 ePub을 만들어 본문 XHTML 파일(이름, 내용)을 돌려준다.
     fn sections_of(sheets: &[(&str, bool)], styles: Styles) -> Vec<(String, String)> {
         let project = ExportProject {
+            root: Default::default(),
             name: "각주".to_string(),
             dir: PathBuf::from("fake/project"),
             book: BookMeta {
@@ -1559,6 +1603,7 @@ mod tests {
         styles.chapter.prefix = Some("제{n}장\n".to_string());
 
         let project = ExportProject {
+            root: Default::default(),
             name: "테스트".to_string(),
             dir: PathBuf::from("fake/project"),
             book: BookMeta::default(),
@@ -1586,6 +1631,7 @@ mod tests {
     #[test]
     fn toc_flattens_title_break() {
         let project = ExportProject {
+            root: Default::default(),
             name: "테스트".to_string(),
             dir: PathBuf::from("fake/project"),
             book: BookMeta::default(),
@@ -1689,8 +1735,15 @@ mod image_tests {
             std::fs::write(group.join(GROUP_META_FILE), "").unwrap();
         }
         std::fs::write(attachments.join("a.png"), b"\x89PNG\r\n\x1a\nimage").unwrap();
+        std::fs::create_dir_all(root.join("Extensions")).unwrap();
+        std::fs::write(
+            root.join("Extensions/dot.lua"),
+            "return { size = { 40, 20 }, draw = function(g, t, args) g.circle('fill', 10, 10, args.r or 5) end }",
+        )
+        .unwrap();
 
         let project = ExportProject {
+            root: root.clone(),
             name: "책".to_string(),
             dir: project_dir.clone(),
             book: BookMeta {
@@ -1714,6 +1767,35 @@ mod image_tests {
         let mut text = String::new();
         std::io::Read::read_to_string(&mut file, &mut text).unwrap();
         text
+    }
+
+    #[test]
+    fn extension_blocks_become_svg_images_or_stay_code() {
+        let mut archive = build_with(
+            "```ext dot\nr: 3\nscale: 2\n```\n\n```ext dot\nr: 3\nscale: 2\n```\n\n```ext missing\nr: 1\n```\n",
+        );
+        let html = section(&mut archive);
+        // 같은 블록은 한 번만 넣는다.
+        assert_eq!(html.matches("../images/ext_0001.svg").count(), 2, "{html}");
+        // 없는 확장은 코드 블록으로 둔다.
+        assert!(html.contains("<pre><code>r: 1"), "{html}");
+        let mut svg = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("OEBPS/images/ext_0001.svg").unwrap(),
+            &mut svg,
+        )
+        .unwrap();
+        assert!(
+            svg.contains(r#"width="80" height="40" viewBox="0 0 40 20""#),
+            "{svg}"
+        );
+        let mut opf = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("OEBPS/content.opf").unwrap(), &mut opf)
+            .unwrap();
+        assert!(
+            opf.contains(r#"href="images/ext_0001.svg" media-type="image/svg+xml""#),
+            "{opf}"
+        );
     }
 
     #[test]

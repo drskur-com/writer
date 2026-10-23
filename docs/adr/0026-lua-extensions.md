@@ -2,7 +2,7 @@
 
 - 상태: Proposed
 - 날짜: 2026-10-23
-- 관련: ADR-0008(줄 블록), ADR-0017(표: 접힌 줄 + 아래 블록), `src/extension/`, `src/app/editor_extension.rs`, `src/app/extension_painter.rs`, `src/app/extension_commands.rs`, `src/app/insert_extension.rs`, `src/app/manage_extensions.rs`, `src/agent/tools.rs`(`run_extension`), `src/agent/prompt.rs`, `resources/skills/extension/`
+- 관련: ADR-0008(줄 블록), ADR-0017(표: 접힌 줄 + 아래 블록), `src/extension/`, `src/app/editor_extension.rs`, `src/app/extension_painter.rs`, `src/app/extension_commands.rs`, `src/app/insert_extension.rs`, `src/app/manage_extensions.rs`, `src/agent/tools.rs`(`run_extension`), `src/extension/raster.rs`, `src/agent/prompt.rs`, `resources/skills/extension/`
 
 ## 배경 (Context)
 
@@ -75,7 +75,11 @@
   설명, 쓰는 시트 수를 보인다. Finder에서 보기와 휴지통으로 이동이 있다. 지우기 전에
   쓰는 시트 수를 알리고, 원고의 블록은 건드리지 않는다(블록 자리에 확장이 없다고 보인다).
 - 어시스턴트: 빌트인 스킬 `extension`(API·규칙)과 `run_extension` 도구(그리기 결과의 모양 수·범위, 명령 결과,
-  오류)를 준다. 파일은 기존 `write_file`·`edit_file`(승인 diff)로 쓴다. 라이브러리를 열 때 `Extensions/`를 만든다.
+  오류)를 준다.
+  - 그리기 결과는 그림(PNG)으로도 붙여 모델이 직접 본다(`src/extension/raster.rs`, tiny-skia). 숫자만으로는 모양이
+    어색한지 알 수 없어서다. 밝은 테마, 캔버스 크기로 자르고, 긴 변 1568px 안에서 최대 2배로 그린다. 글자는 시스템
+    서체(PDF 내보내기와 같은 이름 목록) 윤곽이라 화면과 폭이 조금 다를 수 있다. `times`(8개까지)를 주면 여러 프레임을
+    `t = …` 이름표와 함께 격자로 한 장에 넣는다. 이미지를 넣는 자리는 web_fetch와 같다(ADR-0028). 파일은 기존 `write_file`·`edit_file`(승인 diff)로 쓴다. 라이브러리를 열 때 `Extensions/`를 만든다.
 
 ## 결과 (Consequences)
 
@@ -91,7 +95,14 @@
 - (-): 애니메이션 블록이 보이면 창 전체를 초당 30번 다시 그린다. 블록 수보다 이 고정 비용이 크다(디버그 빌드에서 CPU 약 13%).
 - (-): 블록이 처음 보일 때 첫 결과가 올 때까지(수 ms) 캔버스가 비어 있다.
 - (-): 앞머리와 코드가 어긋날 수 있다(인자를 바꾸고 `args`를 고치지 않는 등). 스킬과 `run_extension`의 알림으로 줄인다.
-- 후속(TODO): 내보내기(PDF·EPUB·DOCX, `t = 0` 또는 `still:` 인자의 프레임), 미리보기 창, 인라인 값(`{{today}}`처럼
+- 내보내기: 책 미리보기와 PDF는 확장 블록을 그림으로 넣는다. 원고를 읽을 때 블록마다(같은 이름·인자는 한 번) 밝은 테마의
+  `t = 0` 프레임을 그려 두고(`extension::still`), 배치는 캔버스 × `scale:`을 이미지 px처럼 판형 단위로 바꿔 가운데 둔다
+  (본문 폭·페이지보다 크면 줄인다). 미리보기는 에디터와 같은 painter로, PDF는 모양 목록을 krilla 벡터(경로·선·그라디언트·
+  자르기·글자)로 그린다. ePub은 블록마다(같은 이름·인자는 한 번) SVG 파일(`src/extension/svg.rs`, 크기는 캔버스 × `scale:` px,
+  그라디언트는 `userSpaceOnUse`, 자르기는 `<g clip-path>`, 글자는 리더의 sans-serif)을 넣고 가운데 그림으로 둔다. 그리지 못하면
+  (확장 없음·그림 없는 확장·오류) 예전처럼 코드 블록이다. DOCX는 같은 그림을 PNG(캔버스 px의 3배, tiny-skia)로 넣고
+  `asvg:svgBlip`으로 SVG를 함께 단다. Word 2016 이상은 SVG를 벡터로, 다른 앱은 PNG를 보인다.
+- 후속(TODO): 내보내기(`still:` 인자의 프레임), 미리보기 창, 인라인 값(`{{today}}`처럼
   볼 때마다 계산), 블록 클릭·입력, 확장 설정 화면.
 
 ## 대안 (Alternatives)

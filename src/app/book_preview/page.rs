@@ -149,6 +149,24 @@ pub(super) fn page(layout: Rc<BookLayout>, index: usize, scale: f32) -> AnyEleme
                                 window.paint_quad(fill(rule, *color));
                             }
                             Item::Image { .. } => {}
+                            Item::Drawing { bounds, drawing } => {
+                                let bounds = scaled(*bounds);
+                                let factor = bounds.size.width / px(drawing.still.canvas.0);
+                                // 캔버스 밖은 에디터처럼 자른다.
+                                let mask = ContentMask {
+                                    bounds: Bounds::new(origin + bounds.origin, bounds.size),
+                                };
+                                window.with_content_mask(Some(mask), |window| {
+                                    crate::app::extension_painter::paint(
+                                        &drawing.still.shapes,
+                                        origin + bounds.origin,
+                                        factor,
+                                        &drawing.cache,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
                         }
                     }
                 },
