@@ -10,10 +10,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use vello_cpu::color::{AlphaColor, Srgb};
 use vello_cpu::kurbo::{Affine, BezPath, Cap, Join, Point as KPoint, Rect, Stroke};
-use vello_cpu::peniko::{Fill, Gradient};
+use vello_cpu::filter_effects::{EdgeMode, Filter, FilterPrimitive};
+use vello_cpu::peniko::{BlendMode, Compose, Fill, Gradient, Mix};
 use vello_cpu::{Pixmap, RenderContext, RenderSettings, Resources};
 
-use super::canvas::{
+use super::canvas::{Blend, Effects, 
     Align, Color, FillRule, LINE_HEIGHT, LineCap, LineJoin, Paint, Segment, Shape,
 };
 
@@ -115,6 +116,8 @@ fn draw(ctx: &mut RenderContext, fonts: &mut Fonts, shapes: &[Shape], base: Affi
     let mut clip_paths: Vec<&(Vec<Segment>, FillRule)> = Vec::new();
     // 지금 걸어 둔 자르기 수(바뀌면 모두 풀고 다시 건다).
     let mut pushed = 0;
+    let mut effects = Effects::default();
+    ctx.set_blend_mode(blend_mode(Blend::Normal));
     for shape in shapes {
         match shape {
             Shape::Clip(_) | Shape::ClipPath(_) => {
@@ -140,13 +143,20 @@ fn draw(ctx: &mut RenderContext, fonts: &mut Fonts, shapes: &[Shape], base: Affi
                     pushed += 1;
                 }
             }
+            Shape::Effects(next) => {
+                effects = *next;
+                ctx.set_blend_mode(blend_mode(effects.blend));
+            }
             Shape::Fill { path, paint, rule } => {
                 if path.is_empty() {
                     continue;
                 }
-                ctx.set_fill_rule(fill_rule(*rule));
-                set_paint(ctx, paint);
-                ctx.fill_path(&bez(path));
+                let path = bez(path);
+                with_effects(ctx, &effects, |ctx| {
+                    ctx.set_fill_rule(fill_rule(*rule));
+                    set_paint(ctx, paint);
+                    ctx.fill_path(&path);
+                });
             }
             Shape::Stroke { path, paint, style } => {
                 if path.is_empty() || style.width <= 0.0 {
@@ -164,9 +174,12 @@ fn draw(ctx: &mut RenderContext, fonts: &mut Fonts, shapes: &[Shape], base: Affi
                         LineJoin::Round => Join::Round,
                         LineJoin::Bevel => Join::Bevel,
                     });
-                ctx.set_stroke(stroke);
-                set_paint(ctx, paint);
-                ctx.stroke_path(&bez(path));
+                let path = bez(path);
+                with_effects(ctx, &effects, |ctx| {
+                    ctx.set_stroke(stroke.clone());
+                    set_paint(ctx, paint);
+                    ctx.stroke_path(&path);
+                });
             }
             Shape::Text {
                 text,
@@ -175,19 +188,79 @@ fn draw(ctx: &mut RenderContext, fonts: &mut Fonts, shapes: &[Shape], base: Affi
                 color: text_color,
                 align,
                 width,
+                angle,
             } => {
-                let Some(path) = fonts.line(text, *origin, *size, *align, *width) else {
+                let Some(mut path) = fonts.line(text, *origin, *size, *align, *width) else {
                     continue;
                 };
-                ctx.set_fill_rule(Fill::NonZero);
-                ctx.set_paint(color(*text_color));
-                ctx.fill_path(&path);
+                if *angle != 0.0 {
+                    let center = KPoint::new(f64::from(origin[0]), f64::from(origin[1]));
+                    path.apply_affine(Affine::rotate_about(f64::from(*angle), center));
+                }
+                with_effects(ctx, &effects, |ctx| {
+                    ctx.set_fill_rule(Fill::NonZero);
+                    ctx.set_paint(color(*text_color));
+                    ctx.fill_path(&path);
+                });
             }
         }
     }
     for _ in 0..pushed {
         ctx.pop_clip();
     }
+    ctx.set_blend_mode(blend_mode(Blend::Normal));
+    ctx.reset_filter_effect();
+}
+
+/// `draw`로 모양을 그린다. 그림자가 있으면 먼저 그림자만 그리고, 흐림이 있으면 모양을 흐려 그린다.
+fn with_effects(ctx: &mut RenderContext, effects: &Effects, draw: impl Fn(&mut RenderContext)) {
+    if let Some(shadow) = effects.shadow {
+        ctx.set_filter_effect(Filter::from_primitive(FilterPrimitive::DropShadowOnly {
+            dx: shadow.offset[0],
+            dy: shadow.offset[1],
+            std_deviation: shadow.blur,
+            color: color(shadow.color),
+            edge_mode: EdgeMode::None,
+        }));
+        draw(ctx);
+    }
+    if effects.blur > 0.0 {
+        ctx.set_filter_effect(Filter::from_primitive(FilterPrimitive::GaussianBlur {
+            std_deviation: effects.blur,
+            edge_mode: EdgeMode::None,
+        }));
+    } else {
+        ctx.reset_filter_effect();
+    }
+    draw(ctx);
+    ctx.reset_filter_effect();
+}
+
+fn blend_mode(blend: Blend) -> BlendMode {
+    let mix = match blend {
+        Blend::Normal | Blend::Add => Mix::Normal,
+        Blend::Multiply => Mix::Multiply,
+        Blend::Screen => Mix::Screen,
+        Blend::Overlay => Mix::Overlay,
+        Blend::Darken => Mix::Darken,
+        Blend::Lighten => Mix::Lighten,
+        Blend::ColorDodge => Mix::ColorDodge,
+        Blend::ColorBurn => Mix::ColorBurn,
+        Blend::HardLight => Mix::HardLight,
+        Blend::SoftLight => Mix::SoftLight,
+        Blend::Difference => Mix::Difference,
+        Blend::Exclusion => Mix::Exclusion,
+        Blend::Hue => Mix::Hue,
+        Blend::Saturation => Mix::Saturation,
+        Blend::Color => Mix::Color,
+        Blend::Luminosity => Mix::Luminosity,
+    };
+    let compose = if blend == Blend::Add {
+        Compose::Plus
+    } else {
+        Compose::SrcOver
+    };
+    BlendMode::new(mix, compose)
 }
 
 fn bez(segments: &[Segment]) -> BezPath {
@@ -342,12 +415,13 @@ fn hash_shape(shape: &Shape, f: &mut dyn FnMut(f32)) {
             color,
             align,
             width,
+            angle,
         } => {
             f(300.0 + *align as u8 as f32);
             for c in text.chars() {
                 f(c as u32 as f32);
             }
-            [origin[0], origin[1], *size, width.unwrap_or(-1.0)]
+            [origin[0], origin[1], *size, width.unwrap_or(-1.0), *angle]
                 .into_iter()
                 .for_each(&mut *f);
             color.iter().for_each(|v| f(*v));
@@ -355,6 +429,14 @@ fn hash_shape(shape: &Shape, f: &mut dyn FnMut(f32)) {
         Shape::Clip(rect) => {
             f(400.0);
             rect.iter().flatten().for_each(|v| f(*v));
+        }
+        Shape::Effects(effects) => {
+            f(600.0 + effects.blend as u8 as f32);
+            f(effects.blur);
+            if let Some(shadow) = effects.shadow {
+                [shadow.blur, shadow.offset[0], shadow.offset[1]].into_iter().for_each(&mut *f);
+                shadow.color.iter().for_each(|v| f(*v));
+            }
         }
         Shape::ClipPath(next) => {
             f(500.0);
@@ -580,6 +662,91 @@ mod tests {
         assert!(g > 240 && r < 15 && b < 15, "{r} {g} {b}");
     }
 
+    fn fill(path: Vec<Segment>, c: Color) -> Shape {
+        Shape::Fill {
+            path,
+            paint: Paint::Solid(c),
+            rule: FillRule::NonZero,
+        }
+    }
+
+    #[test]
+    fn shadow_and_blur_follow_canvas_units() {
+        use crate::extension::canvas::Shadow;
+        let shapes = vec![
+            Shape::Effects(Effects {
+                shadow: Some(Shadow {
+                    color: [0.0, 0.0, 0.0, 1.0],
+                    blur: 0.0,
+                    offset: [30.0, 0.0],
+                }),
+                ..Effects::default()
+            }),
+            fill(square(10.0, 10.0, 20.0), [1.0, 0.0, 0.0, 1.0]),
+        ];
+        let pixmap = Renderer::new().render(&shapes, 2.0, 200, 100, None);
+        // 모양은 그대로, 그림자는 캔버스 좌표로 30만큼(2배라 60px) 오른쪽에 있다.
+        assert_eq!(at(&pixmap, 40, 40), [255, 0, 0, 255]);
+        assert_eq!(at(&pixmap, 70, 40)[3], 0);
+        assert_eq!(at(&pixmap, 110, 40), [0, 0, 0, 255]);
+
+        let blurred = vec![
+            Shape::Effects(Effects {
+                blur: 4.0,
+                ..Effects::default()
+            }),
+            fill(square(10.0, 10.0, 20.0), [1.0, 0.0, 0.0, 1.0]),
+        ];
+        let pixmap = Renderer::new().render(&blurred, 2.0, 200, 100, None);
+        // 가장자리는 반쯤 비치고, 모양 밖으로도 번진다.
+        let edge = at(&pixmap, 20, 40)[3];
+        assert!(edge > 60 && edge < 200, "{edge}");
+        assert!(at(&pixmap, 14, 40)[3] > 0);
+    }
+
+    #[test]
+    fn multiply_darkens_what_is_below() {
+        let shapes = vec![
+            fill(square(0.0, 0.0, 10.0), [0.0, 0.0, 1.0, 1.0]),
+            Shape::Effects(Effects {
+                blend: Blend::Multiply,
+                ..Effects::default()
+            }),
+            fill(square(0.0, 0.0, 10.0), [1.0, 0.0, 0.0, 1.0]),
+        ];
+        let pixmap = Renderer::new().render(&shapes, 1.0, 10, 10, None);
+        assert_eq!(at(&pixmap, 5, 5), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn rotated_text_turns_around_its_origin() {
+        let text = |angle: f32| {
+            vec![Shape::Text {
+                text: "가나다라마바사".into(),
+                origin: [50.0, 50.0],
+                size: 10.0,
+                color: [0.0, 0.0, 0.0, 1.0],
+                align: Align::Left,
+                width: None,
+                angle,
+            }]
+        };
+        let ink = |pixmap: &Pixmap, x0: u16, y0: u16, x1: u16, y1: u16| {
+            (x0..x1)
+                .flat_map(|x| (y0..y1).map(move |y| (x, y)))
+                .filter(|&(x, y)| pixmap.sample(x, y).a > 0)
+                .count()
+        };
+        let mut renderer = Renderer::new();
+        let flat = renderer.render(&text(0.0), 1.0, 120, 120, None);
+        let turned = renderer.render(&text(std::f32::consts::FRAC_PI_2), 1.0, 120, 120, None);
+        // 그대로면 오른쪽으로, 시계 방향 90도면 아래로 쓴다.
+        assert!(ink(&flat, 60, 45, 110, 65) > 50);
+        assert_eq!(ink(&flat, 30, 60, 50, 110), 0);
+        assert!(ink(&turned, 30, 60, 50, 110) > 50);
+        assert_eq!(ink(&turned, 60, 45, 110, 65), 0);
+    }
+
     #[test]
     fn same_shapes_have_the_same_key() {
         let a = vec![Shape::Clip(Some([0.0, 0.0, 1.0, 1.0]))];
@@ -588,4 +755,3 @@ mod tests {
         assert_ne!(shapes_key(&a), shapes_key(&b));
     }
 }
-

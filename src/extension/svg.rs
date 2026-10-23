@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 
 use super::Still;
 use super::canvas::{
-    Align, Color, FillRule, LINE_HEIGHT, LineCap, LineJoin, Paint, Segment, Shape,
+    Align, Blend, Color, Effects, FillRule, LINE_HEIGHT, LineCap, LineJoin, Paint, Segment, Shape,
 };
 
 /// 그림 하나를 SVG 문서로.
@@ -25,8 +25,11 @@ pub fn to_svg(still: &Still) -> String {
     let mut clip_rect: Option<[f32; 4]> = None;
     let mut clip_paths: Vec<(String, FillRule)> = Vec::new();
     let mut open = 0usize;
+    // 지금 효과의 속성(섞기 `style`, 흐림·그림자 `filter`). 모양마다 붙인다.
+    let mut fx = String::new();
     for shape in still.shapes.iter() {
         match shape {
+            Shape::Effects(effects) => fx = effects_attr(effects, (w, h), &mut defs, &mut next_id),
             Shape::Clip(rect) => {
                 clip_rect = *rect;
                 open = reclip(
@@ -56,7 +59,7 @@ pub fn to_svg(still: &Still) -> String {
                 let fill = paint_attr(paint, "fill", &mut defs, &mut next_id);
                 let _ = writeln!(
                     body,
-                    r#"<path d="{}" {fill} fill-rule="{}"/>"#,
+                    r#"<path d="{}" {fill} fill-rule="{}"{fx}/>"#,
                     path_data(path),
                     rule_name(*rule)
                 );
@@ -75,7 +78,7 @@ pub fn to_svg(still: &Still) -> String {
                 };
                 let _ = writeln!(
                     body,
-                    r#"<path d="{}" fill="none" {stroke} stroke-width="{}" stroke-linecap="{cap}" stroke-linejoin="{join}" stroke-miterlimit="{}"/>"#,
+                    r#"<path d="{}" fill="none" {stroke} stroke-width="{}" stroke-linecap="{cap}" stroke-linejoin="{join}" stroke-miterlimit="{}"{fx}/>"#,
                     path_data(path),
                     num(style.width),
                     num(style.miter_limit)
@@ -88,18 +91,30 @@ pub fn to_svg(still: &Still) -> String {
                 color,
                 align,
                 width,
+                angle,
             } => {
                 if text.trim().is_empty() {
                     continue;
                 }
-                let (x, anchor) = match (align, width) {
+                let rotate = if *angle == 0. {
+                    String::new()
+                } else {
+                    format!(
+                        r#" transform="rotate({} {} {})""#,
+                        num(angle.to_degrees()),
+                        num(*x),
+                        num(*y)
+                    )
+                };
+                let (tx, anchor) = match (align, width) {
                     (Align::Center, Some(width)) => (x + width / 2., "middle"),
                     (Align::Right, Some(width)) => (x + width, "end"),
                     _ => (*x, "start"),
                 };
+                let x = tx;
                 let _ = writeln!(
                     body,
-                    r#"<text x="{}" y="{}" font-size="{}" text-anchor="{anchor}" dominant-baseline="central" {}>{}</text>"#,
+                    r#"<text x="{}" y="{}" font-size="{}" text-anchor="{anchor}" dominant-baseline="central" {}{rotate}{fx}>{}</text>"#,
                     num(x),
                     num(y + size * LINE_HEIGHT / 2.),
                     num(*size),
@@ -124,6 +139,67 @@ pub fn to_svg(still: &Still) -> String {
         num(w),
         num(h)
     )
+}
+
+/// 효과의 속성. 흐림·그림자는 `defs`에 필터를 더한다(영역은 캔버스 둘레까지 넉넉히).
+fn effects_attr(
+    effects: &Effects,
+    (w, h): (f32, f32),
+    defs: &mut String,
+    next_id: &mut impl FnMut(&str) -> String,
+) -> String {
+    let mut attr = String::new();
+    if effects.blend != Blend::Normal {
+        let name = match effects.blend {
+            Blend::Add => "plus-lighter".to_string(),
+            other => {
+                // colorDodge → color-dodge
+                let mut css = String::new();
+                for c in other.name().chars() {
+                    if c.is_ascii_uppercase() {
+                        css.push('-');
+                        css.push(c.to_ascii_lowercase());
+                    } else {
+                        css.push(c);
+                    }
+                }
+                css
+            }
+        };
+        let _ = write!(attr, r#" style="mix-blend-mode:{name}""#);
+    }
+    if effects.blur > 0. || effects.shadow.is_some() {
+        let id = next_id("f");
+        let _ = writeln!(
+            defs,
+            r#"<filter id="{id}" filterUnits="userSpaceOnUse" x="{}" y="{}" width="{}" height="{}">"#,
+            num(-w),
+            num(-h),
+            num(w * 3.),
+            num(h * 3.)
+        );
+        if effects.blur > 0. {
+            let _ = writeln!(defs, r#"<feGaussianBlur stdDeviation="{}"/>"#, num(effects.blur));
+        }
+        if let Some(shadow) = effects.shadow {
+            let [r, g, b, a] = shadow.color;
+            let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+            let _ = writeln!(
+                defs,
+                r##"<feDropShadow dx="{}" dy="{}" stdDeviation="{}" flood-color="#{:02x}{:02x}{:02x}" flood-opacity="{}"/>"##,
+                num(shadow.offset[0]),
+                num(shadow.offset[1]),
+                num(shadow.blur),
+                byte(r),
+                byte(g),
+                byte(b),
+                num(a)
+            );
+        }
+        defs.push_str("</filter>\n");
+        let _ = write!(attr, r#" filter="url(#{id})""#);
+    }
+    attr
 }
 
 /// 열린 자르기 묶음을 닫고, 지금 자르기로 다시 연다. 연 수를 돌려준다.
@@ -290,6 +366,43 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn writes_effects_and_rotated_text() {
+        let still = Still {
+            canvas: (100., 50.),
+            scale: 1.,
+            align: crate::extension::Align::Center,
+            shapes: Arc::new(vec![
+                Shape::Effects(Effects {
+                    blend: Blend::ColorDodge,
+                    blur: 2.,
+                    shadow: Some(crate::extension::canvas::Shadow {
+                        color: [0., 0., 0., 0.5],
+                        blur: 3.,
+                        offset: [1., 2.],
+                    }),
+                }),
+                Shape::Text {
+                    text: "a".into(),
+                    origin: [10., 20.],
+                    size: 10.,
+                    color: [0., 0., 0., 1.],
+                    align: Align::Left,
+                    width: None,
+                    angle: std::f32::consts::FRAC_PI_2,
+                },
+            ]),
+        };
+        let svg = to_svg(&still);
+        assert!(svg.contains(r#"transform="rotate(90 10 20)""#), "{svg}");
+        assert!(svg.contains(r#"style="mix-blend-mode:color-dodge" filter="url(#f1)""#), "{svg}");
+        assert!(svg.contains(r#"<feGaussianBlur stdDeviation="2"/>"#), "{svg}");
+        assert!(
+            svg.contains(r##"<feDropShadow dx="1" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.5"/>"##),
+            "{svg}"
+        );
+    }
+
+    #[test]
     fn writes_paths_gradients_clips_and_text() {
         let square = vec![
             Segment::Move([0., 0.]),
@@ -320,6 +433,7 @@ mod tests {
                     color: [0., 0., 0., 1.],
                     align: Align::Center,
                     width: Some(100.),
+                    angle: 0.,
                 },
             ]),
         };

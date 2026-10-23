@@ -84,6 +84,7 @@ pub fn render_png_at(
                     color: [0.25, 0.25, 0.25, 1.0],
                     align: Align::Left,
                     width: None,
+                    angle: 0.0,
                 };
                 let label = [235.0 / 255.0, 235.0 / 255.0, 235.0 / 255.0, 1.0];
                 draw_cell(

@@ -48,7 +48,7 @@ Colors: `r, g, b[, a]` from 0 to 1, a table `{ r, g, b[, a] }`, or a string `"#r
 
 | Function | Meaning |
 |---|---|
-| `g.print(text, x, y[, r, sx])` | Text with its top-left at `x, y`. `\n` starts a new line. `sx` scales the size; `r` is ignored (text does not rotate). |
+| `g.print(text, x, y[, r, sx])` | Text with its top-left at `x, y`. `\n` starts a new line. `r` turns it (radians, clockwise) around `x, y`; `sx` scales the size. Text also follows `g.rotate`. |
 | `g.printf(text, x, y, limit, align)` | Aligns each line inside the width `limit`: `"left"`, `"center"`, `"right"`. Does not wrap long lines. |
 
 Text uses the app's interface font. Line height is 1.25 × the font size.
@@ -126,7 +126,19 @@ Gradient coordinates follow the transform at the time you draw, like a shape's. 
 | `g.setDash({on, off, ...}[, offset])` / `g.setDash()` | Dashed outlines; lengths follow the transform. Change `offset` with `t` for "marching ants". `g.setDash()` returns to solid lines. |
 | `g.setFillRule(rule)` | `"nonzero"` (default) or `"evenodd"`. With `"evenodd"`, an inner subpath cuts a hole (a ring, the letter O) regardless of its direction. |
 | `g.setScissor(x, y, w, h)` / `g.setScissor()` | Draw only inside that canvas rectangle (ignores the transform), as in LÖVE. |
-| `g.setClip(path[, rule])` / `g.setClip()` | Draw only inside a path (or SVG path string), placed with the current transform. Calling it again keeps only where all clip paths overlap; `g.setClip()` removes them all. `rule` defaults to the current fill rule. Text is clipped to the clip area's bounding rectangle, not to its shape. |
+| `g.setClip(path[, rule])` / `g.setClip()` | Draw only inside a path (or SVG path string), placed with the current transform. Calling it again keeps only where all clip paths overlap; `g.setClip()` removes them all. `rule` defaults to the current fill rule. Text is clipped to the shape too. |
+
+### Shadows, blur, and blend modes
+
+Each applies to everything drawn after it (shapes, outlines, and text) until changed. Sizes and offsets follow the transform at the time you call them.
+
+| Function | Meaning |
+|---|---|
+| `g.setShadow(color[, blur, dx, dy])` / `g.setShadow()` | A soft shadow under each shape: `color` is a table or `"#rrggbb[aa]"` (use alpha, e.g. `{0, 0, 0, 0.3}`), `blur` its softness (default 4), `dx, dy` its offset (default 0, 2). `g.setShadow()` turns it off. |
+| `g.setBlur(radius)` / `g.setBlur()` | Blur the shapes themselves (glows, out-of-focus backgrounds, mist). `0` or no argument turns it off. |
+| `g.setBlendMode(mode)` / `g.getBlendMode()` | How a shape mixes with what is already drawn: `"normal"` (or LÖVE's `"alpha"`, the default), `"multiply"` (shading, ink), `"screen"` and `"add"` (light, fire, glow), `"overlay"`, `"darken"`, `"lighten"`, `"colorDodge"`, `"colorBurn"`, `"hardLight"`, `"softLight"`, `"difference"`, `"exclusion"`, `"hue"`, `"saturation"`, `"color"`, `"luminosity"`. The canvas starts transparent, so draw a background first for the mix to show. |
+
+Blur and shadows cost more to draw than plain shapes: use them on a few large shapes rather than hundreds of small ones, and turn them off right after. In PDF exports a drawing that uses blur, shadows, or `"add"` becomes a picture instead of vectors.
 
 ### Animation helpers
 
@@ -142,7 +154,7 @@ Gradient coordinates follow the transform at the time you draw, like a shape's. 
 
 ## Not available
 
-Anything else in LÖVE: images, canvases, shaders, GPU meshes, textures, per-pixel lighting, fonts from files, `love.update`/`love.draw` callbacks, keyboard input, dragging, sound in a block. (Hover and clicking on regions are available: `interactive.md`; a running game with keyboard and mouse runs in a window: `play.md`.) Also: blend modes, blur and soft shadows (layer a few translucent copies, or `p:offset` with fading colors), text along a path, clipping text to a shape. Calling a function that does not exist fails with a list of the available ones.
+Anything else in LÖVE: images, canvases, shaders, GPU meshes, textures, per-pixel lighting, fonts from files, `love.update`/`love.draw` callbacks, keyboard input, dragging, sound in a block. (Hover and clicking on regions are available: `interactive.md`; a running game with keyboard and mouse runs in a window: `play.md`.) Also: text along a path. Calling a function that does not exist fails with a list of the available ones.
 
 ## Design rules
 
@@ -150,9 +162,9 @@ Anything else in LÖVE: images, canvases, shaders, GPU meshes, textures, per-pix
 - **Size.** Set `size` to the space the drawing needs, usually 300–600 wide and 100–300 high. The app shrinks a canvas that is wider than the page and never enlarges it. When the space depends on the arguments (for example more bars), make `size` a `function(args)` returning `{ width, height }`. To make a drawing bigger or smaller, the user writes `scale: 1.5` in the block; the app handles it for every extension, so never define a `scale` argument. Lay things out from `g.getWidth()` and `g.getHeight()` rather than repeating numbers.
 - **Animation.** Compute everything from `t`, for example `local phase = (t % period) / period`. `draw` keeps no state between calls and starts each call from an empty canvas. Make the frame at `t = 0` meaningful on its own: the book preview and PDF, EPUB, and DOCX exports show that frame, in the light theme. For a loop, set `period` to its length in seconds (at most 10): the app repeats `t` over that loop, so the same shapes come back and are cheaper to draw. Leave `animated` off for still pictures; an animation redraws the window 30 times a second while visible.
 - **Randomness.** `math.random` restarts from the same seed on every draw, so random stars or noise stay still and look the same every time. To vary them over time, derive the values from `t`.
-- **Shapes.** Draw organic shapes (leaves, hair, clouds, ribbons, characters) with paths and curves (`g.newPath`, `curveTo`, or an SVG path string) rather than many small polygons: they look smoother and cost one shape each. Build paths and gradients once at the top of the file and reuse them; place copies with `g.push`/`g.translate`/`g.rotate`/`g.pop`. Gradients (a sky, a glow with a transparent end color) give depth cheaply. Cut and merge shapes with `union`/`subtract`/`intersect`, draw inside a shape with `g.setClip` (stripes on a ball, a scene seen through a window), and make borders or halos with `outline`/`offset`.
+- **Shapes.** Draw organic shapes (leaves, hair, clouds, ribbons, characters) with paths and curves (`g.newPath`, `curveTo`, or an SVG path string) rather than many small polygons: they look smoother and cost one shape each. Build paths and gradients once at the top of the file and reuse them; place copies with `g.push`/`g.translate`/`g.rotate`/`g.pop`. Gradients (a sky, a glow with a transparent end color) give depth cheaply; `g.setShadow` lifts cards and characters off the background, and `g.setBlur` with `"add"` or `"screen"` makes glows. Cut and merge shapes with `union`/`subtract`/`intersect`, draw inside a shape with `g.setClip` (stripes on a ball, a scene seen through a window), and make borders or halos with `outline`/`offset`.
 - **Motion.** Morph between two poses of the same path with `g.lerpPath(a, b, g.ease.inOutSine(k))`; move things along a curve with `path:pointAt(s)`; draw a line on with `path:trim(0, s)`; animate a dash `offset` for flowing lines. Ease motion with `g.ease.*` so it does not look mechanical.
-- **Text.** `g.print` draws one line per `\n` and does not wrap. Use `g.printf(text, x, y, width, "center")` to center text. Keep labels short; text does not rotate.
+- **Text.** `g.print` draws one line per `\n` and does not wrap. Use `g.printf(text, x, y, width, "center")` to center text. Keep labels short.
 
 ## Planning and testing a drawing
 

@@ -35,7 +35,7 @@ use std::time::{Duration, Instant, SystemTime};
 use mlua::{Function, Lua, Table, Value, VmState};
 
 pub use canvas::{
-    Align, Color, FillRule, LineCap, LineJoin, Paint, Region, Segment, Shape, Theme, region_at,
+    Align, Blend, Color, FillRule, LineCap, LineJoin, Paint, Region, Segment, Shape, Theme, region_at,
 };
 pub use package::Package;
 pub use worker::{Info, PlayEvent, PlayWorker, Worker};
@@ -1663,6 +1663,58 @@ return {
 "#;
 
     #[test]
+    fn effects_and_rotated_text() {
+        let source = r#"
+return {
+  size = { 100, 100 },
+  draw = function(g)
+    g.scale(2)
+    g.setShadow({ 0, 0, 0, 0.5 }, 3, 1, 2)
+    g.setBlendMode("multiply")
+    g.rectangle("fill", 0, 0, 10, 10)
+    g.setShadow()
+    g.setBlendMode("alpha")
+    g.setBlendMode("alpha")
+    g.rotate(math.pi / 2)
+    g.print("hi", 0, 0)
+    g.setBlur(2)
+    g.setBlendMode(g.getBlendMode())
+  end,
+}"#;
+        let extension = Extension::load("fx", source).unwrap();
+        let shapes = extension.draw(0.0, &[], &Theme::default()).unwrap();
+        let effects: Vec<&canvas::Effects> = shapes
+            .iter()
+            .filter_map(|shape| match shape {
+                Shape::Effects(effects) => Some(effects),
+                _ => None,
+            })
+            .collect();
+        // 바뀔 때만 넣는다(같은 섞기를 두 번 골라도 하나).
+        assert_eq!(effects.len(), 5, "{shapes:?}");
+        let shadow = effects[0].shadow.unwrap();
+        // 그림자는 그때의 변환 배율을 따른다.
+        assert_eq!((shadow.blur, shadow.offset), (6.0, [2.0, 4.0]));
+        assert_eq!(effects[1].blend, Blend::Multiply);
+        assert!(effects[1].shadow.is_some());
+        assert_eq!(*effects[3], canvas::Effects::default());
+        assert_eq!(effects[4].blur, 4.0);
+        let angle = shapes.iter().find_map(|shape| match shape {
+            Shape::Text { angle, .. } => Some(*angle),
+            _ => None,
+        });
+        assert!((angle.unwrap() - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        let err = Extension::load(
+            "bad",
+            "return { size = {1, 1}, draw = function(g) g.setBlendMode('subtract') end }",
+        )
+        .unwrap()
+        .draw(0.0, &[], &Theme::default())
+        .unwrap_err();
+        assert!(err.contains("\"multiply\""), "{err}");
+    }
+
+    #[test]
     fn draws_shapes_in_canvas_space() {
         let extension = Extension::load("archer", ARCHER).unwrap();
         assert_eq!(extension.size, Some((200.0, 100.0)));
@@ -2358,7 +2410,9 @@ return {
                                     })
                                     .collect(),
                                 Shape::Text { origin, .. } => vec![*origin],
-                                Shape::Clip(_) | Shape::ClipPath(_) => Vec::new(),
+                                Shape::Clip(_) | Shape::ClipPath(_) | Shape::Effects(_) => {
+                                    Vec::new()
+                                }
                             };
                             assert!(points.into_iter().all(inside), "t = {t}: {shape:?}");
                         }

@@ -54,6 +54,7 @@
 | [0040](./0040-extension-sound.md) | 플레이 창의 확장은 `sound.play{ … }`로 음표를 넘기고, 앱이 악기 소리로 합성해 재생한다 | Proposed | 2026-10-23 |
 | [0041](./0041-note-attachments.md) | 메모의 첨부파일은 `Notes/Attachments`에 두고 `Notes/` 기준 경로로 적는다 | Proposed | 2026-10-23 |
 | [0042](./0042-extension-cpu-raster.md) | 확장의 모양 목록은 vello_cpu로 픽셀 이미지에 그려 화면·PNG에 같이 쓴다 | Proposed | 2026-10-23 |
+| [0043](./0043-extension-effects.md) | 확장 캔버스에 그림자·흐림·섞기와 글자 돌리기를 더하고, 효과는 모양 목록의 상태로 둔다 | Proposed | 2026-10-23 |
 
 ## 작성 규칙
 

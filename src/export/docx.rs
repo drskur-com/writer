@@ -759,6 +759,11 @@ impl<'a> DocBuilder<'a> {
         .map_err(|_| ())?;
         let index = self.images.len();
         let id = index + 1;
+        // Word는 SVG의 섞기·흐림·그림자를 그리지 않으므로, 효과가 있는 그림은 PNG만 넣는다.
+        let plain = still.shapes.iter().all(|shape| {
+            !matches!(shape, crate::extension::Shape::Effects(effects)
+                if *effects != crate::extension::canvas::Effects::default())
+        });
         self.images.push(ImagePart {
             rel_id: format!("rIdImage{id}"),
             name: format!("media/image{id}.png"),
@@ -766,11 +771,13 @@ impl<'a> DocBuilder<'a> {
             data: png,
             width: (w * DRAWING_RESOLUTION).ceil().max(1.) as u32,
             height: (h * DRAWING_RESOLUTION).ceil().max(1.) as u32,
-            svg: Some((
-                format!("rIdImage{id}Svg"),
-                format!("media/image{id}.svg"),
-                crate::extension::svg::to_svg(&still).into_bytes(),
-            )),
+            svg: plain.then(|| {
+                (
+                    format!("rIdImage{id}Svg"),
+                    format!("media/image{id}.svg"),
+                    crate::extension::svg::to_svg(&still).into_bytes(),
+                )
+            }),
         });
         Ok(Some(index))
     }

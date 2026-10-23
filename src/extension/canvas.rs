@@ -107,6 +107,83 @@ pub struct StrokeStyle {
     pub miter_limit: f32,
 }
 
+/// 뒤 모양을 이미 그린 것과 섞는 방법. CSS·PDF의 16가지와 더하기(`Add`, 빛·불꽃).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Blend {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    ColorDodge,
+    ColorBurn,
+    HardLight,
+    SoftLight,
+    Difference,
+    Exclusion,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
+    Add,
+}
+
+impl Blend {
+    /// Lua 이름(`g.setBlendMode`). LÖVE의 `"alpha"`는 `Normal`이다.
+    pub const NAMES: &[(&str, Blend)] = &[
+        ("normal", Blend::Normal),
+        ("multiply", Blend::Multiply),
+        ("screen", Blend::Screen),
+        ("overlay", Blend::Overlay),
+        ("darken", Blend::Darken),
+        ("lighten", Blend::Lighten),
+        ("colorDodge", Blend::ColorDodge),
+        ("colorBurn", Blend::ColorBurn),
+        ("hardLight", Blend::HardLight),
+        ("softLight", Blend::SoftLight),
+        ("difference", Blend::Difference),
+        ("exclusion", Blend::Exclusion),
+        ("hue", Blend::Hue),
+        ("saturation", Blend::Saturation),
+        ("color", Blend::Color),
+        ("luminosity", Blend::Luminosity),
+        ("add", Blend::Add),
+    ];
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES
+            .iter()
+            .find(|(_, blend)| *blend == self)
+            .map_or("normal", |(name, _)| name)
+    }
+}
+
+/// 모양 아래의 그림자. 번짐(`blur`, 가우스 표준편차)과 밀기는 캔버스 좌표다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shadow {
+    pub color: Color,
+    pub blur: f32,
+    pub offset: Point,
+}
+
+/// 뒤 모양에 거는 효과. 바뀔 때마다 `Shape::Effects`로 모양 목록에 들어간다.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Effects {
+    pub blend: Blend,
+    /// 모양 자체를 흐리는 정도(가우스 표준편차, 캔버스 좌표). 0이면 흐리지 않는다.
+    pub blur: f32,
+    pub shadow: Option<Shadow>,
+}
+
+impl Effects {
+    /// 벡터 출력(PDF)으로 옮기지 못해 그림으로 넣어야 하는지.
+    pub fn needs_raster(&self) -> bool {
+        self.blur > 0.0 || self.shadow.is_some() || self.blend == Blend::Add
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
     Fill {
@@ -120,6 +197,7 @@ pub enum Shape {
         style: StrokeStyle,
     },
     /// 글자 한 줄. `origin`은 글자 상자 왼쪽 위, `width`가 있으면 그 폭 안에서 `align`으로 맞춘다.
+    /// `angle`(라디안, 시계 방향)만큼 `origin`을 중심으로 돌린다.
     Text {
         text: String,
         origin: Point,
@@ -127,11 +205,14 @@ pub enum Shape {
         color: Color,
         align: Align,
         width: Option<f32>,
+        angle: f32,
     },
     /// 뒤 모양들을 이 사각형(x, y, w, h, 캔버스 좌표)으로 자른다. `None`이면 자르지 않는다.
     Clip(Option<[f32; 4]>),
     /// 뒤 모양들을 이 경로(캔버스 좌표)의 안쪽으로도 자른다. 여럿이면 모두의 겹친 곳이다. `None`이면 경로 자르기를 모두 푼다.
     ClipPath(Option<(Vec<Segment>, FillRule)>),
+    /// 뒤 모양들에 이 효과를 건다(다음 `Effects`까지).
+    Effects(Effects),
 }
 
 /// 테마 색. `g.theme`으로 Lua에 넘긴다.
@@ -180,6 +261,12 @@ impl Transform {
             a * le + c * lf + e,
             b * le + d * lf + f,
         ])
+    }
+
+    /// 돌린 각도(라디안, 시계 방향).
+    fn angle(&self) -> f32 {
+        let [a, b, ..] = self.0;
+        b.atan2(a)
     }
 
     /// 길이가 늘어나는 비율(선 굵기·글자 크기용).
@@ -233,6 +320,8 @@ pub(super) struct Recorder {
     dash: Option<(Vec<f32>, f32)>,
     fill_rule: FillRule,
     font_size: f32,
+    /// 지금 효과. 바뀌면 `Shape::Effects`를 넣는다.
+    effects: Effects,
     transform: Transform,
     stack: Vec<Transform>,
     pub(super) shapes: Vec<Shape>,
@@ -254,6 +343,7 @@ impl Recorder {
             dash: None,
             fill_rule: FillRule::NonZero,
             font_size: DEFAULT_FONT_SIZE,
+            effects: Effects::default(),
             transform: Transform::IDENTITY,
             stack: Vec::new(),
             shapes: Vec::new(),
@@ -277,6 +367,14 @@ impl Recorder {
             )));
         }
         self.shapes.push(shape);
+        Ok(())
+    }
+
+    fn set_effects(&mut self, effects: Effects) -> mlua::Result<()> {
+        if effects != self.effects {
+            self.effects = effects;
+            self.push(Shape::Effects(effects))?;
+        }
         Ok(())
     }
 
@@ -659,6 +757,10 @@ pub(super) const FUNCTIONS: &[&str] = &[
     "setFillRule",
     "setScissor",
     "setClip",
+    "setBlendMode",
+    "getBlendMode",
+    "setShadow",
+    "setBlur",
     "region",
     "lerpPath",
     "lerp",
@@ -891,8 +993,9 @@ pub(super) fn create(lua: &Lua, recorder: Rc<RefCell<Recorder>>) -> mlua::Result
         let text = args.string(0)?;
         let x = args.opt_number(1)?.unwrap_or(0.0);
         let y = args.opt_number(2)?.unwrap_or(0.0);
+        let r = args.opt_number(3)?.unwrap_or(0.0);
         let sx = args.opt_number(4)?.unwrap_or(1.0);
-        print(&mut rec, &text, [x, y], sx, None, Align::Left)
+        print(&mut rec, &text, [x, y], r, sx, None, Align::Left)
     });
     // printf(text, x, y, limit[, align]). align: "left"(기본), "center", "right". 줄바꿈은 `\n`만 한다.
     function!("printf", |rec, args| {
@@ -911,7 +1014,7 @@ pub(super) fn create(lua: &Lua, recorder: Rc<RefCell<Recorder>>) -> mlua::Result
                 }
             },
         };
-        print(&mut rec, &text, [x, y], 1.0, Some(limit), align)
+        print(&mut rec, &text, [x, y], 0.0, 1.0, Some(limit), align)
     });
     function!("push", |rec, args| {
         let _ = args;
@@ -1050,6 +1153,66 @@ pub(super) fn create(lua: &Lua, recorder: Rc<RefCell<Recorder>>) -> mlua::Result
             Some([x, y, w.max(0.0), h.max(0.0)])
         };
         rec.push(Shape::Clip(rect))?;
+        Ok(MultiValue::new())
+    });
+
+    // setBlendMode(mode): 뒤 모양을 이미 그린 것과 섞는 방법. LÖVE의 두 번째 인자(alphamode)는 무시한다.
+    function!("setBlendMode", |rec, args| {
+        let name = args.string(0)?;
+        let blend = match name.as_str() {
+            "alpha" | "replace" => Blend::Normal,
+            other => Blend::NAMES
+                .iter()
+                .find(|(n, _)| *n == other)
+                .map(|(_, blend)| *blend)
+                .ok_or_else(|| {
+                    let names: Vec<&str> = Blend::NAMES.iter().map(|(n, _)| *n).collect();
+                    args.error(format!(
+                        "blend mode must be one of \"{}\" (or \"alpha\"), got \"{other}\"",
+                        names.join("\", \"")
+                    ))
+                })?,
+        };
+        let effects = Effects { blend, ..rec.effects };
+        rec.set_effects(effects)?;
+        Ok(MultiValue::new())
+    });
+    {
+        let recorder = recorder.clone();
+        g.raw_set(
+            "getBlendMode",
+            lua.create_function(move |_, ()| Ok(recorder.borrow().effects.blend.name()))?,
+        )?;
+    }
+    // setShadow(color[, blur, dx, dy]): 뒤 모양 아래에 그림자를 둔다(그때의 변환 배율을 따른다). 인자가 없으면 끈다.
+    function!("setShadow", |rec, args| {
+        let shadow = if args.len() == 0 || matches!(args.values.first(), Some(Value::Nil)) {
+            None
+        } else {
+            if !matches!(args.values.first(), Some(Value::Table(_) | Value::String(_))) {
+                return Err(args.error(
+                    "argument #1 must be a color table or \"#rrggbb\", e.g. g.setShadow({0, 0, 0, 0.3}, 6, 0, 3)",
+                ));
+            }
+            let scale = rec.transform.scale();
+            Some(Shadow {
+                color: args.color(0)?,
+                blur: args.opt_number(1)?.unwrap_or(4.0).max(0.0) * scale,
+                offset: [
+                    args.opt_number(2)?.unwrap_or(0.0) * scale,
+                    args.opt_number(3)?.unwrap_or(2.0) * scale,
+                ],
+            })
+        };
+        let effects = Effects { shadow, ..rec.effects };
+        rec.set_effects(effects)?;
+        Ok(MultiValue::new())
+    });
+    // setBlur(radius): 뒤 모양을 흐린다(그때의 변환 배율을 따른다). 인자가 없거나 0이면 끈다.
+    function!("setBlur", |rec, args| {
+        let blur = args.opt_number(0)?.unwrap_or(0.0).max(0.0) * rec.transform.scale();
+        let effects = Effects { blur, ..rec.effects };
+        rec.set_effects(effects)?;
         Ok(MultiValue::new())
     });
 
@@ -1222,15 +1385,27 @@ fn print(
     rec: &mut Recorder,
     text: &str,
     at: Point,
+    rotation: f32,
     scale: f32,
     width: Option<f32>,
     align: Align,
 ) -> mlua::Result<MultiValue> {
-    let factor = rec.transform.scale() * scale;
+    // `rotation`은 `at`을 중심으로 돌린다(LÖVE의 `r`).
+    let (sin, cos) = rotation.sin_cos();
+    let [x, y] = at;
+    let transform = rec.transform.then([
+        cos,
+        sin,
+        -sin,
+        cos,
+        x - cos * x + sin * y,
+        y - sin * x - cos * y,
+    ]);
+    let factor = transform.scale() * scale;
     let size = rec.font_size * factor;
     let color = rec.color;
     for (ix, line) in text.split('\n').enumerate() {
-        let origin = rec.transform.apply([
+        let origin = transform.apply([
             at[0],
             at[1] + ix as f32 * rec.font_size * scale * LINE_HEIGHT,
         ]);
@@ -1241,6 +1416,7 @@ fn print(
             color,
             align,
             width: width.map(|width| width * factor),
+            angle: transform.angle(),
         })?;
     }
     Ok(MultiValue::new())

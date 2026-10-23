@@ -1364,7 +1364,7 @@ fn describe(t: f32, shapes: &[crate::extension::Shape], width: f32, height: f32)
                 texts += 1;
                 extend(*origin);
             }
-            Shape::Clip(_) | Shape::ClipPath(_) => {}
+            Shape::Clip(_) | Shape::ClipPath(_) | Shape::Effects(_) => {}
         }
     }
     let Some([x0, y0, x1, y1]) = bounds else {

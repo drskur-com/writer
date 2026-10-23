@@ -339,6 +339,32 @@ fn draw_shapes(
     if canvas.0 <= 0. || canvas.1 <= 0. {
         return;
     }
+    // 흐림·그림자·더하기는 PDF로 옮기지 못해, 그런 그림은 통째로 크게 그린 그림(PNG)으로 넣는다.
+    if shapes
+        .iter()
+        .any(|shape| matches!(shape, Shape::Effects(effects) if effects.needs_raster()))
+    {
+        let frame = crate::extension::raster::Frame {
+            label: String::new(),
+            shapes,
+        };
+        let png = crate::extension::raster::render_png_at(
+            &[frame],
+            canvas.0,
+            canvas.1,
+            [1., 1., 1., 0.],
+            RASTER_MAX_SIDE,
+            RASTER_SCALE,
+        );
+        if let Some(image) = png
+            .ok()
+            .and_then(|png| Image::from_png(Arc::new(png).into(), true).ok())
+        {
+            let height = width * canvas.1 / canvas.0;
+            draw_image(surface, image, x, y, width, height, false);
+        }
+        return;
+    }
     let scale = width / canvas.0;
     surface.push_transform(&Transform::from_row(scale, 0., 0., scale, x, y));
     let canvas_clip = Rect::from_xywh(0., 0., canvas.0, canvas.1).and_then(|rect| {
@@ -353,8 +379,18 @@ fn draw_shapes(
     let mut clip_rect: Option<[f32; 4]> = None;
     let mut clip_paths: Vec<(krilla::geom::Path, FillRule)> = Vec::new();
     let mut pushed = 0;
+    let mut blend = None;
     for shape in shapes {
+        let blended = blend.is_some()
+            && matches!(
+                shape,
+                Shape::Fill { .. } | Shape::Stroke { .. } | Shape::Text { .. }
+            );
+        if let (true, Some(mode)) = (blended, blend) {
+            surface.push_blend_mode(mode);
+        }
         match shape {
+            Shape::Effects(effects) => blend = krilla_blend(effects.blend),
             Shape::Clip(rect) => {
                 clip_rect = *rect;
                 pushed = reclip(surface, pushed, clip_rect, &clip_paths);
@@ -415,10 +451,8 @@ fn draw_shapes(
                 color,
                 align,
                 width,
-            } => {
-                if text.trim().is_empty() {
-                    continue;
-                }
+                angle,
+            } if !text.trim().is_empty() => {
                 let run = PdfRun {
                     len: text.len(),
                     family: String::new(),
@@ -432,6 +466,19 @@ fn draw_shapes(
                     (Align::Right, Some(width)) => width - fonts.width(text, *size),
                     _ => 0.,
                 };
+                let rotated = *angle != 0.;
+                if rotated {
+                    let (sin, cos) = angle.sin_cos();
+                    let [ox, oy] = *origin;
+                    surface.push_transform(&Transform::from_row(
+                        cos,
+                        sin,
+                        -sin,
+                        cos,
+                        ox - cos * ox + sin * oy,
+                        oy - sin * ox - cos * oy,
+                    ));
+                }
                 draw_text(
                     surface,
                     fonts,
@@ -442,7 +489,14 @@ fn draw_shapes(
                     text,
                     &[run],
                 );
+                if rotated {
+                    surface.pop();
+                }
             }
+            Shape::Text { .. } => {}
+        }
+        if blended {
+            surface.pop();
         }
     }
     for _ in 0..pushed {
@@ -452,6 +506,35 @@ fn draw_shapes(
         surface.pop();
     }
     surface.pop();
+}
+
+/// 확장 그림을 그림으로 넣을 때의 긴 변 상한과 배율(인쇄용).
+const RASTER_MAX_SIDE: f32 = 4096.;
+const RASTER_SCALE: f32 = 4.;
+
+/// 확장의 섞기를 PDF의 것으로. 보통이면 `None`.
+fn krilla_blend(blend: crate::extension::Blend) -> Option<krilla::blend::BlendMode> {
+    use crate::extension::Blend;
+    use krilla::blend::BlendMode;
+    Some(match blend {
+        // 더하기는 그림으로 넣으므로(위) 여기에 오지 않는다.
+        Blend::Normal | Blend::Add => return None,
+        Blend::Multiply => BlendMode::Multiply,
+        Blend::Screen => BlendMode::Screen,
+        Blend::Overlay => BlendMode::Overlay,
+        Blend::Darken => BlendMode::Darken,
+        Blend::Lighten => BlendMode::Lighten,
+        Blend::ColorDodge => BlendMode::ColorDodge,
+        Blend::ColorBurn => BlendMode::ColorBurn,
+        Blend::HardLight => BlendMode::HardLight,
+        Blend::SoftLight => BlendMode::SoftLight,
+        Blend::Difference => BlendMode::Difference,
+        Blend::Exclusion => BlendMode::Exclusion,
+        Blend::Hue => BlendMode::Hue,
+        Blend::Saturation => BlendMode::Saturation,
+        Blend::Color => BlendMode::Color,
+        Blend::Luminosity => BlendMode::Luminosity,
+    })
 }
 
 /// 걸린 자르기를 풀고 새로 건다. 건 수를 돌려준다.
@@ -877,6 +960,7 @@ mod tests {
                 color: [0., 0., 0., 1.],
                 align: crate::extension::Align::Center,
                 width: Some(100.),
+                angle: 0.,
             },
         ];
         let document = PdfDocument {
@@ -896,5 +980,32 @@ mod tests {
             }],
         };
         assert!(render(&document).unwrap().starts_with(b"%PDF"));
+        // 흐림이 있으면 통째로 그림으로 넣는다.
+        let mut blurred = vec![crate::extension::Shape::Effects(
+            crate::extension::canvas::Effects {
+                blur: 2.,
+                ..Default::default()
+            },
+        )];
+        if let PdfItem::Drawing { shapes, .. } = &document.pages[0].items[0] {
+            blurred.extend(shapes.iter().cloned());
+        }
+        let document = PdfDocument {
+            pages: vec![PdfPage {
+                width: 200.,
+                height: 200.,
+                items: vec![PdfItem::Drawing {
+                    x: 10.,
+                    y: 10.,
+                    width: 100.,
+                    height: 80.,
+                    canvas: (100., 80.),
+                    shapes: Arc::new(blurred),
+                }],
+            }],
+            ..document
+        };
+        let pdf = render(&document).unwrap();
+        assert!(pdf.windows(13).any(|w| w == b"/Subtype /Ima" || w == b"/Subtype/Imag"));
     }
 }
