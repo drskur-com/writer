@@ -27,8 +27,9 @@ pub fn is_web_address(destination: &str) -> bool {
 /// 이미지 경로를 디스크의 파일로 찾는다. 웹 주소이거나 파일이 없으면 `None`.
 /// 찾은 경로는 `..`를 푼 실제 경로라 같은 파일이면 같은 값이다(내보내기에서 한 번만 넣는다).
 ///
-/// `project_dir`는 프로젝트 폴더(원고·추가자료의 기준)다. 모르면 `None`을 주고,
-/// 그때는 시트 폴더가 든 라이브러리 프로젝트 폴더나 메모 섹션 폴더(`Notes/`)를 쓴다(`base_dir_of`).
+/// `project_dir`는 프로젝트 폴더(원고·추가자료의 기준)다. 모르면 `None`을 준다.
+/// 시트 폴더가 든 라이브러리 프로젝트 폴더나 메모 섹션 폴더(`Notes/`, `base_dir_of`)도 함께 본다.
+/// 선택한 시트만 내보낼 때는 `project_dir`가 시트 폴더라서 이것으로 첨부파일을 찾는다.
 pub fn resolve_image_path(
     sheet_dir: &Path,
     project_dir: Option<&Path>,
@@ -42,13 +43,17 @@ pub fn resolve_image_path(
         return path.is_file().then(|| path.to_path_buf());
     }
 
-    let project_dir = project_dir.or_else(|| base_dir_of(sheet_dir));
+    let library_base = base_dir_of(sheet_dir);
+    let project_dir = project_dir.or(library_base);
+    let mut bases: Vec<&Path> = project_dir.into_iter().collect();
+    bases.extend(library_base.filter(|base| Some(*base) != project_dir));
     let mut candidates = vec![sheet_dir.join(path)];
     // 기준 폴더 기준 경로는 그 안을 가리킨다. `..`가 있으면 밖으로 나가므로 보지 않는다.
-    let inside = !path.components().any(|part| part == Component::ParentDir);
-    if let Some(project_dir) = project_dir.filter(|_| inside) {
-        candidates.push(project_dir.join(path));
-        candidates.push(attachments_dir(project_dir).join(path));
+    if !path.components().any(|part| part == Component::ParentDir) {
+        for base in bases {
+            candidates.push(base.join(path));
+            candidates.push(attachments_dir(base).join(path));
+        }
     }
     let found = candidates
         .into_iter()
@@ -245,6 +250,11 @@ mod tests {
             found
         );
         assert_eq!(resolve_image_path(&notes, None, "Attachments/a.png"), found);
+        // 선택한 메모만 내보내면(ePub·DOCX) 시트 폴더가 기준 폴더로 들어온다.
+        assert_eq!(
+            resolve_image_path(&group, Some(&group), "Attachments/a.png"),
+            found
+        );
     }
 
     #[test]
