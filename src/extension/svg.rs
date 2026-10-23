@@ -30,6 +30,34 @@ pub fn to_svg(still: &Still) -> String {
     for shape in still.shapes.iter() {
         match shape {
             Shape::Effects(effects) => fx = effects_attr(effects, (w, h), &mut defs, &mut next_id),
+            Shape::Image {
+                image,
+                src: [sx, sy, sw, sh],
+                transform,
+                opacity,
+                smooth,
+            } => {
+                use base64::Engine as _;
+                // 원래 파일을 data URI로 넣는다. 안쪽 <svg>가 `src` 밖을 자른다.
+                let data = base64::engine::general_purpose::STANDARD.encode(image.encoded.as_slice());
+                let matrix: Vec<String> = transform.iter().map(|v| num(*v)).collect();
+                let _ = writeln!(
+                    body,
+                    r#"<g transform="matrix({})" opacity="{}"{fx}><svg x="{}" y="{}" width="{}" height="{}" overflow="hidden"><image x="{}" y="{}" width="{}" height="{}" preserveAspectRatio="none"{} href="data:image/{};base64,{data}"/></svg></g>"#,
+                    matrix.join(" "),
+                    num(*opacity),
+                    num(*sx),
+                    num(*sy),
+                    num(*sw),
+                    num(*sh),
+                    num(-sx),
+                    num(-sy),
+                    image.width,
+                    image.height,
+                    if *smooth { "" } else { r#" image-rendering="pixelated""# },
+                    image.format
+                );
+            }
             Shape::Clip(rect) => {
                 clip_rect = *rect;
                 open = reclip(

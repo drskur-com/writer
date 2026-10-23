@@ -1331,7 +1331,7 @@ fn describe_regions(regions: &[crate::extension::Region], hover: Option<&str>) -
 
 fn describe(t: f32, shapes: &[crate::extension::Shape], width: f32, height: f32) -> String {
     use crate::extension::{Paint, Segment, Shape};
-    let (mut fills, mut strokes, mut texts, mut gradients) = (0, 0, 0, 0);
+    let (mut fills, mut strokes, mut texts, mut gradients, mut images) = (0, 0, 0, 0, 0);
     let mut bounds: Option<[f32; 4]> = None;
     let mut extend = |[x, y]: [f32; 2]| {
         let b = bounds.get_or_insert([x, y, x, y]);
@@ -1364,6 +1364,14 @@ fn describe(t: f32, shapes: &[crate::extension::Shape], width: f32, height: f32)
                 texts += 1;
                 extend(*origin);
             }
+            Shape::Image { src, transform, .. } => {
+                images += 1;
+                let [a, b, c, d, e, f] = *transform;
+                let [x, y, w, h] = *src;
+                for [px, py] in [[x, y], [x + w, y], [x, y + h], [x + w, y + h]] {
+                    extend([a * px + c * py + e, b * px + d * py + f]);
+                }
+            }
             Shape::Clip(_) | Shape::ClipPath(_) | Shape::Effects(_) => {}
         }
     }
@@ -1372,9 +1380,9 @@ fn describe(t: f32, shapes: &[crate::extension::Shape], width: f32, height: f32)
     };
     let outside = x0 < 0.0 || y0 < 0.0 || x1 > width || y1 > height;
     format!(
-        "At t = {t}: {} shapes ({fills} fills, {strokes} strokes, {texts} texts, {gradients} with gradients). \
+        "At t = {t}: {} shapes ({fills} fills, {strokes} strokes, {texts} texts, {images} images, {gradients} with gradients). \
          Drawing bounds x {x0:.1}..{x1:.1}, y {y0:.1}..{y1:.1} (text counts its top-left corner only).{}",
-        fills + strokes + texts,
+        fills + strokes + texts + images,
         if outside {
             " Part of the drawing is outside the canvas and will be cut off."
         } else {

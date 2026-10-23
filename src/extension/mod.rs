@@ -19,6 +19,7 @@ pub mod canvas;
 pub mod package;
 pub mod sound;
 pub(crate) mod path;
+pub mod image;
 pub mod raster;
 pub mod render;
 mod scene;
@@ -876,6 +877,15 @@ impl std::fmt::Debug for Extension {
 
 /// 확장의 소스(폴더면 모듈까지). 이름·파일 종류·크기를 검사한다.
 pub fn read_source(root: &Path, name: &str) -> Result<Package, String> {
+    let mut package = read_package(root, name)?;
+    package.images = Some(image::ImageRoots {
+        library: root.to_path_buf(),
+        folder: package::is_folder(root, name).then(|| package::folder(root, name)),
+    });
+    Ok(package)
+}
+
+fn read_package(root: &Path, name: &str) -> Result<Package, String> {
     if !valid_name(name) {
         return Err(format!(
             "Invalid extension name \"{name}\" (use letters, digits, - and _)."
@@ -980,13 +990,14 @@ impl Extension {
         // 크기는 그릴 때마다 다시 정한다.
         let (width, height) = DEFAULT_SIZE;
         let recorder = Rc::new(RefCell::new(canvas::Recorder::new(width, height)));
-        let g = canvas::create(&lua, recorder.clone()).map_err(message)?;
+        let deadline = Rc::new(Cell::new(Instant::now() + LOAD_TIMEOUT));
+        let g = canvas::create(&lua, recorder.clone(), package.images.clone(), deadline.clone())
+            .map_err(message)?;
         lua.sandbox(true).map_err(message)?;
         // sandbox가 그 전 전역 표를 읽기 전용으로 얼리므로(`g.theme`을 그릴 때마다 바꾼다) 그 뒤에 넣는다.
         lua.globals().raw_set("g", g.clone()).map_err(message)?;
         // 소리는 플레이 창에서만 난다([`Extension::enable_sound`]). 그 밖에서는 부르면 알린다.
         let sound = sound::install(&lua).map_err(message)?;
-        let deadline = Rc::new(Cell::new(Instant::now() + LOAD_TIMEOUT));
         let check = deadline.clone();
         lua.set_interrupt(move |_| {
             if Instant::now() > check.get() {
@@ -1661,6 +1672,113 @@ return {
   },
 }
 "#;
+
+    #[test]
+    fn draws_library_images_with_quads() {
+        let root = std::env::temp_dir().join(format!("writer-images-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("Notes/Attachments")).unwrap();
+        std::fs::create_dir_all(root.join(EXTENSIONS_DIR)).unwrap();
+        // 왼쪽 반은 빨강, 오른쪽 반은 파랑인 4×2 그림.
+        let mut pixels = ::image::RgbaImage::new(4, 2);
+        for (x, _, pixel) in pixels.enumerate_pixels_mut() {
+            *pixel = if x < 2 {
+                ::image::Rgba([255, 0, 0, 255])
+            } else {
+                ::image::Rgba([0, 0, 255, 255])
+            };
+        }
+        pixels.save(root.join("Notes/Attachments/pic.png")).unwrap();
+        std::fs::write(
+            root.join(EXTENSIONS_DIR).join("frame.lua"),
+            r#"
+local pic = g.newImage("Notes/Attachments/pic.png")
+pic:setFilter("nearest")
+local right = g.newQuad(2, 0, 2, 2, pic:getDimensions())
+return {
+  size = { 40, 20 },
+  draw = function(g, t, args)
+    g.draw(pic, 0, 0, 0, 5)
+    g.draw(pic, right, 40, 0, math.pi / 2, 5)
+    local w, h = pic:getDimensions()
+    g.print(w .. "x" .. h, 100, 100)
+    if args.missing then g.newImage(args.missing) end
+  end,
+}"#,
+        )
+        .unwrap();
+        let extension = Extension::open(&root, "frame").unwrap();
+        let shapes = extension.draw(0.0, &[], &Theme::default()).unwrap();
+        assert!(matches!(&shapes[2], Shape::Text { text, .. } if text == "4x2"));
+        let pixmap = render::Renderer::new().render(&shapes, 1.0, 40, 20, None);
+        let at = |x, y| {
+            let p = pixmap.sample(x, y);
+            [p.r, p.g, p.b, p.a]
+        };
+        // 5배: 0..10은 빨강, 10..20은 파랑. 오른쪽 칸(파랑)을 90도 돌려 x 30..40, y 0..10에 둔다.
+        assert_eq!(at(5, 5), [255, 0, 0, 255]);
+        assert_eq!(at(15, 5), [0, 0, 255, 255]);
+        assert_eq!(at(35, 5), [0, 0, 255, 255]);
+        assert_eq!(at(25, 15)[3], 0);
+        // 내보내기: SVG는 원래 파일을 data URI로, PDF는 그림으로 넣는다.
+        let still = Still {
+            canvas: (40., 20.),
+            scale: 1.,
+            align: Align::Center,
+            shapes: std::sync::Arc::new(shapes.clone()),
+        };
+        let svg = svg::to_svg(&still);
+        assert!(svg.contains(r#"image-rendering="pixelated" href="data:image/png;base64,"#), "{svg}");
+        let document = crate::export::pdf::PdfDocument {
+            title: "그림".into(),
+            authors: Vec::new(),
+            pages: vec![crate::export::pdf::PdfPage {
+                width: 100.,
+                height: 100.,
+                items: vec![crate::export::pdf::PdfItem::Drawing {
+                    x: 0.,
+                    y: 0.,
+                    width: 40.,
+                    height: 20.,
+                    canvas: (40., 20.),
+                    shapes: std::sync::Arc::new(shapes.clone()),
+                }],
+            }],
+        };
+        let pdf = crate::export::pdf::render(&document).unwrap();
+        assert!(pdf.windows(6).any(|w| w == b"/Image"));
+        // 라이브러리 밖이나 없는 그림은 알린다.
+        for (missing, expected) in [("../x.png", "without \"..\""), ("Notes/none.png", "not found")] {
+            let err = extension
+                .draw(0.0, &[("missing".into(), missing.into())], &Theme::default())
+                .unwrap_err();
+            assert!(err.contains(expected), "{err}");
+        }
+        // 스킬의 예제(photo-frame)는 모든 모양새로 그리고, src가 없으면 안내만 그린다.
+        let example = include_str!("../../resources/skills/extension/references/examples/photo-frame.md");
+        let source = example.split("```lua\n").nth(1).unwrap().split("\n```").next().unwrap();
+        std::fs::write(root.join(EXTENSIONS_DIR).join("photo-frame.lua"), source).unwrap();
+        std::fs::copy(
+            root.join("Notes/Attachments/pic.png"),
+            root.join("Notes/Attachments/beach.jpg"),
+        )
+        .unwrap();
+        let frame = Extension::open(&root, "photo-frame").unwrap();
+        for style in ["polaroid", "round", "circle"] {
+            let args = [
+                ("src".to_string(), "Notes/Attachments/beach.jpg".to_string()),
+                ("caption".to_string(), "여름".to_string()),
+                ("style".to_string(), style.to_string()),
+            ];
+            let shapes = frame.draw(0.0, &args, &Theme::default()).unwrap();
+            assert!(shapes.iter().any(|shape| matches!(shape, Shape::Image { .. })), "{style}");
+        }
+        let hint = frame.draw(0.0, &[], &Theme::default()).unwrap();
+        assert!(matches!(&hint[..], [Shape::Text { .. }]), "{hint:?}");
+        // 라이브러리에서 읽지 않은 확장은 그림을 못 읽는다.
+        let err = Extension::load("x", "local p = g.newImage('a.png') return {}").unwrap_err();
+        assert!(err.contains("only be read from a library"), "{err}");
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn effects_and_rotated_text() {
@@ -2410,7 +2528,10 @@ return {
                                     })
                                     .collect(),
                                 Shape::Text { origin, .. } => vec![*origin],
-                                Shape::Clip(_) | Shape::ClipPath(_) | Shape::Effects(_) => {
+                                Shape::Clip(_)
+                                | Shape::ClipPath(_)
+                                | Shape::Effects(_)
+                                | Shape::Image { .. } => {
                                     Vec::new()
                                 }
                             };

@@ -140,6 +140,20 @@ Each applies to everything drawn after it (shapes, outlines, and text) until cha
 
 Blur and shadows cost more to draw than plain shapes: use them on a few large shapes rather than hundreds of small ones, and turn them off right after. In PDF exports a drawing that uses blur, shadows, or `"add"` becomes a picture instead of vectors.
 
+### Images
+
+Extensions can draw image files from the library: photos the user attached, or pictures kept in a folder extension's own folder (sprites, textures). You cannot create image files yourself, so use images only when the user has one or names one; a typical use is decorating the user's photo (a frame, a tilt, a shadow, a round crop, labels or arrows on top).
+
+| Function | Meaning |
+|---|---|
+| `g.newImage(path)` | Load a PNG, JPEG, GIF, or WebP. `path` is relative to the library, like `"Notes/Attachments/photo.jpg"` (the path the user writes in the block, e.g. `src:`); a folder extension looks in its own folder first (`"sprite.png"`). Paths outside the library or with `..` fail. Loading at the top of the file is fine for fixed pictures; inside `draw` it is cached. |
+| `img:getWidth()`, `img:getHeight()`, `img:getDimensions()` | The image's size in pixels. |
+| `img:setFilter("nearest")` | Enlarge pixel art without smoothing (`"linear"` is the default). |
+| `g.newQuad(x, y, w, h, sw, sh)` | A part of an image in its pixels (a cell of a sprite sheet). |
+| `g.draw(img[, quad], x, y[, r, sx, sy, ox, oy])` | Draw the image (or the quad) with its top-left at `x, y`, as in LÖVE: turned by `r` around `x, y`, scaled by `sx, sy` (default 1; `sy` defaults to `sx`), with `ox, oy` (image pixels) as the point placed at `x, y`. It follows the transform, clipping, shadows, and blend modes; the current color's alpha sets its opacity (its color is not mixed in). |
+
+To fill a box and crop the overflow ("cover"), scale by `math.max(w / iw, h / ih)`, center it, and clip with `g.setClip` or `g.setScissor`; to fit inside a box, use `math.min`. Missing files fail with a message, so give `src` no default image and show a short hint when it is missing. See `examples/photo-frame.md`.
+
 ### Animation helpers
 
 | Function | Meaning |
@@ -154,7 +168,7 @@ Blur and shadows cost more to draw than plain shapes: use them on a few large sh
 
 ## Not available
 
-Anything else in LÖVE: images, canvases, shaders, GPU meshes, textures, per-pixel lighting, fonts from files, `love.update`/`love.draw` callbacks, keyboard input, dragging, sound in a block. (Hover and clicking on regions are available: `interactive.md`; a running game with keyboard and mouse runs in a window: `play.md`.) Also: text along a path. Calling a function that does not exist fails with a list of the available ones.
+Anything else in LÖVE: canvases, shaders, GPU meshes, textures, per-pixel lighting, fonts from files, `love.update`/`love.draw` callbacks, keyboard input, dragging, sound in a block. (Hover and clicking on regions are available: `interactive.md`; a running game with keyboard and mouse runs in a window: `play.md`.) Also: text along a path. Calling a function that does not exist fails with a list of the available ones.
 
 ## Design rules
 
@@ -185,5 +199,6 @@ Complete files in `examples/`. Read the closest one before writing a new drawing
 | `examples/night-sky.md` | Stable randomness with a slow twinkle. |
 | `examples/seedling.md` | Paths, gradients, and morphing. |
 | `examples/route.md` | Moving along a path, drawing a line on, dashes. |
+| `examples/photo-frame.md` | The user's photo in a tilted frame with a shadow, cover cropping, a round crop. |
 | `examples/turntable.md` | A 3D scene (with `draw-3d.md`). |
 | `examples/pick-chart.md` | Hover and click (with `interactive.md`). |

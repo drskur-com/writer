@@ -213,6 +213,15 @@ pub enum Shape {
     ClipPath(Option<(Vec<Segment>, FillRule)>),
     /// 뒤 모양들에 이 효과를 건다(다음 `Effects`까지).
     Effects(Effects),
+    /// 그림 파일(`g.draw`). `transform`은 그림의 픽셀 좌표(원래 크기)를 캔버스로 옮기고, `src`(x, y, w, h,
+    /// 그림 픽셀)만 보인다. `smooth`가 아니면 가장 가까운 픽셀로 키운다(픽셀 그림).
+    Image {
+        image: std::sync::Arc<super::image::ImageData>,
+        src: [f32; 4],
+        transform: [f32; 6],
+        opacity: f32,
+        smooth: bool,
+    },
 }
 
 /// 테마 색. `g.theme`으로 Lua에 넘긴다.
@@ -761,6 +770,9 @@ pub(super) const FUNCTIONS: &[&str] = &[
     "getBlendMode",
     "setShadow",
     "setBlur",
+    "newImage",
+    "newQuad",
+    "draw",
     "region",
     "lerpPath",
     "lerp",
@@ -805,7 +817,12 @@ fn color_table(lua: &Lua, color: Color) -> mlua::Result<Table> {
 }
 
 /// `g` 표를 만든다. 함수들은 `recorder`에 모양을 모은다.
-pub(super) fn create(lua: &Lua, recorder: Rc<RefCell<Recorder>>) -> mlua::Result<Table> {
+pub(super) fn create(
+    lua: &Lua,
+    recorder: Rc<RefCell<Recorder>>,
+    images: Option<super::image::ImageRoots>,
+    deadline: Rc<std::cell::Cell<std::time::Instant>>,
+) -> mlua::Result<Table> {
     let g = lua.create_table()?;
     g.raw_set(CANVAS_MARK, true)?;
 
@@ -1216,6 +1233,90 @@ pub(super) fn create(lua: &Lua, recorder: Rc<RefCell<Recorder>>) -> mlua::Result
         Ok(MultiValue::new())
     });
 
+    // newImage(path): 라이브러리(폴더 확장은 자기 폴더 먼저)의 그림 파일. 읽는 시간은 호출 시간 제한에서 뺀다.
+    {
+        let deadline = deadline.clone();
+        g.raw_set(
+            "newImage",
+            lua.create_function(move |_, values: MultiValue| {
+                let args = Args::new("newImage", values);
+                let path = args.string(0)?;
+                let Some(roots) = &images else {
+                    return Err(args.error("images can only be read from a library"));
+                };
+                let started = std::time::Instant::now();
+                let image = super::image::load(roots, &path).map_err(|err| args.error(err));
+                deadline.set(deadline.get() + started.elapsed());
+                Ok(LuaImage {
+                    image: image?,
+                    smooth: true,
+                })
+            })?,
+        )?;
+    }
+    // newQuad(x, y, w, h[, sw, sh]): 그림의 한 부분(스프라이트 시트의 칸). sw·sh는 LÖVE와 맞추려고 받고 쓰지 않는다.
+    g.raw_set(
+        "newQuad",
+        lua.create_function(|_, values: MultiValue| {
+            let args = Args::new("newQuad", values);
+            Ok(LuaQuad([
+                args.number(0)?,
+                args.number(1)?,
+                args.number(2)?.max(0.0),
+                args.number(3)?.max(0.0),
+            ]))
+        })?,
+    )?;
+    // draw(image[, quad], x, y, r, sx, sy, ox, oy): LÖVE와 같다. 지금 색의 투명도만 따른다(색은 섞지 않는다).
+    function!("draw", |rec, args| {
+        let Some(Value::UserData(ud)) = args.values.first() else {
+            return Err(args.error("argument #1 must be an image from g.newImage"));
+        };
+        let image = ud
+            .borrow::<LuaImage>()
+            .map_err(|_| args.error("argument #1 must be an image from g.newImage"))?
+            .clone();
+        let (src, at) = match args.values.get(1) {
+            Some(Value::UserData(quad)) => match quad.borrow::<LuaQuad>() {
+                Ok(quad) => (quad.0, 2),
+                Err(_) => return Err(args.error("argument #2 must be a quad or a number")),
+            },
+            _ => (
+                [0.0, 0.0, image.image.width as f32, image.image.height as f32],
+                1,
+            ),
+        };
+        let number = |ix: usize, default: f32| -> mlua::Result<f32> {
+            Ok(args.opt_number(at + ix)?.unwrap_or(default))
+        };
+        let (x, y, r) = (number(0, 0.0)?, number(1, 0.0)?, number(2, 0.0)?);
+        let sx = number(3, 1.0)?;
+        let sy = number(4, sx)?;
+        let (ox, oy) = (number(5, 0.0)?, number(6, 0.0)?);
+        // 그림 픽셀 → (칸 왼쪽 위를 원점으로) → 기준점 → 배율 → 회전 → 자리.
+        let (sin, cos) = r.sin_cos();
+        let [qx, qy, ..] = src;
+        let (tx, ty) = (-(qx + ox), -(qy + oy));
+        let local = [
+            cos * sx,
+            sin * sx,
+            -sin * sy,
+            cos * sy,
+            x + cos * sx * tx - sin * sy * ty,
+            y + sin * sx * tx + cos * sy * ty,
+        ];
+        let transform = rec.transform.then(local).0;
+        let opacity = rec.color[3];
+        rec.push(Shape::Image {
+            image: image.image,
+            src,
+            transform,
+            opacity,
+            smooth: image.smooth,
+        })?;
+        Ok(MultiValue::new())
+    });
+
     // region(id, x, y, w, h): 누를 수 있는 영역을 둔다(그리지 않는다). 변환을 적용한 테두리 상자로 모은다.
     function!("region", |rec, args| {
         let id = args.string(0)?;
@@ -1420,6 +1521,49 @@ fn print(
         })?;
     }
     Ok(MultiValue::new())
+}
+
+/// `g.newImage`의 그림. `setFilter("nearest")`면 픽셀 그대로 키운다.
+#[derive(Clone)]
+struct LuaImage {
+    image: std::sync::Arc<super::image::ImageData>,
+    smooth: bool,
+}
+
+impl mlua::UserData for LuaImage {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("getWidth", |_, this, ()| Ok(this.image.width));
+        methods.add_method("getHeight", |_, this, ()| Ok(this.image.height));
+        methods.add_method("getDimensions", |_, this, ()| {
+            Ok((this.image.width, this.image.height))
+        });
+        // setFilter(min[, mag]): "linear"(기본) 또는 "nearest". 키울 때(mag)를 따른다.
+        methods.add_method_mut("setFilter", |_, this, (min, mag): (String, Option<String>)| {
+            let filter = mag.unwrap_or(min);
+            this.smooth = match filter.as_str() {
+                "linear" => true,
+                "nearest" => false,
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "image:setFilter: filter must be \"linear\" or \"nearest\", got \"{other}\""
+                    )));
+                }
+            };
+            Ok(())
+        });
+    }
+}
+
+/// `g.newQuad`의 칸(그림 픽셀의 x, y, w, h).
+struct LuaQuad([f32; 4]);
+
+impl mlua::UserData for LuaQuad {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("getViewport", |_, this, ()| {
+            let [x, y, w, h] = this.0;
+            Ok((x, y, w, h))
+        });
+    }
 }
 
 /// 글자 줄 높이(글자 크기 대비).

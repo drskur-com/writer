@@ -11,7 +11,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use vello_cpu::color::{AlphaColor, Srgb};
 use vello_cpu::kurbo::{Affine, BezPath, Cap, Join, Point as KPoint, Rect, Stroke};
 use vello_cpu::filter_effects::{EdgeMode, Filter, FilterPrimitive};
-use vello_cpu::peniko::{BlendMode, Compose, Fill, Gradient, Mix};
+use vello_cpu::peniko::{
+    BlendMode, Compose, Extend, Fill, Gradient, ImageAlphaType, ImageQuality, ImageSampler, Mix,
+};
+use vello_cpu::{ImageSource, PixelMetadata};
 use vello_cpu::{Pixmap, RenderContext, RenderSettings, Resources};
 
 use super::canvas::{Blend, Effects, 
@@ -142,6 +145,59 @@ fn draw(ctx: &mut RenderContext, fonts: &mut Fonts, shapes: &[Shape], base: Affi
                     ctx.push_clip_path(&bez(path));
                     pushed += 1;
                 }
+            }
+            Shape::Image {
+                image,
+                src: [x, y, w, h],
+                transform,
+                opacity,
+                smooth,
+            } => {
+                if *w <= 0.0 || *h <= 0.0 || *opacity <= 0.0 {
+                    continue;
+                }
+                let pixels = image.prepared.get_or_init(|| {
+                    let rgba = &image.rgba;
+                    Arc::new(Pixmap::from_parts(
+                        rgba.as_raw().clone(),
+                        rgba.width() as u16,
+                        rgba.height() as u16,
+                        PixelMetadata {
+                            may_have_transparency: true,
+                            alpha_type: ImageAlphaType::Alpha,
+                        },
+                    ))
+                });
+                // 화면용 픽셀은 줄였을 수 있다: 원래 크기 좌표로 맞춘다.
+                let shrink = f64::from(image.width) / f64::from(image.rgba.width());
+                let brush = vello_cpu::Image {
+                    image: ImageSource::Pixmap(pixels.clone()),
+                    sampler: ImageSampler {
+                        x_extend: Extend::Pad,
+                        y_extend: Extend::Pad,
+                        quality: if *smooth {
+                            ImageQuality::Medium
+                        } else {
+                            ImageQuality::Low
+                        },
+                        alpha: opacity.clamp(0.0, 1.0),
+                    },
+                };
+                let [a, b, c, d, e, f] = transform.map(f64::from);
+                let rect = Rect::new(
+                    f64::from(*x),
+                    f64::from(*y),
+                    f64::from(x + w),
+                    f64::from(y + h),
+                );
+                ctx.set_transform(base * Affine::new([a, b, c, d, e, f]));
+                with_effects(ctx, &effects, |ctx| {
+                    ctx.set_paint(brush.clone());
+                    ctx.set_paint_transform(Affine::scale(shrink));
+                    ctx.fill_rect(&rect);
+                    ctx.reset_paint_transform();
+                });
+                ctx.set_transform(base);
             }
             Shape::Effects(next) => {
                 effects = *next;
@@ -429,6 +485,19 @@ fn hash_shape(shape: &Shape, f: &mut dyn FnMut(f32)) {
         Shape::Clip(rect) => {
             f(400.0);
             rect.iter().flatten().for_each(|v| f(*v));
+        }
+        Shape::Image {
+            image,
+            src,
+            transform,
+            opacity,
+            smooth,
+        } => {
+            f(700.0 + f32::from(u8::from(*smooth)));
+            f(f32::from_bits(image.id as u32));
+            f(f32::from_bits((image.id >> 32) as u32));
+            src.iter().chain(transform).for_each(|v| f(*v));
+            f(*opacity);
         }
         Shape::Effects(effects) => {
             f(600.0 + effects.blend as u8 as f32);

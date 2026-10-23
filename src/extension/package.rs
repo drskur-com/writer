@@ -33,6 +33,8 @@ pub const MAX_DEPTH: usize = 4;
 pub struct Package {
     pub main: String,
     pub modules: BTreeMap<String, (String, String)>,
+    /// `g.newImage`가 그림을 찾는 곳. 라이브러리에서 읽은 확장만 있다.
+    pub images: Option<super::image::ImageRoots>,
 }
 
 impl From<String> for Package {
@@ -40,6 +42,7 @@ impl From<String> for Package {
         Self {
             main,
             modules: BTreeMap::new(),
+            images: None,
         }
     }
 }
@@ -73,7 +76,11 @@ impl Package {
             return Err(format!("too many modules (limit {MAX_MODULES})"));
         }
         let main = main.ok_or_else(|| format!("the folder has no {ENTRY_FILE}"))?;
-        Ok(Self { main, modules })
+        Ok(Self {
+            main,
+            modules,
+            images: None,
+        })
     }
 
     /// 모듈이 있는지(폴더 확장인지).

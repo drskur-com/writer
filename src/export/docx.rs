@@ -759,10 +759,14 @@ impl<'a> DocBuilder<'a> {
         .map_err(|_| ())?;
         let index = self.images.len();
         let id = index + 1;
-        // Word는 SVG의 섞기·흐림·그림자를 그리지 않으므로, 효과가 있는 그림은 PNG만 넣는다.
-        let plain = still.shapes.iter().all(|shape| {
-            !matches!(shape, crate::extension::Shape::Effects(effects)
-                if *effects != crate::extension::canvas::Effects::default())
+        // Word는 SVG의 섞기·흐림·그림자를 그리지 않으므로 효과가 있는 그림은 PNG만 넣는다. 그림 파일이 든 것도
+        // (SVG에 파일을 한 번 더 넣지 않도록) PNG만 넣는다.
+        let plain = still.shapes.iter().all(|shape| match shape {
+            crate::extension::Shape::Effects(effects) => {
+                *effects == crate::extension::canvas::Effects::default()
+            }
+            crate::extension::Shape::Image { .. } => false,
+            _ => true,
         });
         self.images.push(ImagePart {
             rel_id: format!("rIdImage{id}"),

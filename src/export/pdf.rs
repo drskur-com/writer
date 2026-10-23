@@ -384,7 +384,7 @@ fn draw_shapes(
         let blended = blend.is_some()
             && matches!(
                 shape,
-                Shape::Fill { .. } | Shape::Stroke { .. } | Shape::Text { .. }
+                Shape::Fill { .. } | Shape::Stroke { .. } | Shape::Text { .. } | Shape::Image { .. }
             );
         if let (true, Some(mode)) = (blended, blend) {
             surface.push_blend_mode(mode);
@@ -494,6 +494,40 @@ fn draw_shapes(
                 }
             }
             Shape::Text { .. } => {}
+            Shape::Image {
+                image,
+                src: [sx, sy, sw, sh],
+                transform: [a, b, c, d, e, f],
+                opacity,
+                ..
+            } => {
+                // 원래 파일을 그대로 넣는다(인쇄 해상도). `src` 밖은 자른다.
+                let data: krilla::Data = image.encoded.clone().into();
+                let pdf_image = match image.format {
+                    "png" => Image::from_png(data, true),
+                    "jpeg" => Image::from_jpeg(data, true),
+                    "gif" => Image::from_gif(data, true),
+                    _ => Image::from_webp(data, true),
+                };
+                let clip = Rect::from_xywh(*sx, *sy, *sw, *sh).and_then(|rect| {
+                    let mut builder = PathBuilder::new();
+                    builder.push_rect(rect);
+                    builder.finish()
+                });
+                if let (Ok(pdf_image), Some(clip), Some(size)) = (
+                    pdf_image,
+                    clip,
+                    Size::from_wh(image.width as f32, image.height as f32),
+                ) {
+                    surface.push_transform(&Transform::from_row(*a, *b, *c, *d, *e, *f));
+                    surface.push_clip_path(&clip, &FillRule::NonZero);
+                    surface.push_opacity(normalized(*opacity));
+                    surface.draw_image(pdf_image, size);
+                    surface.pop();
+                    surface.pop();
+                    surface.pop();
+                }
+            }
         }
         if blended {
             surface.pop();

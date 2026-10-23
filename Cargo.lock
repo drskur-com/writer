@@ -9939,6 +9939,7 @@ version = "0.1.0"
 dependencies = [
  "aws-config",
  "aws-sdk-bedrock",
+ "base64 0.22.1",
  "block2 0.6.2",
  "chrono",
  "dirs 5.0.1",
