@@ -7,28 +7,38 @@
 use std::path::PathBuf;
 
 /// 설정 창에서 고를 수 있는 Bedrock 리전(코드, 이름). 상용 리전만 둔다.
-pub const BEDROCK_REGIONS: &[(&str, &str)] = &[
-    ("us-east-1", "미국 동부(버지니아 북부)"),
-    ("us-east-2", "미국 동부(오하이오)"),
-    ("us-west-2", "미국 서부(오레곤)"),
-    ("ca-central-1", "캐나다(중부)"),
-    ("sa-east-1", "남아메리카(상파울루)"),
-    ("eu-central-1", "유럽(프랑크푸르트)"),
-    ("eu-central-2", "유럽(취리히)"),
-    ("eu-west-1", "유럽(아일랜드)"),
-    ("eu-west-2", "유럽(런던)"),
-    ("eu-west-3", "유럽(파리)"),
-    ("eu-north-1", "유럽(스톡홀름)"),
-    ("eu-south-1", "유럽(밀라노)"),
-    ("eu-south-2", "유럽(스페인)"),
-    ("ap-northeast-1", "아시아 태평양(도쿄)"),
-    ("ap-northeast-2", "아시아 태평양(서울)"),
-    ("ap-northeast-3", "아시아 태평양(오사카)"),
-    ("ap-south-1", "아시아 태평양(뭄바이)"),
-    ("ap-south-2", "아시아 태평양(하이데라바드)"),
-    ("ap-southeast-1", "아시아 태평양(싱가포르)"),
-    ("ap-southeast-2", "아시아 태평양(시드니)"),
+pub const BEDROCK_REGIONS: &[(&str, RegionName)] = &[
+    ("us-east-1", RegionName("us-east-1")),
+    ("us-east-2", RegionName("us-east-2")),
+    ("us-west-2", RegionName("us-west-2")),
+    ("ca-central-1", RegionName("ca-central-1")),
+    ("sa-east-1", RegionName("sa-east-1")),
+    ("eu-central-1", RegionName("eu-central-1")),
+    ("eu-central-2", RegionName("eu-central-2")),
+    ("eu-west-1", RegionName("eu-west-1")),
+    ("eu-west-2", RegionName("eu-west-2")),
+    ("eu-west-3", RegionName("eu-west-3")),
+    ("eu-north-1", RegionName("eu-north-1")),
+    ("eu-south-1", RegionName("eu-south-1")),
+    ("eu-south-2", RegionName("eu-south-2")),
+    ("ap-northeast-1", RegionName("ap-northeast-1")),
+    ("ap-northeast-2", RegionName("ap-northeast-2")),
+    ("ap-northeast-3", RegionName("ap-northeast-3")),
+    ("ap-south-1", RegionName("ap-south-1")),
+    ("ap-south-2", RegionName("ap-south-2")),
+    ("ap-southeast-1", RegionName("ap-southeast-1")),
+    ("ap-southeast-2", RegionName("ap-southeast-2")),
 ];
+
+/// 리전 이름. 보일 때(`Display`) UI 언어로 옮긴다(ADR-0027, `assistant.region.<코드>`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionName(&'static str);
+
+impl std::fmt::Display for RegionName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&t!(format!("assistant.region.{}", self.0)))
+    }
+}
 
 /// 프로필 하나.
 #[derive(Debug, Clone, PartialEq, Eq)]

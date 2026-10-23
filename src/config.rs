@@ -34,6 +34,8 @@ pub struct Config {
     pub aws_region: Option<String>,
     /// 어시스턴트가 부를 Bedrock 모델(추론 프로필) ID. 없으면 `agent::DEFAULT_MODEL`.
     pub ai_model: Option<String>,
+    /// UI 언어(`en`·`ko`). 없으면 시스템 언어를 따른다.
+    pub language: Option<String>,
 }
 
 /// 설정 디렉터리 (`<config_dir>/Writer`).

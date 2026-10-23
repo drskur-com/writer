@@ -2,7 +2,7 @@
 
 - 상태: Proposed
 - 날짜: 2026-10-23
-- 관련: ADR-0008(줄 블록), ADR-0017(표: 접힌 줄 + 아래 블록), `src/extension/`, `src/app/editor_extension.rs`, `src/app/extension_commands.rs`, `src/app/insert_extension.rs`, `src/agent/tools.rs`(`run_extension`), `src/agent/prompt.rs`, `resources/skills/extension/`
+- 관련: ADR-0008(줄 블록), ADR-0017(표: 접힌 줄 + 아래 블록), `src/extension/`, `src/app/editor_extension.rs`, `src/app/extension_painter.rs`, `src/app/extension_commands.rs`, `src/app/insert_extension.rs`, `src/app/manage_extensions.rs`, `src/agent/tools.rs`(`run_extension`), `src/agent/prompt.rs`, `resources/skills/extension/`
 
 ## 배경 (Context)
 
@@ -27,6 +27,19 @@
   `polygon`, `print`, `printf`, `push`/`pop`/`translate`/`rotate`/`scale` 등). 호출은 **모양 목록**(경로·글자,
   캔버스 좌표, 원·호는 3차 베지어)으로 모으고, 에디터는 GPUI `canvas`에서 `paint_path`·`shape_line`으로 그린다.
   없는 함수를 부르면 쓸 수 있는 목록을 알린다.
+- 벡터(LÖVE에 없는 것): `g.newPath([svg])`(빌더 `moveTo`·`curveTo`·`quadTo`·`arc`…, SVG 경로 문자열 `M L H V C S Q T A Z`),
+  `g.fill`·`g.stroke`, 그라디언트(`g.newLinearGradient`·`g.newRadialGradient`를 `setColor`에), `setLineJoin`·`setLineCap`·
+  `setMiterLimit`·`setDash`(offset 포함)·`setFillRule`(nonzero·evenodd)·`setScissor`(사각형 자르기), 경로 측정
+  (`length`·`pointAt`·`trim`·`bounds`), 제어점(`points`·`withPoints`)과 모핑(`g.lerpPath`), `g.ease.*`·`g.lerp`·`g.lerpColor`.
+  - 경로는 지역 좌표로 두고 그릴 때 변환을 적용한다. 그래서 파일 맨 위에서 한 번 만들어 여러 번 그린다. `g`는 로드할 때도
+    전역으로 있다(sandbox가 얼리지 않게 sandbox 뒤에 넣는다).
+  - 측정·자르기·점선은 작업 스레드에서 lyon 경로 측정으로 한다. 곡선은 잘라도 곡선이다. 점선은 기록할 때 경로를 나눠 둔다.
+  - 모양 목록: `Fill { path, paint, rule }`, `Stroke { path, paint, style }`, `Clip(rect)`. `paint`는 단색·선형·방사형
+    (캔버스 좌표, 멈춤 여럿). 내보내기는 이것을 그대로 PDF·SVG 그라디언트로 옮길 수 있다.
+  - 화면(`src/app/extension_painter.rs`): 모양마다 lyon으로 삼각형을 만들고 (모양, 배율)로 캐시한다. GPUI의 경로
+    그라디언트는 두 색 선형이고 경로의 테두리 상자 기준이라, 두 점 사이 그라디언트를 상자 기준 각도·자리로 바꿔 준다
+    (셰이더 식을 옮긴 테스트로 맞는지 본다). 세 색 이상은 삼각형을 멈춤 사이 띠로 잘라 정확히, 방사형은 고리 × 부채꼴
+    칸(현의 오차 0.25px 안)으로 잘라 칸마다 반지름 방향 두 색으로 근사한다.
 - 3차원: `g.newScene([x, y, w, h])`이 장면을 돌려준다. 카메라(`camera`·`ortho`), 빛(`light`), 3차원 변환,
   입체(`box`·`sphere`·`cylinder`·`cone`·`torus`·`plane`·`polygon`·`mesh`)와 `line`을 모았다가 `draw()`에서 투영해,
   면마다 평면 음영(주변광 + 램버트)을 준 2차원 다각형으로 모양 목록에 넣는다. GPU는 쓰지 않는다. 가림은 면의
@@ -53,6 +66,10 @@
     넣는다(빈 칸은 빼서 확장의 기본값을 쓴다).
   - 시스템 프롬프트에 `<extensions>` 목록(이름·인자 이름·설명)을 넣어, 있는 확장을 새로 만들지 않고 쓰게 한다.
   - `run_extension`은 앞머리가 없거나, 설명이 없거나, 인자가 `args`에 없으면 알린다.
+- 관리: `Extensions` 메뉴는 명령이 없어도 늘 있고, 맨 아래 `Manage Extensions…` 대화상자가 모든 확장(그림·명령·읽지
+  못하는 것)을 목록으로 보이고, 고른 것의 미리보기(`example` 인자, 삽입 대화상자와 같은 그리기)나 명령 목록,
+  설명, 쓰는 시트 수를 보인다. Finder에서 보기와 휴지통으로 이동이 있다. 지우기 전에
+  쓰는 시트 수를 알리고, 원고의 블록은 건드리지 않는다(블록 자리에 확장이 없다고 보인다).
 - 어시스턴트: 빌트인 스킬 `extension`(API·규칙)과 `run_extension` 도구(그리기 결과의 모양 수·범위, 명령 결과,
   오류)를 준다. 파일은 기존 `write_file`·`edit_file`(승인 diff)로 쓴다. 라이브러리를 열 때 `Extensions/`를 만든다.
 
@@ -65,6 +82,8 @@
 - (-): 캔버스는 LÖVE의 일부뿐이다(이미지·셰이더·입력 없음). 글자는 돌리지 않는다.
 - (-): 3차원은 면 단위 깊이 정렬이라, 서로 뚫고 지나가는 면이나 큰 면 옆의 작은 면은 순서가 틀릴 수 있다(깊이 버퍼 없음). 면 하나가 모양 하나라 모양 상한(애니메이션 2천)이 장면 크기를 정한다.
 - (+): 3차원 결과도 2차원 모양 목록이라 내보내기 경로가 그대로 쓰인다.
+- (+): 삼각형 캐시로 정지 그림, 주기 애니메이션의 같은 프레임, 움직이지 않는 모양은 다시 나누지 않는다.
+- (-): 방사형 그라디언트는 화면에서 근사라 칸이 많다(큰 원은 수백 조각). 경로 모양 자르기·불리언 연산·블렌드·블러는 없다.
 - (-): 애니메이션 블록이 보이면 창 전체를 초당 30번 다시 그린다. 블록 수보다 이 고정 비용이 크다(디버그 빌드에서 CPU 약 13%).
 - (-): 블록이 처음 보일 때 첫 결과가 올 때까지(수 ms) 캔버스가 비어 있다.
 - (-): 앞머리와 코드가 어긋날 수 있다(인자를 바꾸고 `args`를 고치지 않는 등). 스킬과 `run_extension`의 알림으로 줄인다.

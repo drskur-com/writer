@@ -348,6 +348,52 @@ fn write_order_and_glue(group: &mut Group, before: Vec<super::Sheet>) -> io::Res
     Ok(())
 }
 
+/// 그룹의 시트 `paths`를 휴지통으로 옮긴다. 옮긴 시트의 경로를 돌려주고, 처음 난 오류는 함께 돌려준다.
+///
+/// 접합한 시트 묶음의 첫 시트를 지우면 남은 다음 시트가 묶음의 처음이 된다. 그대로 두면 지운 시트
+/// 앞의 다른 시트에 이어지기 때문이다. 지운 시트 사이의 시트끼리는 그대로 잇는다.
+pub fn trash_sheets(group: &mut Group, paths: &[PathBuf]) -> (Vec<PathBuf>, Option<io::Error>) {
+    let mut trashed = Vec::new();
+    let mut error = None;
+    for path in paths {
+        match move_to_trash(path) {
+            Ok(()) => trashed.push(path.clone()),
+            Err(err) => {
+                error.get_or_insert(err);
+            }
+        }
+    }
+    if let Err(err) = forget_sheets(group, &trashed) {
+        error.get_or_insert(err);
+    }
+    (trashed, error)
+}
+
+/// 지운 시트 `removed`를 그룹 목록에서 빼고, 첫 시트를 잃은 접합 묶음은 다음 시트부터 다시 시작한다.
+/// 접합이 바뀌었을 때만 메타에 쓴다.
+fn forget_sheets(group: &mut Group, removed: &[PathBuf]) -> io::Result<()> {
+    let before = group.sheets.clone();
+    let mut head_removed = false;
+    let mut changed = false;
+    for (index, sheet) in group.sheets.iter_mut().enumerate() {
+        let glued = index > 0 && sheet.glued;
+        if removed.contains(&sheet.path) {
+            head_removed = !glued || head_removed;
+        } else {
+            if glued && head_removed {
+                sheet.glued = false;
+                changed = true;
+            }
+            head_removed = false;
+        }
+    }
+    group.sheets.retain(|sheet| !removed.contains(&sheet.path));
+    if changed {
+        write_order_and_glue(group, before)?;
+    }
+    Ok(())
+}
+
 /// 시트 목록의 순서와 접합을 그룹 메타에 쓴다.
 fn write_sheet_order_and_glue(dir: &Path, sheets: &[Sheet]) -> io::Result<()> {
     let names = |glued_only: bool| -> Vec<toml::Value> {
@@ -520,18 +566,21 @@ pub fn move_group(source: &Path, target: &Path) -> io::Result<PathBuf> {
     if !source.is_dir() || !target.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "그룹 폴더를 찾을 수 없습니다",
+            t!("core.error.group_not_found").into_owned(),
         ));
     }
     if source == target || target.starts_with(source) || source.starts_with(target) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "그룹을 자기 자신이나 자기 안으로 옮길 수 없습니다",
+            t!("core.error.group_into_itself").into_owned(),
         ));
     }
-    let parent = source
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "상위 폴더가 없습니다"))?;
+    let parent = source.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            t!("core.error.no_parent").into_owned(),
+        )
+    })?;
 
     let source_name = file_name(source);
     let mut source_order = group_order(parent)?;
@@ -678,9 +727,12 @@ pub fn update_project(
     {
         return Ok(dir.to_path_buf());
     }
-    let parent = dir
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "상위 폴더가 없습니다"))?;
+    let parent = dir.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            t!("core.error.no_parent").into_owned(),
+        )
+    })?;
     let mut n = 1;
     loop {
         let candidate = if n == 1 {
@@ -709,9 +761,12 @@ pub fn update_group(
     icon: Option<&str>,
     color: Option<&str>,
 ) -> io::Result<PathBuf> {
-    let parent = dir
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "상위 폴더가 없습니다"))?;
+    let parent = dir.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            t!("core.error.no_parent").into_owned(),
+        )
+    })?;
     let reserved = file_name(parent) == EXTRAS_DIR
         && [TEMPLATES_GROUP, ATTACHMENTS_GROUP].contains(&file_name(dir).as_str());
     if reserved {
@@ -1127,6 +1182,51 @@ mod tests {
         assert_eq!(glued(&group), vec![false, false, true, true]);
         let rescanned = scan_group(&inbox, false).unwrap();
         assert_eq!(order(&rescanned), order(&group));
+        assert_eq!(glued(&rescanned), glued(&group));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn forgetting_a_glue_head_starts_the_group_at_the_next_sheet() {
+        let root = temp_dir("forget-sheets");
+        initialize(&root).unwrap();
+        let inbox = root.join("Notes").join(DEFAULT_INBOX);
+        for stem in ["a", "b", "c", "d", "e"] {
+            std::fs::write(inbox.join(format!("{stem}.md")), stem).unwrap();
+        }
+        std::fs::write(
+            inbox.join(GROUP_META_FILE),
+            "sheets = [\"a.md\", \"b.md\", \"c.md\", \"d.md\", \"e.md\"]\n",
+        )
+        .unwrap();
+        let mut group = scan_group(&inbox, false).unwrap();
+        glue_sheets(&mut group, 1..5).unwrap(); // a [b c d e]
+        let glued = |group: &Group| {
+            group
+                .sheets
+                .iter()
+                .map(|sheet| sheet.glued)
+                .collect::<Vec<_>>()
+        };
+        let remove = |group: &mut Group, stems: &[&str]| {
+            let paths: Vec<PathBuf> = stems
+                .iter()
+                .map(|stem| inbox.join(format!("{stem}.md")))
+                .collect();
+            for path in &paths {
+                std::fs::remove_file(path).unwrap();
+            }
+            forget_sheets(group, &paths).unwrap();
+        };
+
+        // 묶음 가운데를 지우면 앞뒤가 그대로 이어진다: a [b d e]
+        remove(&mut group, &["c"]);
+        assert_eq!(glued(&group), [false, false, true, true]);
+        // 묶음의 처음(과 그다음)을 지우면 남은 시트부터 묶음이다. e는 a에 붙지 않는다: a e
+        remove(&mut group, &["b", "d"]);
+        assert_eq!(glued(&group), [false, false]);
+        let rescanned = scan_group(&inbox, false).unwrap();
         assert_eq!(glued(&rescanned), glued(&group));
 
         std::fs::remove_dir_all(&root).ok();

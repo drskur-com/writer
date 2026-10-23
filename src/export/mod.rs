@@ -26,12 +26,15 @@ pub enum ExportError {
 impl std::fmt::Display for ExportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(err) => write!(f, "입출력 오류: {err}"),
-            Self::Zip(err) => write!(f, "ZIP 압축 오류: {err}"),
+            Self::Io(err) => write!(f, "{}", t!("export.error.io", err = err)),
+            Self::Zip(err) => write!(f, "{}", t!("export.error.zip", err = err)),
             Self::ProjectNotFound(path) => {
-                write!(f, "프로젝트를 찾을 수 없습니다: {}", path.display())
+                let path = path.display();
+                write!(f, "{}", t!("export.error.project_not_found", path = path))
             }
-            Self::InvalidProject(msg) => write!(f, "잘못된 프로젝트: {msg}"),
+            Self::InvalidProject(msg) => {
+                write!(f, "{}", t!("export.error.invalid_project", msg = msg))
+            }
         }
     }
 }
@@ -79,7 +82,7 @@ pub struct ExportSheet {
 /// 프로젝트 폴더에서 내보내기에 필요한 모든 정보를 읽는다.
 pub fn load_project(project_dir: &Path) -> Result<ExportProject, ExportError> {
     let root = project_dir.parent().and_then(Path::parent).ok_or_else(|| {
-        ExportError::InvalidProject("상위 라이브러리 폴더를 찾을 수 없습니다".into())
+        ExportError::InvalidProject(t!("export.error.library_not_found").into_owned())
     })?;
 
     let library = library::scan(root)?;
@@ -112,9 +115,12 @@ pub fn load_project(project_dir: &Path) -> Result<ExportProject, ExportError> {
 
 /// 미리보기와 컴파일이 공유하는 선택 범위. 접합 묶음은 선택 순서대로 중복 없이 포함한다.
 pub fn load_selection(root: &Path, selected: &[PathBuf]) -> Result<ExportProject, ExportError> {
-    let first = selected
-        .first()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "선택한 시트가 없습니다"))?;
+    let first = selected.first().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            t!("export.error.no_selection").into_owned(),
+        )
+    })?;
     let lib = library::scan(root)?;
     let mut manuscript = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -176,7 +182,12 @@ fn selection_sheets(
             .sheets
             .iter()
             .position(|sheet| sheet.path == selected)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "시트를 찾을 수 없습니다"))?;
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    t!("export.error.sheet_not_found").into_owned(),
+                )
+            })?;
         let mut start = index;
         while start > 0 && group.sheets[start].glued {
             start -= 1;
@@ -199,7 +210,11 @@ fn selection_sheets(
         ))
     } else {
         if !selected.is_file() {
-            return Err(io::Error::new(io::ErrorKind::NotFound, "시트를 찾을 수 없습니다").into());
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                t!("export.error.sheet_not_found").into_owned(),
+            )
+            .into());
         }
         Ok((
             library::read_preview(selected).title,

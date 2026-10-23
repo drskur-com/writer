@@ -36,10 +36,10 @@ pub enum InspectError {
 impl fmt::Display for InspectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            InspectError::NotFound => write!(f, "폴더를 찾을 수 없습니다"),
-            InspectError::NotADirectory => write!(f, "폴더가 아닙니다"),
-            InspectError::Nested => write!(f, "이미 다른 라이브러리 내부입니다"),
-            InspectError::NotWritable => write!(f, "쓰기 권한이 없습니다"),
+            InspectError::NotFound => f.write_str(&t!("core.error.folder_not_found")),
+            InspectError::NotADirectory => f.write_str(&t!("core.error.not_a_folder")),
+            InspectError::Nested => f.write_str(&t!("core.error.nested_library")),
+            InspectError::NotWritable => f.write_str(&t!("core.error.not_writable")),
             InspectError::Io(message) => write!(f, "{message}"),
         }
     }

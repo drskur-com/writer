@@ -18,6 +18,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::gpui::prelude::{FluentBuilder as _, InteractiveElement as _};
 use gpui_kit::gpui::*;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -33,12 +34,6 @@ const CONTENT_MAX_WIDTH: f32 = 960.0;
 /// 편집 폼 폭(나머지는 미리보기).
 const FORM_WIDTH: f32 = 340.0;
 
-/// 서체를 정하지 않았을 때의 선택지 이름. 설정 창의 에디터 서체를 따른다.
-const DEFAULT_FONT_TITLE: &str = "설정의 에디터 서체";
-
-/// 제목 서체를 정하지 않았을 때의 선택지 이름.
-const INHERIT_FONT_TITLE: &str = "본문 서체";
-
 /// 미리보기 최소 폭. 이보다 좁으면 폼 아래로 내린다.
 const PREVIEW_MIN_WIDTH: f32 = 280.0;
 
@@ -51,27 +46,29 @@ const LINE_HEIGHT_RANGE: (f32, f32) = (1.0, 2.5);
 /// 별도 제목 페이지 미리보기 높이.
 const PREVIEW_TITLE_PAGE_HEIGHT: f32 = 220.0;
 
-/// 미리보기 본문.
-const SAMPLE_BODY: [&str; 2] = [
-    "문장은 저마다 고유한 리듬을 가지고 있습니다.\n글꼴과 줄 간격은 그 리듬을 읽는 경험으로 바꿉니다.",
-    "문단의 들여쓰기와 간격을 조절해 책에 어울리는 호흡을 만들어 보세요.",
-];
+/// 미리보기 본문(화면 글이라 UI 언어를 따른다).
+fn sample_body() -> [Cow<'static, str>; 2] {
+    [
+        t!("book.style.sample.body_1"),
+        t!("book.style.sample.body_2"),
+    ]
+}
 
 /// 대상별 미리보기 제목. 접두사(`제{n}장 ` 등)는 스타일에서 붙인다.
-fn sample_title(target: StyleTarget) -> &'static str {
+fn sample_title(target: StyleTarget) -> Cow<'static, str> {
     match target {
-        StyleTarget::Body => "",
-        StyleTarget::Part => "강을 건너며",
-        StyleTarget::Chapter => "시라 강 건너",
-        StyleTarget::Section => "아타고 참배",
+        StyleTarget::Body => "".into(),
+        StyleTarget::Part => t!("book.style.sample.part"),
+        StyleTarget::Chapter => t!("book.style.sample.chapter"),
+        StyleTarget::Section => t!("book.style.sample.section"),
     }
 }
 
 /// 글자 굵기 표시 이름.
 fn weight_title(weight: u16) -> SharedString {
     match weight {
-        400 => "400 (보통)".into(),
-        700 => "700 (굵게)".into(),
+        400 => t!("book.style.weight.regular").into(),
+        700 => t!("book.style.weight.bold").into(),
         _ => weight.to_string().into(),
     }
 }
@@ -105,13 +102,13 @@ enum NumberField {
 }
 
 impl NumberField {
-    fn label(self, target: StyleTarget) -> &'static str {
+    fn label(self, target: StyleTarget) -> Cow<'static, str> {
         match self {
-            NumberField::FontSize => "글자 크기 (본문 대비)",
-            NumberField::FirstLineIndent => "첫 줄 들여쓰기 (em)",
-            NumberField::SpaceBefore => "앞 여백 (em)",
-            NumberField::SpaceAfter if target.is_title() => "뒤 여백 (em)",
-            NumberField::SpaceAfter => "문단 사이 간격 (em)",
+            NumberField::FontSize => t!("book.style.font_size"),
+            NumberField::FirstLineIndent => t!("book.style.first_line_indent"),
+            NumberField::SpaceBefore => t!("book.style.space_before"),
+            NumberField::SpaceAfter if target.is_title() => t!("book.style.space_after"),
+            NumberField::SpaceAfter => t!("book.style.paragraph_spacing"),
         }
     }
 
@@ -207,7 +204,7 @@ impl BookStyleView {
     fn save(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(err) = library::write_styles(&self.project, &self.styles) {
             window.push_notification(
-                Notification::info(format!("책 스타일을 저장할 수 없습니다: {err}")),
+                Notification::info(t!("book.style.save_failed", err = err)),
                 cx,
             );
         }
@@ -227,9 +224,12 @@ impl BookStyleView {
     }
 
     fn open_transform(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let before = cx.new(|cx| InputState::new(window, cx).placeholder("바꿀 텍스트"));
-        let after =
-            cx.new(|cx| InputState::new(window, cx).placeholder("바꾼 후 텍스트 (비우면 삭제)"));
+        let before = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("book.transform.before_placeholder"))
+        });
+        let after = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("book.transform.after_placeholder"))
+        });
         let mut subscriptions = Vec::new();
         for input in [&before, &after] {
             subscriptions.push(cx.subscribe(input, |_, _, event: &InputEvent, cx| {
@@ -262,10 +262,7 @@ impl BookStyleView {
             .iter()
             .any(|rule| rule.before == before)
         {
-            window.push_notification(
-                Notification::info("같은 텍스트의 치환 규칙이 이미 있습니다."),
-                cx,
-            );
+            window.push_notification(Notification::info(t!("book.transform.duplicate")), cx);
             return;
         }
         self.styles
@@ -293,17 +290,22 @@ impl BookStyleView {
         let controls = [
             (
                 "transform-quotes",
-                "스마트 따옴표",
-                "직선 따옴표를 “곡선 따옴표”로 바꾸고 아포스트로피를 처리합니다.",
+                t!("book.transform.smart_quotes"),
+                t!("book.transform.smart_quotes_description"),
                 options.smart_quotes,
             ),
             (
                 "transform-ellipsis",
-                "줄임표 자동 변환",
-                "... → …",
+                t!("book.transform.ellipsis"),
+                "... → …".into(),
                 options.ellipsis,
             ),
-            ("transform-dash", "대시 자동 변환", "-- → —", options.dash),
+            (
+                "transform-dash",
+                t!("book.transform.dash"),
+                "-- → —".into(),
+                options.dash,
+            ),
         ]
         .into_iter()
         .enumerate()
@@ -314,7 +316,7 @@ impl BookStyleView {
                 .gap_1()
                 .child(
                     Checkbox::new(id)
-                        .label(label)
+                        .label(SharedString::from(label))
                         .checked(checked)
                         .on_click(cx.listener(move |this, checked: &bool, window, cx| {
                             let options = &mut this.styles.input_transform;
@@ -339,7 +341,7 @@ impl BookStyleView {
                     .gap_3()
                     .child(
                         Checkbox::new(SharedString::from(format!("replacement-enabled-{index}")))
-                            .label("사용")
+                            .label(SharedString::from(t!("book.transform.enabled")))
                             .checked(rule.enabled)
                             .on_click(cx.listener(move |this, checked: &bool, window, cx| {
                                 if let Some(rule) =
@@ -362,7 +364,7 @@ impl BookStyleView {
                             .flex_1()
                             .whitespace_normal()
                             .child(if rule.after.is_empty() {
-                                "(삭제)".to_string()
+                                t!("book.transform.deletes").into_owned()
                             } else {
                                 rule.after.clone()
                             }),
@@ -371,7 +373,7 @@ impl BookStyleView {
                         Button::new(SharedString::from(format!("replacement-remove-{index}")))
                             .ghost()
                             .small()
-                            .label("삭제")
+                            .label(t!("common.delete"))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if index < this.styles.input_transform.replacements.len() {
                                     this.styles.input_transform.replacements.remove(index);
@@ -385,44 +387,118 @@ impl BookStyleView {
             .ghost()
             .small()
             .icon(Icon::new(icons::leave()))
-            .label("스타일 목록")
+            .label(t!("book.style.back_to_list"))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.transform_form = None;
                 cx.notify();
             }));
-        div().flex().flex_col().gap_6()
-            .child(Self::header(pal, "입력 자동 변환",
-                "이 책에서 입력하는 텍스트에 적용합니다. 기존 원고는 변경하지 않습니다.",
-                Some(back.into_any_element())))
-            .child(div().p_5().rounded_xl().border_1().border_color(pal.panel_border)
-                .bg(pal.panel).flex().flex_col().gap_4()
-                .child(div().font_semibold().child("스마트 문장부호"))
-                .children(controls))
-            .child(div().p_5().rounded_xl().border_1().border_color(pal.panel_border)
-                .bg(pal.panel).flex().flex_col().gap_4()
-                .child(div().font_semibold().child("사용자 지정 치환"))
-                .child(div().text_xs().text_color(pal.muted)
-                    .child("입력 중에는 공백·Enter로 단어를 마칠 때 치환합니다. 붙여넣기에는 문자열 일치로 적용합니다."))
-                .when(options.replacements.is_empty(), |this| {
-                    this.child(div().text_sm().text_color(pal.muted).child("등록된 규칙이 없습니다."))
-                })
-                .children(rules)
-                .child(div().flex().items_center().gap_3()
-                    .child(div().flex_1().min_w_0().child(Input::new(&form.before).focus_ring(false)))
-                    .child(div().text_color(pal.muted).child("→"))
-                    .child(div().flex_1().min_w_0().child(Input::new(&form.after).focus_ring(false))))
-                .child(Button::new("replacement-add").label("+ 규칙 추가").disabled(!can_add)
-                    .on_click(cx.listener(|this, _, window, cx| this.add_replacement(window, cx)))))
-            .child(div().p_5().rounded_xl().border_1().border_color(pal.panel_border)
-                .bg(pal.panel).flex().flex_col().gap_2()
-                .child(Checkbox::new("transform-on-paste").label("붙여넣기에도 적용")
-                    .checked(options.apply_on_paste)
-                    .on_click(cx.listener(|this, checked: &bool, window, cx| {
-                        this.styles.input_transform.apply_on_paste = *checked;
-                        this.save(window, cx);
-                    })))
-                .child(div().text_xs().text_color(pal.muted)
-                    .child("스마트 문장부호와 활성화된 치환 규칙을 붙여넣기에도 적용합니다. 코드·수식·링크는 제외합니다.")))
+        div()
+            .flex()
+            .flex_col()
+            .gap_6()
+            .child(Self::header(
+                pal,
+                t!("book.transform.title"),
+                t!("book.transform.description"),
+                Some(back.into_any_element()),
+            ))
+            .child(
+                div()
+                    .p_5()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(pal.panel_border)
+                    .bg(pal.panel)
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(
+                        div()
+                            .font_semibold()
+                            .child(t!("book.transform.smart_punctuation")),
+                    )
+                    .children(controls),
+            )
+            .child(
+                div()
+                    .p_5()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(pal.panel_border)
+                    .bg(pal.panel)
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(div().font_semibold().child(t!("book.transform.custom")))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(pal.muted)
+                            .child(t!("book.transform.custom_description")),
+                    )
+                    .when(options.replacements.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(pal.muted)
+                                .child(t!("book.transform.no_rules")),
+                        )
+                    })
+                    .children(rules)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Input::new(&form.before).focus_ring(false)),
+                            )
+                            .child(div().text_color(pal.muted).child("→"))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Input::new(&form.after).focus_ring(false)),
+                            ),
+                    )
+                    .child(
+                        Button::new("replacement-add")
+                            .label(t!("book.transform.add_rule"))
+                            .disabled(!can_add)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.add_replacement(window, cx)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .p_5()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(pal.panel_border)
+                    .bg(pal.panel)
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        Checkbox::new("transform-on-paste")
+                            .label(SharedString::from(t!("book.transform.on_paste")))
+                            .checked(options.apply_on_paste)
+                            .on_click(cx.listener(|this, checked: &bool, window, cx| {
+                                this.styles.input_transform.apply_on_paste = *checked;
+                                this.save(window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(pal.muted)
+                            .child(t!("book.transform.on_paste_description")),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -435,12 +511,16 @@ impl BookStyleView {
         // 제목은 서체를 정하지 않으면 본문 서체를 따른다.
         let items = if target.is_title() {
             font_items(
-                INHERIT_FONT_TITLE,
+                t!("book.style.font.inherit"),
                 self.effective_font(StyleTarget::Body, cx),
                 cx,
             )
         } else {
-            font_items(DEFAULT_FONT_TITLE, Prefs::editor_font_family(cx), cx)
+            font_items(
+                t!("book.style.font.default"),
+                Prefs::editor_font_family(cx),
+                cx,
+            )
         };
         let selected = items
             .iter()
@@ -518,7 +598,7 @@ impl BookStyleView {
         let prefix = target.is_title().then(|| {
             let input = cx.new(|cx| {
                 TextareaState::new(window, cx)
-                    .placeholder("예: 제{n}장 ")
+                    .placeholder(t!("book.style.prefix_placeholder"))
                     .auto_grow(1, 4)
                     .default_value(spec.prefix.clone().unwrap_or_default())
             });
@@ -595,10 +675,10 @@ impl BookStyleView {
             Ok(styles) => {
                 self.styles = styles;
                 self.import_source = None;
-                window.push_notification(Notification::info("스타일을 가져왔습니다."), cx);
+                window.push_notification(Notification::info(t!("book.style.imported")), cx);
             }
             Err(err) => window.push_notification(
-                Notification::info(format!("스타일을 가져올 수 없습니다: {err}")),
+                Notification::info(t!("book.style.import_failed", err = err)),
                 cx,
             ),
         }
@@ -628,8 +708,8 @@ impl BookStyleView {
     /// 머리글: 작은 제목, 큰 제목, 설명, (오른쪽) 추가 버튼.
     fn header(
         pal: Palette,
-        title: &'static str,
-        description: &'static str,
+        title: impl Into<SharedString>,
+        description: impl Into<SharedString>,
         trailing: Option<AnyElement>,
     ) -> impl IntoElement {
         div()
@@ -642,9 +722,19 @@ impl BookStyleView {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_xs().text_color(pal.muted).child("책 스타일"))
-                    .child(div().text_3xl().font_semibold().child(title))
-                    .child(div().text_sm().text_color(pal.muted).child(description)),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(pal.muted)
+                            .child(t!("book.style.title")),
+                    )
+                    .child(div().text_3xl().font_semibold().child(title.into()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(pal.muted)
+                            .child(description.into()),
+                    ),
             )
             .children(trailing)
     }
@@ -698,7 +788,7 @@ impl BookStyleView {
                 .map(|(_, name)| name.clone())
         });
         let picker = Button::new("style-import-source")
-            .label(source_name.unwrap_or_else(|| "스타일을 가져올 프로젝트 선택…".into()))
+            .label(source_name.unwrap_or_else(|| t!("book.style.import_pick").into()))
             .dropdown_caret(true)
             .disabled(projects.is_empty())
             .w_full()
@@ -727,7 +817,7 @@ impl BookStyleView {
                 div()
                     .text_xs()
                     .text_color(pal.muted)
-                    .child("다른 프로젝트의 스타일을 이 프로젝트에 그대로 가져옵니다. 지금 스타일은 덮어씁니다."),
+                    .child(t!("book.style.import_description")),
             )
             .child(
                 div()
@@ -737,7 +827,7 @@ impl BookStyleView {
                     .child(div().flex_1().min_w_0().child(picker))
                     .child(
                         Button::new("style-import")
-                            .label("적용")
+                            .label(t!("book.style.apply"))
                             .disabled(self.import_source.is_none())
                             .on_click(cx.listener(|this, _, window, cx| this.import(window, cx))),
                     ),
@@ -749,8 +839,8 @@ impl BookStyleView {
             .gap_6()
             .child(Self::header(
                 pal,
-                "책 스타일",
-                "스타일 대상을 선택해 표시 방식을 조정하세요.",
+                t!("book.style.title"),
+                t!("book.style.list_description"),
                 None,
             ))
             .child(div().flex().flex_col().gap_3().children(cards))
@@ -775,12 +865,12 @@ impl BookStyleView {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(div().font_semibold().child("입력 자동 변환"))
+                            .child(div().font_semibold().child(t!("book.transform.title")))
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(pal.muted)
-                                    .child("스마트 문장부호와 사용자 지정 치환 규칙"),
+                                    .child(t!("book.transform.summary")),
                             ),
                     )
                     .child(Icon::new(icons::enter()).text_color(pal.muted)),
@@ -810,8 +900,8 @@ impl BookStyleView {
             &view,
             resolved.embed_font,
             [
-                (false, "리더의 시스템 서체 사용".into()),
-                (true, "서체 파일 넣기".into()),
+                (false, t!("book.style.embed.system").into()),
+                (true, t!("book.style.embed.file").into()),
             ],
             220.0,
             move |view, embed, window, cx| view.set_embed(target, embed, window, cx),
@@ -838,16 +928,20 @@ impl BookStyleView {
                 })
         };
         let font = field(
-            "서체".into(),
+            t!("book.style.font").into(),
             Select::new(&form.font)
                 .focus_ring(false)
                 .menu_max_h(px(320.0))
-                .search_placeholder("서체 검색")
+                .search_placeholder(t!("settings.font.search"))
                 .into_any_element(),
         );
-        let embed = field("서체 포함".into(), embed.into_any_element());
+        let embed = field(t!("book.style.embed").into(), embed.into_any_element());
         let line_height = field(
-            format!("줄 간격 · {}", format_number(resolved.line_height)).into(),
+            t!(
+                "book.style.line_height",
+                value = format_number(resolved.line_height)
+            )
+            .into(),
             Slider::new(&form.line_height).into_any_element(),
         );
 
@@ -876,8 +970,8 @@ impl BookStyleView {
                 &view,
                 resolved.page_break,
                 [
-                    (true, "항상 새 페이지".into()),
-                    (false, "앞 내용에 이어서".into()),
+                    (true, t!("book.style.page_break.always").into()),
+                    (false, t!("book.style.page_break.continue").into()),
                 ],
                 200.0,
                 move |view, page_break, window, cx| {
@@ -911,11 +1005,16 @@ impl BookStyleView {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(div().text_sm().text_color(pal.muted).child("제목 접두사"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(pal.muted)
+                            .child(t!("book.style.prefix")),
+                    )
                     .child(Textarea::new(input))
-                    .child(div().text_xs().text_color(pal.muted).child(format!(
-                        "{}은 자동 번호로 바뀝니다. Enter로 줄을 바꿀 수 있습니다",
-                        library::PREFIX_NUMBER
+                    .child(div().text_xs().text_color(pal.muted).child(t!(
+                        "book.style.prefix_hint",
+                        number = library::PREFIX_NUMBER
                     )))
             });
             let numbering = choice(
@@ -934,7 +1033,10 @@ impl BookStyleView {
                     "style-restart-on-parent",
                     &view,
                     resolved.restart_on_parent,
-                    [(false, "이어서".into()), (true, "1부터".into())],
+                    [
+                        (false, t!("book.style.restart.continue").into()),
+                        (true, t!("book.style.restart.from_one").into()),
+                    ],
                     160.0,
                     move |view, restart, window, cx| {
                         view.update_spec(target, window, cx, |spec| {
@@ -944,36 +1046,48 @@ impl BookStyleView {
                 )
             });
             let in_toc = Checkbox::new("style-in-toc")
-                .label("목차에 포함")
+                .label(SharedString::from(t!("book.style.in_toc")))
                 .checked(resolved.in_toc)
                 .on_click(cx.listener(move |this, checked: &bool, window, cx| {
                     let in_toc = *checked;
                     this.update_spec(target, window, cx, |spec| spec.in_toc = Some(in_toc));
                 }));
             fields
-                .child(field("제목 배치".into(), placement.into_any_element()))
+                .child(field(
+                    t!("book.style.placement").into(),
+                    placement.into_any_element(),
+                ))
                 .when(!page, |this| {
                     this.child(field(
-                        "새 페이지에서 시작".into(),
+                        t!("book.style.page_break").into(),
                         page_break.into_any_element(),
                     ))
                 })
                 .child(in_toc)
                 // 목차에 넣지 않아도 번호·접두사는 넣을 수 있다.
-                .child(field("번호 방식".into(), numbering.into_any_element()))
+                .child(field(
+                    t!("book.style.numbering").into(),
+                    numbering.into_any_element(),
+                ))
                 .children(restart.map(|restart| {
-                    field("상위 제목이 바뀌면 번호".into(), restart.into_any_element())
+                    field(t!("book.style.restart").into(), restart.into_any_element())
                 }))
                 .children(prefix)
                 .child(font)
                 .child(embed)
                 .children(number(NumberField::FontSize))
-                .child(field("글자 굵기".into(), weight.into_any_element()))
+                .child(field(
+                    t!("book.style.weight").into(),
+                    weight.into_any_element(),
+                ))
                 .child(line_height)
-                .child(field("정렬".into(), align.into_any_element()))
+                .child(field(
+                    t!("book.style.align").into(),
+                    align.into_any_element(),
+                ))
                 .when(page, |this| {
                     this.child(field(
-                        "제목 페이지 세로 위치".into(),
+                        t!("book.style.vertical_align").into(),
                         vertical.into_any_element(),
                     ))
                 })
@@ -987,7 +1101,7 @@ impl BookStyleView {
             fields
                 .child(
                     Checkbox::new("style-preserve-line-breaks")
-                        .label("원문 줄바꿈 유지")
+                        .label(SharedString::from(t!("book.style.preserve_line_breaks")))
                         .checked(resolved.preserve_line_breaks)
                         .on_click(cx.listener(|this, checked: &bool, window, cx| {
                             this.update_spec(StyleTarget::Body, window, cx, |spec| {
@@ -999,12 +1113,15 @@ impl BookStyleView {
                     div()
                         .text_xs()
                         .text_color(pal.muted)
-                        .child("문단 안의 개행과 문단 사이의 빈 줄을 그대로 반영합니다."),
+                        .child(t!("book.style.preserve_line_breaks_description")),
                 )
                 .child(font)
                 .child(embed)
                 .child(line_height)
-                .child(field("문단 정렬".into(), align.into_any_element()))
+                .child(field(
+                    t!("book.style.paragraph_align").into(),
+                    align.into_any_element(),
+                ))
                 .children(number(NumberField::FirstLineIndent))
                 .children(number(NumberField::SpaceAfter))
         };
@@ -1025,7 +1142,7 @@ impl BookStyleView {
                     .pb_4()
                     .text_xs()
                     .text_color(pal.muted)
-                    .child("미리보기"),
+                    .child(t!("book.preview.title")),
             )
             .child(self.render_preview(target, cx))
             .when(!resolved.embed_font, |this| {
@@ -1034,7 +1151,7 @@ impl BookStyleView {
                         .pt_4()
                         .text_xs()
                         .text_color(pal.muted)
-                        .child("서체를 넣지 않아 리더 기본 서체로 보입니다. 에디터에서는 고른 서체로 보입니다."),
+                        .child(t!("book.style.embed_hint")),
                 )
             });
 
@@ -1042,12 +1159,12 @@ impl BookStyleView {
             .ghost()
             .small()
             .icon(Icon::new(icons::leave()))
-            .label("스타일 목록")
+            .label(t!("book.style.back_to_list"))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.form = None;
                 cx.notify();
             }));
-        let description = "미리보기를 확인하며 스타일을 조정하세요. 바꾼 값은 바로 저장됩니다.";
+        let description = t!("book.style.edit_description");
 
         div()
             .flex()
@@ -1079,7 +1196,7 @@ impl BookStyleView {
                     .child(
                         Button::new("style-reset")
                             .ghost()
-                            .label("기본값으로 되돌리기")
+                            .label(t!("book.style.reset"))
                             .disabled(spec.is_empty())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.reset_target(target, window, cx)
@@ -1149,7 +1266,7 @@ impl BookStyleView {
                 .text_xs()
                 .text_color(pal.muted)
                 .child(div().h(px(1.0)).flex_1().bg(pal.panel_border))
-                .child("여기서 페이지가 나뉩니다")
+                .child(t!("book.style.page_break_marker"))
                 .child(div().h(px(1.0)).flex_1().bg(pal.panel_border))
         };
 
@@ -1159,7 +1276,7 @@ impl BookStyleView {
             .then(|| self.styles.resolve(target))
             .filter(|title| title.placement != Placement::Hidden);
         let Some(title) = title else {
-            for (index, text) in SAMPLE_BODY.into_iter().enumerate() {
+            for (index, text) in sample_body().into_iter().enumerate() {
                 if index > 0 && body.preserve_line_breaks {
                     blocks.push(
                         div()
@@ -1169,15 +1286,16 @@ impl BookStyleView {
                             .into_any_element(),
                     );
                 }
-                blocks.push(body_text(text).into_any_element());
+                blocks.push(body_text(&text).into_any_element());
             }
             return div().flex().flex_col().children(blocks);
         };
         let heading = paragraph(
             &title,
             self.effective_font(target, cx),
-            title.title_text(1, sample_title(target)),
+            title.title_text(1, &sample_title(target)),
         );
+        let [sample_1, sample_2] = sample_body();
         match title.placement {
             Placement::Page => {
                 // 쪽 위·아래 여백 없이 세로 위치만 따른다.
@@ -1196,18 +1314,18 @@ impl BookStyleView {
                         .into_any_element(),
                 );
                 blocks.push(page_break().into_any_element());
-                blocks.push(body_text(SAMPLE_BODY[0]).into_any_element());
+                blocks.push(body_text(&sample_1).into_any_element());
             }
             _ if title.page_break => {
                 // 새 페이지 첫머리라 위 여백은 없다.
                 blocks.push(page_break().into_any_element());
                 blocks.push(heading.pt_0().into_any_element());
-                blocks.push(body_text(SAMPLE_BODY[0]).into_any_element());
+                blocks.push(body_text(&sample_1).into_any_element());
             }
             _ => {
-                blocks.push(body_text(SAMPLE_BODY[1]).into_any_element());
+                blocks.push(body_text(&sample_2).into_any_element());
                 blocks.push(heading.into_any_element());
-                blocks.push(body_text(SAMPLE_BODY[0]).into_any_element());
+                blocks.push(body_text(&sample_1).into_any_element());
             }
         }
         div().flex().flex_col().children(blocks)

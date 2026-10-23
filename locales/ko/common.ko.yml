@@ -1,0 +1,13 @@
+_version: 1
+# 여러 화면이 함께 쓰는 짧은 글. 다른 파일은 여기 키를 쓰기만 하고 같은 키를 다시 적지 않는다.
+common.cancel: "취소"
+common.ok: "확인"
+common.close: "닫기"
+common.delete: "삭제"
+common.insert: "삽입"
+common.save: "저장"
+common.create: "만들기"
+common.reveal_in_finder: "Finder에서 보기"
+common.move_to_trash: "휴지통으로 이동"
+common.open_sheet_first: "먼저 시트를 여세요."
+common.open_library_first: "먼저 라이브러리를 여세요."

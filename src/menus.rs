@@ -7,9 +7,9 @@ use gpui_kit::gpui::*;
 use crate::APP_NAME;
 use crate::{
     CloseLibrary, CompileProject, InsertExtension, InsertFootnote, InsertImage, InsertSpecialChar,
-    InsertTable, NewSheet, OpenLibrary, OpenSettings, QuitApp, RunExtensionCommand, SaveSheet,
-    SetTheme, ShowAbout, ToggleBold, ToggleItalic, ToggleLineGroup, TogglePreview, ToggleSidebar,
-    ToggleTheme, theme,
+    InsertTable, ManageExtensions, NewSheet, OpenLibrary, OpenSettings, QuitApp,
+    RunExtensionCommand, SaveSheet, SetTheme, ShowAbout, ToggleBold, ToggleItalic, ToggleLineGroup,
+    TogglePreview, ToggleSidebar, ToggleTheme, theme,
 };
 
 /// 메뉴 트리.
@@ -18,7 +18,8 @@ use crate::{
 /// - 그 외: `Edit > Settings…`에 둔다.
 /// - `Edit > Toggle Line Group`: 선택한 줄을 줄 묶음(`:::`)으로 감싸거나 푼다(ADR-0016).
 /// - 테마 목록은 `ThemeRegistry`에서 읽어 `View > Theme`에 채운다.
-/// - 확장 명령(ADR-0026)이 있으면 `Extensions` 메뉴에 확장 이름으로 묶어 둔다.
+/// - `Extensions` 메뉴(ADR-0026): 확장 명령을 확장 이름으로 묶고, 맨 아래에 `Manage Extensions…`를 둔다.
+///   명령이 없어도 메뉴는 보인다.
 pub(crate) fn build_menus(
     theme_names: &[SharedString],
     active_theme: &str,
@@ -36,60 +37,63 @@ pub(crate) fn build_menus(
 
     #[cfg(target_os = "macos")]
     menus.push(Menu::new(APP_NAME).items([
-        MenuItem::action("About Writer", ShowAbout),
+        MenuItem::action(t!("menu.about"), ShowAbout),
         MenuItem::separator(),
-        MenuItem::action("Settings…", OpenSettings),
+        MenuItem::action(t!("menu.settings"), OpenSettings),
         MenuItem::separator(),
-        MenuItem::action("Quit Writer", QuitApp),
+        MenuItem::action(t!("menu.quit_app"), QuitApp),
     ]));
 
     // macOS에서는 아래 Quit 추가가 빠지므로 `mut`이 쓰이지 않는다.
     #[cfg_attr(target_os = "macos", allow(unused_mut))]
     let mut file_items = vec![
-        MenuItem::action("New Sheet", NewSheet),
-        MenuItem::action("Save", SaveSheet),
+        MenuItem::action(t!("menu.new_sheet"), NewSheet),
+        MenuItem::action(t!("menu.save"), SaveSheet),
         MenuItem::separator(),
-        MenuItem::action("Compile Project…", CompileProject),
+        MenuItem::action(t!("menu.compile_project"), CompileProject),
         MenuItem::separator(),
-        MenuItem::action("Open Library…", OpenLibrary),
-        MenuItem::action("Close Library", CloseLibrary),
+        MenuItem::action(t!("menu.open_library"), OpenLibrary),
+        MenuItem::action(t!("menu.close_library"), CloseLibrary),
     ];
     #[cfg(not(target_os = "macos"))]
     {
         file_items.push(MenuItem::separator());
-        file_items.push(MenuItem::action("Quit", QuitApp));
+        file_items.push(MenuItem::action(t!("menu.quit"), QuitApp));
     }
-    menus.push(Menu::new("File").items(file_items));
+    menus.push(Menu::new(t!("menu.file")).items(file_items));
 
     // `Emoji & Symbols…`는 macOS 관례상 Edit에, 그 밖에는 Insert > Special Characters… 하나로 둔다(같은 대화상자를 두 번 보이지 않게).
     let mut edit_items = vec![
-        MenuItem::action("Bold", ToggleBold),
-        MenuItem::action("Italic", ToggleItalic),
+        MenuItem::action(t!("menu.bold"), ToggleBold),
+        MenuItem::action(t!("menu.italic"), ToggleItalic),
         MenuItem::separator(),
-        MenuItem::action("Toggle Line Group", ToggleLineGroup),
+        MenuItem::action(t!("menu.toggle_line_group"), ToggleLineGroup),
     ];
     #[cfg(target_os = "macos")]
     {
         edit_items.push(MenuItem::separator());
-        edit_items.push(MenuItem::action("Emoji & Symbols…", InsertSpecialChar));
+        edit_items.push(MenuItem::action(
+            t!("menu.emoji_symbols"),
+            InsertSpecialChar,
+        ));
     }
     #[cfg(not(target_os = "macos"))]
     {
         edit_items.push(MenuItem::separator());
-        edit_items.push(MenuItem::action("Settings…", OpenSettings));
+        edit_items.push(MenuItem::action(t!("menu.settings"), OpenSettings));
     }
-    menus.push(Menu::new("Edit").items(edit_items));
+    menus.push(Menu::new(t!("menu.edit")).items(edit_items));
 
-    menus.push(Menu::new("Insert").items([
-        MenuItem::action("Image…", InsertImage),
-        MenuItem::action("Table…", InsertTable),
-        MenuItem::action("Footnote…", InsertFootnote),
-        MenuItem::action("Extension…", InsertExtension),
+    menus.push(Menu::new(t!("menu.insert")).items([
+        MenuItem::action(t!("menu.insert_image"), InsertImage),
+        MenuItem::action(t!("menu.insert_table"), InsertTable),
+        MenuItem::action(t!("menu.insert_footnote"), InsertFootnote),
+        MenuItem::action(t!("menu.insert_extension"), InsertExtension),
         MenuItem::separator(),
-        MenuItem::action("Special Characters…", InsertSpecialChar),
+        MenuItem::action(t!("menu.special_characters"), InsertSpecialChar),
     ]));
 
-    if !extension_commands.is_empty() {
+    {
         let mut items = Vec::new();
         let mut previous: Option<&str> = None;
         for (extension, index, title) in extension_commands {
@@ -105,21 +109,30 @@ pub(crate) fn build_menus(
                 },
             ));
         }
-        menus.push(Menu::new("Extensions").items(items));
+        if !items.is_empty() {
+            items.push(MenuItem::separator());
+        }
+        items.push(MenuItem::action(
+            t!("menu.manage_extensions"),
+            ManageExtensions,
+        ));
+        menus.push(Menu::new(t!("menu.extensions")).items(items));
     }
 
     let mut view_items = vec![
-        MenuItem::action("Toggle Sidebar", ToggleSidebar),
-        MenuItem::action("Toggle Preview", TogglePreview),
-        MenuItem::action("Toggle Light/Dark", ToggleTheme),
+        MenuItem::action(t!("menu.toggle_sidebar"), ToggleSidebar),
+        MenuItem::action(t!("menu.toggle_preview"), TogglePreview),
+        MenuItem::action(t!("menu.toggle_theme"), ToggleTheme),
     ];
     if !theme_items.is_empty() {
         view_items.push(MenuItem::separator());
-        view_items.push(MenuItem::submenu(Menu::new("Theme").items(theme_items)));
+        view_items.push(MenuItem::submenu(
+            Menu::new(t!("menu.theme")).items(theme_items),
+        ));
     }
-    menus.push(Menu::new("View").items(view_items));
+    menus.push(Menu::new(t!("menu.view")).items(view_items));
 
-    menus.push(Menu::new("Help").items([MenuItem::action("About Writer", ShowAbout)]));
+    menus.push(Menu::new(t!("menu.help")).items([MenuItem::action(t!("menu.about"), ShowAbout)]));
 
     menus
 }

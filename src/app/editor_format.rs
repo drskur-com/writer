@@ -26,23 +26,23 @@ enum BlockFormat {
 }
 
 #[cfg(target_os = "macos")]
-fn bold_shortcut() -> &'static str {
-    "굵게 (⌘B)"
+fn bold_shortcut() -> String {
+    t!("editor.format.bold_tooltip", shortcut = "⌘B").into()
 }
 
 #[cfg(not(target_os = "macos"))]
-fn bold_shortcut() -> &'static str {
-    "굵게 (Ctrl+B)"
+fn bold_shortcut() -> String {
+    t!("editor.format.bold_tooltip", shortcut = "Ctrl+B").into()
 }
 
 #[cfg(target_os = "macos")]
-fn italic_shortcut() -> &'static str {
-    "기울임 (⌘I)"
+fn italic_shortcut() -> String {
+    t!("editor.format.italic_tooltip", shortcut = "⌘I").into()
 }
 
 #[cfg(not(target_os = "macos"))]
-fn italic_shortcut() -> &'static str {
-    "기울임 (Ctrl+I)"
+fn italic_shortcut() -> String {
+    t!("editor.format.italic_tooltip", shortcut = "Ctrl+I").into()
 }
 
 /// 들여쓰기는 남기고 한 단계의 문단 서식 기호를 읽는다.
@@ -145,7 +145,8 @@ impl WriterApp {
             .child(
                 icon_button("format-special-char", icons::by_name("smile"), enabled, pal)
                     .tooltip(|window, cx| {
-                        Tooltip::new("특수 문자 및 이모지 (Ctrl+Alt+Space)").build(window, cx)
+                        Tooltip::new(t!("editor.format.special_char_tooltip").to_string())
+                            .build(window, cx)
                     })
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.on_insert_special_char(&crate::InsertSpecialChar, window, cx);
@@ -217,18 +218,22 @@ impl WriterApp {
             .ghost()
             .size(px(30.))
             .rounded(px(15.))
-            .tooltip("문단 서식")
+            .tooltip(t!("editor.format.paragraph_tooltip"))
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
                 let selection = state.read(cx).selected_range();
                 let text = state.read(cx).value();
                 let current = block_format(&text[line_range(&text, selection.start)]).0;
-                let mut items = vec![(BlockFormat::Paragraph, "본문".to_string(), None)];
+                let mut items = vec![(
+                    BlockFormat::Paragraph,
+                    t!("editor.format.body").to_string(),
+                    None,
+                )];
                 for level in 1..=6 {
                     let title = match (book, level) {
-                        (true, 1) => "부 제목".to_string(),
-                        (true, 2) => "장 제목".to_string(),
-                        (true, 3) => "절 제목".to_string(),
-                        _ => format!("제목 {level}"),
+                        (true, 1) => t!("editor.format.part_title").to_string(),
+                        (true, 2) => t!("editor.format.chapter_title").to_string(),
+                        (true, 3) => t!("editor.format.section_title").to_string(),
+                        _ => t!("editor.format.heading", level = level).to_string(),
                     };
                     items.push((
                         BlockFormat::Heading(level),
@@ -239,17 +244,17 @@ impl WriterApp {
                 items.extend([
                     (
                         BlockFormat::Bullet,
-                        "순서없는 목록".to_string(),
+                        t!("editor.format.bullet_list").to_string(),
                         Some(icons::bullet_list()),
                     ),
                     (
                         BlockFormat::Numbered,
-                        "순서있는 목록".to_string(),
+                        t!("editor.format.numbered_list").to_string(),
                         Some(icons::numbered_list()),
                     ),
                     (
                         BlockFormat::Quote,
-                        "블록 인용".to_string(),
+                        t!("editor.format.quote").to_string(),
                         Some(icons::quote()),
                     ),
                 ]);
@@ -352,7 +357,8 @@ impl WriterApp {
         let target = editor.state().clone();
         let selection = target.read(cx).selected_range();
         let selected_text = target.read(cx).value()[selection.clone()].to_string();
-        let label = cx.new(|cx| InputState::new(window, cx).placeholder("링크 텍스트"));
+        let label = cx
+            .new(|cx| InputState::new(window, cx).placeholder(t!("editor.link.text_placeholder")));
         label.update(cx, |state, cx| state.set_value(selected_text, window, cx));
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("https://"));
         let app = cx.entity().downgrade();
@@ -373,7 +379,7 @@ impl WriterApp {
                 app.update(cx, |app, cx| {
                     let Some(editor) = &app.editor else { return };
                     if editor.state() != &target {
-                        app.notify("링크를 넣을 시트가 닫혔습니다.", window, cx);
+                        app.notify(t!("editor.link.sheet_closed"), window, cx);
                         return;
                     }
                     let label = label
@@ -408,7 +414,7 @@ impl WriterApp {
             let (enter, ok) = (submit.clone(), submit.clone());
             dialog
                 .w(px(440.))
-                .title("링크 삽입")
+                .title(t!("editor.link.dialog_title"))
                 .close_button(false)
                 .on_ok(move |_, window, cx| enter(window, cx))
                 .child(Input::new(&label).focus_ring(false))
@@ -417,13 +423,13 @@ impl WriterApp {
                     DialogFooter::new()
                         .child(
                             Button::new("insert-link-cancel")
-                                .label("취소")
+                                .label(t!("common.cancel"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("insert-link-ok")
                                 .primary()
-                                .label("삽입")
+                                .label(t!("common.insert"))
                                 .on_click(move |_, window, cx| {
                                     if ok(window, cx) {
                                         window.close_dialog(cx);

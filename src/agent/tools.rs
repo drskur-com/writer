@@ -65,7 +65,7 @@ pub struct PendingChange {
     target: Target,
     /// 쓴 뒤 모델에 돌려줄 글.
     done: String,
-    /// 화면 요약 줄의 동사(`고침`, `씀`, `만듦`).
+    /// 화면 요약 줄의 동사 번역 키(`assistant.tool.edited` 등).
     verb: &'static str,
 }
 
@@ -276,7 +276,11 @@ impl Workspace {
         if name == RUN_EXTENSION {
             let extension = arguments.get("name").and_then(Value::as_str).unwrap_or("");
             let path = format!("{}/{extension}.lua", crate::extension::EXTENSIONS_DIR);
-            return Planned::Done(output(&path, "실행", self.run_extension(arguments)));
+            return Planned::Done(output(
+                &path,
+                "assistant.tool.ran",
+                self.run_extension(arguments),
+            ));
         }
         if name == LOAD_SKILL {
             return Planned::Done(
@@ -304,8 +308,8 @@ impl Workspace {
                 None => Err("content is missing.".into()),
             },
             EDIT => parse_edits(arguments).and_then(|edits| self.plan_edit(path, &edits)),
-            LIST => return Planned::Done(output(path, "살펴봄", self.list(path))),
-            READ => return Planned::Done(output(path, "읽음", self.read(path))),
+            LIST => return Planned::Done(output(path, "assistant.tool.listed", self.list(path))),
+            READ => return Planned::Done(output(path, "assistant.tool.read", self.read(path))),
             _ => Err(format!("Unknown tool: {name}")),
         };
         match change {
@@ -347,11 +351,11 @@ impl Workspace {
         match self.skills.iter().find(|skill| skill.name == name) {
             Some(skill) => ToolOutput {
                 text: skills::instructions(skill),
-                summary: format!("스킬 · {name}"),
+                summary: t!("assistant.tool.skill", name = name).into(),
             },
             None => ToolOutput {
                 text: format!("Error: no such skill: {name}"),
-                summary: format!("실패 · 스킬 {name}"),
+                summary: t!("assistant.tool.skill_failed", name = name).into(),
             },
         }
     }
@@ -479,7 +483,7 @@ impl Workspace {
             return Ok(format!("{header} No draw function."));
         }
         let shapes = extension.draw(t, &args, &Theme::default())?;
-        let (mut fills, mut strokes, mut texts) = (0, 0, 0);
+        let (mut fills, mut strokes, mut texts, mut gradients) = (0, 0, 0, 0);
         let mut bounds: Option<[f32; 4]> = None;
         let mut extend = |[x, y]: [f32; 2]| {
             let b = bounds.get_or_insert([x, y, x, y]);
@@ -487,7 +491,10 @@ impl Workspace {
         };
         for shape in &shapes {
             match shape {
-                Shape::Fill { path, .. } | Shape::Stroke { path, .. } => {
+                Shape::Fill { path, paint, .. } | Shape::Stroke { path, paint, .. } => {
+                    if !matches!(paint, crate::extension::Paint::Solid(_)) {
+                        gradients += 1;
+                    }
                     if matches!(shape, Shape::Fill { .. }) {
                         fills += 1;
                     } else {
@@ -510,6 +517,7 @@ impl Workspace {
                     texts += 1;
                     extend(*origin);
                 }
+                Shape::Clip(_) => {}
             }
         }
         let Some([x0, y0, x1, y1]) = bounds else {
@@ -517,9 +525,9 @@ impl Workspace {
         };
         let outside = x0 < 0.0 || y0 < 0.0 || x1 > width || y1 > height;
         Ok(format!(
-            "{header} At t = {t}: {} shapes ({fills} fills, {strokes} strokes, {texts} texts). \
+            "{header} At t = {t}: {} shapes ({fills} fills, {strokes} strokes, {texts} texts, {gradients} with gradients). \
              Drawing bounds x {x0:.1}..{x1:.1}, y {y0:.1}..{y1:.1} (text counts its top-left corner only).{}",
-            shapes.len(),
+            fills + strokes + texts,
             if outside {
                 " Part of the drawing is outside the canvas and will be cut off."
             } else {
@@ -623,7 +631,7 @@ impl Workspace {
             after: content.to_string(),
             target: Target::File(file),
             done: format!("Wrote {} characters.", content.chars().count()),
-            verb: "씀",
+            verb: "assistant.tool.wrote",
         })
     }
 
@@ -647,7 +655,7 @@ impl Workspace {
                 group: group.to_string(),
             },
             done: String::new(),
-            verb: "만듦",
+            verb: "assistant.tool.created",
         })
     }
 
@@ -721,7 +729,7 @@ impl Workspace {
             after: edited.text,
             target: Target::File(file),
             done: format!("Changed: {}", places.join(", ")),
-            verb: "고침",
+            verb: "assistant.tool.edited",
         })
     }
 
@@ -756,17 +764,17 @@ fn shown(path: &str) -> String {
     }
 }
 
-/// 도구 결과. 실패해도 화면 요약 줄에는 까닭을 넣지 않는다(모델용 영어다).
+/// 도구 결과. `verb`는 화면 요약 줄 동사의 번역 키다. 실패해도 요약 줄에는 까닭을 넣지 않는다(모델용 영어다).
 fn output(path: &str, verb: &str, result: Result<String, String>) -> ToolOutput {
     let path = shown(path);
     match result {
         Ok(text) => ToolOutput {
             text,
-            summary: format!("{verb} · {path}"),
+            summary: format!("{} · {path}", t!(verb)),
         },
         Err(err) => ToolOutput {
             text: format!("Error: {err}"),
-            summary: format!("실패 · {path}"),
+            summary: t!("assistant.tool.failed", path = path).into(),
         },
     }
 }
@@ -899,7 +907,7 @@ mod tests {
         );
         let out = ws.call(LOAD_SKILL, &args(&[("name", "tone")]));
         assert!(out.text.starts_with("존댓말로"));
-        assert_eq!(out.summary, "스킬 · tone");
+        assert_eq!(out.summary, t!("assistant.tool.skill", name = "tone"));
         assert!(
             ws.call(LOAD_SKILL, &args(&[("name", "없음")]))
                 .text
@@ -926,13 +934,19 @@ mod tests {
         let (ws, root) = workspace();
         let read = ws.call(READ, &args(&[("path", "Projects/소설/1장.md")]));
         assert_eq!(read.text, "첫 장.");
-        assert_eq!(read.summary, "읽음 · Projects/소설/1장.md");
+        assert_eq!(
+            read.summary,
+            format!("{} · Projects/소설/1장.md", t!("assistant.tool.read"))
+        );
 
         let wrote = ws.call(
             WRITE,
             &args(&[("path", "/Projects/소설/메모.txt"), ("content", "둘째 장.")]),
         );
-        assert_eq!(wrote.summary, "씀 · Projects/소설/메모.txt");
+        assert_eq!(
+            wrote.summary,
+            format!("{} · Projects/소설/메모.txt", t!("assistant.tool.wrote"))
+        );
         assert_eq!(
             std::fs::read_to_string(root.join("Projects/소설/메모.txt")).unwrap(),
             "둘째 장."
@@ -942,7 +956,10 @@ mod tests {
             WRITE,
             &args(&[("path", "Projects/소설/1장.md"), ("content", "새 첫 장.")]),
         );
-        assert_eq!(out.summary, "씀 · Projects/소설/1장.md");
+        assert_eq!(
+            out.summary,
+            format!("{} · Projects/소설/1장.md", t!("assistant.tool.wrote"))
+        );
         let out = ws.call(
             WRITE,
             &args(&[("path", "Projects/소설/2장.md"), ("content", "")]),
@@ -988,7 +1005,10 @@ mod tests {
         let (ws, root) = workspace();
         let out = ws.call(EDIT, &edit_args("Projects/소설/1장.md", "첫 장", "처음 장"));
         assert_eq!(out.text, "Changed: line 1");
-        assert_eq!(out.summary, "고침 · Projects/소설/1장.md");
+        assert_eq!(
+            out.summary,
+            format!("{} · Projects/소설/1장.md", t!("assistant.tool.edited"))
+        );
         assert_eq!(
             std::fs::read_to_string(root.join("Projects/소설/1장.md")).unwrap(),
             "처음 장."
@@ -1053,7 +1073,10 @@ mod tests {
             CREATE_SHEET,
             &args(&[("group", "Projects/소설"), ("content", "# 2장\n\n둘째.")]),
         );
-        assert_eq!(out.summary, "만듦 · Projects/소설");
+        assert_eq!(
+            out.summary,
+            format!("{} · Projects/소설", t!("assistant.tool.created"))
+        );
         let created = out.text.strip_prefix("Created: ").unwrap();
         let name = created.strip_prefix("Projects/소설/").unwrap();
         assert_eq!(name.len(), "01JB0000000000000000000000.md".len());
@@ -1120,7 +1143,10 @@ mod tests {
             WRITE,
             &args(&[("path", "Skills/count/count.py"), ("content", "print(1)\n")]),
         );
-        assert_eq!(out.summary, "씀 · Skills/count/count.py");
+        assert_eq!(
+            out.summary,
+            format!("{} · Skills/count/count.py", t!("assistant.tool.wrote"))
+        );
         let out = ws.call(
             WRITE,
             &args(&[("path", "Skills/count/config.toml"), ("content", "a = ")]),
@@ -1142,7 +1168,10 @@ mod tests {
         .unwrap();
         let run = |arguments: Value| ws.call(RUN_EXTENSION, arguments.as_object().unwrap());
         let out = run(json!({ "name": "dot", "args": { "r": 5 } }));
-        assert_eq!(out.summary, "실행 · Extensions/dot.lua");
+        assert_eq!(
+            out.summary,
+            format!("{} · Extensions/dot.lua", t!("assistant.tool.ran"))
+        );
         assert!(out.text.contains("1 shapes (1 fills"), "{}", out.text);
         assert!(!out.text.contains("outside"), "{}", out.text);
         let out = run(json!({ "name": "dot", "t": 100, "args": { "r": 5 } }));

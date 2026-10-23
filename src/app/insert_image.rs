@@ -39,9 +39,9 @@ const THUMBNAIL_SIZE: f32 = 96.0;
 
 /// 정렬 버튼 순서.
 const ALIGNS: [(ImageAlign, &str); 3] = [
-    (ImageAlign::Left, "왼쪽"),
-    (ImageAlign::Center, "가운데"),
-    (ImageAlign::Right, "오른쪽"),
+    (ImageAlign::Left, "insert.image.align_left"),
+    (ImageAlign::Center, "insert.image.align_center"),
+    (ImageAlign::Right, "insert.image.align_right"),
 ];
 
 /// 이미지를 어디서 가져오는지.
@@ -73,13 +73,10 @@ async fn download_image(
     let mut response = client
         .get(&url, http_client::AsyncBody::default(), true)
         .await
-        .map_err(|err| format!("이미지를 내려받을 수 없습니다: {err}"))?;
+        .map_err(|err| t!("insert.image.download_failed", err = err).to_string())?;
     let status = response.status();
     if !status.is_success() {
-        return Err(format!(
-            "이미지를 내려받을 수 없습니다 (HTTP {})",
-            status.as_u16()
-        ));
+        return Err(t!("insert.image.download_http", status = status.as_u16()).to_string());
     }
     let mut bytes = Vec::new();
     response
@@ -87,12 +84,12 @@ async fn download_image(
         .take(MAX_DOWNLOAD_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .await
-        .map_err(|err| format!("이미지를 내려받을 수 없습니다: {err}"))?;
+        .map_err(|err| t!("insert.image.download_failed", err = err).to_string())?;
     if bytes.len() > MAX_DOWNLOAD_BYTES {
-        return Err("이미지가 너무 큽니다 (50MB 넘음)".into());
+        return Err(t!("insert.image.too_large").to_string());
     }
-    let extension = library::image_extension(&bytes)
-        .ok_or("주소가 이미지가 아닙니다 (JPEG·PNG·GIF·WebP·SVG만 넣을 수 있습니다)")?;
+    let extension =
+        library::image_extension(&bytes).ok_or_else(|| t!("insert.image.not_image").to_string())?;
     Ok((bytes, extension))
 }
 
@@ -139,7 +136,7 @@ struct InsertImageForm {
 fn size_input(window: &mut Window, cx: &mut App) -> Entity<InputState> {
     cx.new(|cx| {
         InputState::new(window, cx)
-            .placeholder("자동")
+            .placeholder(t!("insert.image.auto"))
             .validate(|text, _| text.chars().all(|c| c.is_ascii_digit()))
     })
 }
@@ -165,8 +162,9 @@ impl InsertImageForm {
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("https://"));
         let width = size_input(window, cx);
         let height = size_input(window, cx);
-        let caption =
-            cx.new(|cx| InputState::new(window, cx).placeholder("이미지 아래에 표시할 설명(선택)"));
+        let caption = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("insert.image.caption_placeholder"))
+        });
         // 입력 칸의 Enter는 대화상자의 확인(Confirm)으로 올라가 `.on_ok`가 맡는다. 여기서 따로
         // 구독하면 확인과 겹쳐 이미지가 두 번 들어갈 수 있다.
         let mut subscriptions: Vec<Subscription> = Vec::new();
@@ -278,7 +276,7 @@ impl InsertImageForm {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("이미지 선택".into()),
+            prompt: Some(t!("insert.image.choose_prompt").into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = receiver.await else {
@@ -305,7 +303,7 @@ impl InsertImageForm {
                 self.refit_size(window, cx);
             }
             None => {
-                self.file_error = Some("JPEG·PNG·GIF·WebP·SVG 이미지만 넣을 수 있습니다.".into());
+                self.file_error = Some(t!("insert.image.unsupported").into());
             }
         }
         cx.notify();
@@ -449,7 +447,7 @@ impl InsertImageForm {
                         .text_sm()
                         .text_color(pal.muted)
                         .child(Icon::new(icons::image()).large())
-                        .child("이미지를 끌어다 놓거나 눌러서 선택"),
+                        .child(t!("insert.image.drop_hint")),
                 ),
             });
         let status = match (&self.file_error, &self.file) {
@@ -509,7 +507,7 @@ impl InsertImageForm {
                 .text_sm()
                 .text_color(pal.muted)
                 .child(Icon::new(icons::attachments()).large())
-                .child("첨부파일에 이미지가 없습니다.")
+                .child(t!("insert.image.no_attachments"))
                 .into_any_element();
         }
         let thumbnails = self.attachments.iter().enumerate().map(|(ix, file)| {
@@ -594,7 +592,7 @@ impl InsertImageForm {
             .child(
                 Checkbox::new("insert-image-keep-ratio")
                     .ml_1()
-                    .label("비율 유지")
+                    .label(t!("insert.image.keep_ratio").to_string())
                     .checked(self.keep_ratio)
                     .disabled(!can_keep)
                     .on_click(cx.listener(|this, checked: &bool, window, cx| {
@@ -629,7 +627,7 @@ impl InsertImageForm {
             .children(
                 ALIGNS
                     .iter()
-                    .map(|(_, label)| Tab::new().flex_1().label(*label).disabled(disabled)),
+                    .map(|(_, key)| Tab::new().flex_1().label(t!(*key)).disabled(disabled)),
             )
             .into_any_element()
     }
@@ -642,7 +640,7 @@ impl InsertImageForm {
             .gap_2()
             .child(
                 Checkbox::new("insert-image-full-page")
-                    .label("한 페이지 가득")
+                    .label(t!("insert.image.full_page").to_string())
                     .checked(self.full_page)
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.full_page = *checked;
@@ -653,7 +651,7 @@ impl InsertImageForm {
                 div()
                     .text_xs()
                     .text_color(pal.muted)
-                    .child("전용 페이지에 최대한 크게"),
+                    .child(t!("insert.image.full_page_hint")),
             )
             .into_any_element()
     }
@@ -687,9 +685,11 @@ impl Render for InsertImageForm {
             })
             .children(self.tabs.iter().map(|tab| {
                 let (icon, label) = match tab {
-                    Source::File => (icons::image(), "파일"),
-                    Source::Attachment => (icons::attachments(), "첨부파일"),
-                    Source::Url => (icons::link(), "URL"),
+                    Source::File => (icons::image(), t!("insert.image.tab_file")),
+                    Source::Attachment => {
+                        (icons::attachments(), t!("insert.image.tab_attachments"))
+                    }
+                    Source::Url => (icons::link(), "URL".into()),
                 };
                 Tab::new().flex_1().icon(icon).label(label)
             }));
@@ -700,11 +700,11 @@ impl Render for InsertImageForm {
             Source::Url => {
                 // 프로젝트 시트는 내려받아 첨부파일로 넣는다.
                 let note: Option<(SharedString, Hsla)> = if self.download.is_some() {
-                    Some(("이미지를 내려받는 중…".into(), pal.muted))
+                    Some((t!("insert.image.downloading").into(), pal.muted))
                 } else if let Some(error) = &self.download_error {
                     Some((error.clone(), pal.danger))
                 } else if self.tabs.contains(&Source::Attachment) {
-                    Some(("내려받아 첨부파일에 넣습니다.".into(), pal.muted))
+                    Some((t!("insert.image.download_note").into(), pal.muted))
                 } else {
                     None
                 };
@@ -714,7 +714,7 @@ impl Render for InsertImageForm {
                     .gap_1()
                     .child(form_row(
                         pal,
-                        "주소",
+                        t!("insert.image.address"),
                         Input::new(&self.url).focus_ring(false),
                     ))
                     .when_some(note, |this, (note, color)| {
@@ -740,13 +740,17 @@ impl Render for InsertImageForm {
                     .flex_col()
                     .gap_4()
                     .when(layout_disabled, |this| this.opacity(0.5))
-                    .child(form_row(pal, "크기", size))
-                    .child(form_row(pal, "정렬", align)),
+                    .child(form_row(pal, t!("insert.image.size"), size))
+                    .child(form_row(pal, t!("insert.image.align"), align)),
             )
-            .child(form_row(pal, "배치", self.render_full_page(pal, cx)))
             .child(form_row(
                 pal,
-                "캡션",
+                t!("insert.image.placement"),
+                self.render_full_page(pal, cx),
+            ))
+            .child(form_row(
+                pal,
+                t!("insert.image.caption"),
                 Input::new(&self.caption).focus_ring(false),
             ))
     }
@@ -765,7 +769,7 @@ impl WriterApp {
             .as_ref()
             .map(|editor| editor.path().to_path_buf())
         else {
-            self.notify("먼저 시트를 여세요.", window, cx);
+            self.notify(t!("common.open_sheet_first"), window, cx);
             return;
         };
         self.open_image_dialog(sheet, None, window, cx);
@@ -909,9 +913,9 @@ impl WriterApp {
             dialog
                 .w(px(DIALOG_WIDTH))
                 .title(if editing {
-                    "이미지 수정"
+                    t!("insert.image.edit_title")
                 } else {
-                    "이미지 삽입"
+                    t!("insert.image.insert_title")
                 })
                 .close_button(false)
                 // Enter는 대화상자의 확인(Confirm)이다. 넣었거나 내려받기를 시작했으면 `submit`이
@@ -925,13 +929,17 @@ impl WriterApp {
                     DialogFooter::new()
                         .child(
                             Button::new("insert-image-cancel")
-                                .label("취소")
+                                .label(t!("common.cancel"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("insert-image-ok")
                                 .primary()
-                                .label(if editing { "저장" } else { "삽입" })
+                                .label(if editing {
+                                    t!("common.save")
+                                } else {
+                                    t!("common.insert")
+                                })
                                 .on_click(move |_, window, cx| {
                                     ok_button.update(cx, |form, cx| form.submit(window, cx));
                                 }),
@@ -955,7 +963,7 @@ impl WriterApp {
         cx: &mut Context<Self>,
     ) -> bool {
         if self.editor.as_ref().map(|editor| editor.path()) != Some(sheet) {
-            self.notify("이미지를 넣을 시트가 닫혔습니다.", window, cx);
+            self.notify(t!("insert.image.sheet_closed"), window, cx);
             return false;
         }
         if let Some(edit) = edit {
@@ -964,11 +972,7 @@ impl WriterApp {
             if editor.state() != &edit.state
                 || text.get(edit.range.clone()) != Some(edit.original.as_str())
             {
-                self.notify(
-                    "수정할 이미지가 변경되었습니다. 이미지를 다시 열어 주세요.",
-                    window,
-                    cx,
-                );
+                self.notify(t!("insert.image.changed"), window, cx);
                 return false;
             }
         }
@@ -979,7 +983,7 @@ impl WriterApp {
                 Some(project) => match library::attach_bytes(&project, &bytes, extension) {
                     Ok(relative) => relative,
                     Err(err) => {
-                        self.notify(format!("이미지를 첨부할 수 없습니다: {err}"), window, cx);
+                        self.notify(t!("insert.image.attach_failed", err = err), window, cx);
                         return false;
                     }
                 },
@@ -990,7 +994,7 @@ impl WriterApp {
                     // 첨부파일 그룹의 변화는 폴더 감시가 다시 읽어 반영한다.
                     Ok(relative) => relative,
                     Err(err) => {
-                        self.notify(format!("이미지를 첨부할 수 없습니다: {err}"), window, cx);
+                        self.notify(t!("insert.image.attach_failed", err = err), window, cx);
                         return false;
                     }
                 },

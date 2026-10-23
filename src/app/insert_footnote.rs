@@ -26,12 +26,13 @@ impl WriterApp {
         cx: &mut Context<Self>,
     ) {
         let Some(editor) = &self.editor else {
-            self.notify("먼저 시트를 여세요.", window, cx);
+            self.notify(t!("common.open_sheet_first"), window, cx);
             return;
         };
         let target = editor.state().clone();
         let app = cx.entity().downgrade();
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("각주 내용"));
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("insert.footnote.placeholder")));
         // 넣었으면 `true`(대화상자를 닫는다). 내용이 비었으면 그대로 둔다.
         let submit = {
             let input = input.clone();
@@ -56,7 +57,7 @@ impl WriterApp {
             let (enter, ok) = (submit.clone(), submit.clone());
             dialog
                 .w(px(DIALOG_WIDTH))
-                .title("각주 삽입")
+                .title(t!("insert.footnote.title"))
                 .close_button(false)
                 // Enter는 대화상자의 확인(Confirm)이다. 여기서 넣고, 비었으면 닫지 않는다.
                 .on_ok(move |_, window, cx| enter(window, cx))
@@ -65,13 +66,13 @@ impl WriterApp {
                     DialogFooter::new()
                         .child(
                             Button::new("insert-footnote-cancel")
-                                .label("취소")
+                                .label(t!("common.cancel"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("insert-footnote-ok")
                                 .primary()
-                                .label("삽입")
+                                .label(t!("common.insert"))
                                 .on_click(move |_, window, cx| {
                                     if ok(window, cx) {
                                         window.close_dialog(cx);
@@ -94,7 +95,7 @@ impl WriterApp {
             return;
         };
         if editor.state() != target {
-            self.notify("각주를 넣을 시트가 닫혔습니다.", window, cx);
+            self.notify(t!("insert.footnote.sheet_closed"), window, cx);
             return;
         }
         editor.state().update(cx, |state, cx| {

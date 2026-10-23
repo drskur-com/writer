@@ -48,21 +48,24 @@ fn kind_label(file: &library::FileItem) -> String {
         .map(|ext| ext.to_string_lossy().to_uppercase())
         .unwrap_or_default();
     match file.kind {
-        library::FileKind::Image => format!("{extension} 이미지"),
-        library::FileKind::Text => "텍스트".to_string(),
-        library::FileKind::Pdf => "PDF 문서".to_string(),
-        library::FileKind::Other if extension.is_empty() => "파일".to_string(),
-        library::FileKind::Other => format!("{extension} 파일"),
+        library::FileKind::Image => t!("library.file.kind_image", ext = extension).to_string(),
+        library::FileKind::Text => t!("library.file.kind_text").to_string(),
+        library::FileKind::Pdf => t!("library.file.kind_pdf").to_string(),
+        library::FileKind::Other if extension.is_empty() => {
+            t!("library.file.kind_file").to_string()
+        }
+        library::FileKind::Other => t!("library.file.kind_ext_file", ext = extension).to_string(),
     }
 }
 
 /// 필터 메뉴의 파일 종류 이름.
-fn kind_filter_title(kind: library::FileKind) -> &'static str {
+fn kind_filter_title(kind: library::FileKind) -> SharedString {
     match kind {
-        library::FileKind::Image => "이미지",
-        library::FileKind::Text => "텍스트",
-        library::FileKind::Pdf | library::FileKind::Other => "기타",
+        library::FileKind::Image => t!("library.file.filter_image"),
+        library::FileKind::Text => t!("library.file.filter_text"),
+        library::FileKind::Pdf | library::FileKind::Other => t!("library.file.filter_other"),
     }
+    .into()
 }
 
 /// 표지 파일(`cover.<확장자>`)인지.
@@ -96,7 +99,7 @@ impl WriterApp {
                     )
                 }
                 Err(err) => {
-                    self.notify(format!("파일을 열 수 없습니다: {err}"), window, cx);
+                    self.notify(t!("library.file.open_failed", err = err), window, cx);
                     (None, false)
                 }
             },
@@ -140,7 +143,7 @@ impl WriterApp {
                 .justify_center()
                 .text_sm()
                 .text_color(pal.muted)
-                .child("파일 없음")
+                .child(t!("library.file.none"))
                 .into_any_element();
         }
         let selected = self.open_file.as_ref().map(|file| file.path.clone());
@@ -205,7 +208,7 @@ impl WriterApp {
                                     .bg(pal.tint)
                                     .text_xs()
                                     .text_color(pal.tint_foreground)
-                                    .child("표지"),
+                                    .child(t!("library.file.cover")),
                             )
                         }),
                 )
@@ -310,10 +313,12 @@ impl WriterApp {
             .ghost()
             .size(px(30.0))
             .rounded(px(15.0))
-            .tooltip(current.map_or("모든 파일", kind_filter_title))
+            .tooltip(
+                current.map_or_else(|| t!("library.file.filter_all").into(), kind_filter_title),
+            )
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                 let menu = menu.min_w(px(160.0)).item(
-                    PopupMenuItem::new("모든 파일")
+                    PopupMenuItem::new(t!("library.file.filter_all"))
                         .checked(current.is_none())
                         .on_click(pick(None)),
                 );
@@ -333,20 +338,29 @@ impl WriterApp {
     pub(super) fn file_actions(&self, open: &OpenFile, pal: Palette) -> impl IntoElement {
         let file = self.find_file(&open.path);
         let (open_path, reveal_path) = (open.path.clone(), open.path.clone());
-        let mut details: Vec<(&'static str, String)> = Vec::new();
+        let mut details: Vec<(SharedString, String)> = Vec::new();
         if let Some(file) = &file {
-            details.push(("이름", file.name()));
-            details.push(("종류", kind_label(file)));
-            details.push(("크기", library::format_size(file.size)));
+            details.push((t!("library.file.info_name").into(), file.name()));
+            details.push((t!("library.file.info_kind").into(), kind_label(file)));
+            details.push((
+                t!("library.file.info_size").into(),
+                library::format_size(file.size),
+            ));
             if let Some((width, height)) = open.image_size {
-                details.push(("이미지", format!("{width} × {height} px")));
+                details.push((
+                    t!("library.file.info_image").into(),
+                    format!("{width} × {height} px"),
+                ));
             }
             let location = self
                 .library
                 .as_ref()
                 .and_then(|lib| file.path.strip_prefix(&lib.root).ok())
                 .unwrap_or(&file.path);
-            details.push(("위치", location.display().to_string()));
+            details.push((
+                t!("library.file.info_location").into(),
+                location.display().to_string(),
+            ));
         }
         let info = Popover::new("file-info")
             .anchor(Anchor::TopRight)
@@ -374,7 +388,7 @@ impl WriterApp {
                                     .w(px(40.0))
                                     .flex_shrink_0()
                                     .text_color(pal.muted)
-                                    .child(*label),
+                                    .child(label.clone()),
                             )
                             .child(
                                 div()
@@ -388,12 +402,15 @@ impl WriterApp {
         tool_group(pal)
             .child(
                 icon_button("file-open-external", icons::open_external(), true, pal)
-                    .tooltip(|window, cx| Tooltip::new("기본 앱으로 열기").build(window, cx))
+                    .tooltip(|window, cx| {
+                        Tooltip::new(t!("library.file.open_default_app").to_string())
+                            .build(window, cx)
+                    })
                     .on_click(move |_, _, cx| cx.open_with_system(&open_path)),
             )
             .child(
                 icon_button("file-reveal", icons::reveal(), true, pal)
-                    .tooltip(|window, cx| Tooltip::new(REVEAL_LABEL).build(window, cx))
+                    .tooltip(|window, cx| Tooltip::new(reveal_label()).build(window, cx))
                     .on_click(move |_, _, cx| cx.reveal_path(&reveal_path)),
             )
             .child(info)
@@ -411,7 +428,7 @@ impl WriterApp {
                 .justify_center()
                 .text_2xl()
                 .text_color(pal.muted.opacity(0.7))
-                .child("파일을 찾을 수 없음")
+                .child(t!("library.file.not_found"))
                 .into_any_element();
         };
 
@@ -442,7 +459,7 @@ impl WriterApp {
                                                     .items_center()
                                                     .justify_center()
                                                     .text_color(pal.muted)
-                                                    .child("이미지를 표시할 수 없음")
+                                                    .child(t!("library.file.image_unavailable"))
                                                     .into_any_element()
                                             }),
                                     ),
@@ -473,7 +490,7 @@ impl WriterApp {
                             .text_center()
                             .text_xs()
                             .text_color(pal.muted)
-                            .child("파일이 길어 앞부분만 보여 줍니다."),
+                            .child(t!("library.file.truncated")),
                     )
                 })
                 .overflow_y_scrollbar()
@@ -494,7 +511,10 @@ impl WriterApp {
 }
 
 /// 파일 관리자에서 보기 버튼 이름.
-#[cfg(target_os = "macos")]
-const REVEAL_LABEL: &str = "Finder에서 보기";
-#[cfg(not(target_os = "macos"))]
-const REVEAL_LABEL: &str = "폴더에서 보기";
+fn reveal_label() -> SharedString {
+    #[cfg(target_os = "macos")]
+    let label = t!("common.reveal_in_finder");
+    #[cfg(not(target_os = "macos"))]
+    let label = t!("library.file.reveal_folder");
+    label.into()
+}

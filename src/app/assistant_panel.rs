@@ -79,7 +79,7 @@ impl LiveChat {
             TextareaState::new(window, cx)
                 .auto_grow(1, 6)
                 .submit_on_enter(true)
-                .placeholder("열린 시트에 대해 물어보세요…")
+                .placeholder(t!("assistant.input.placeholder"))
         });
         let subscription =
             cx.subscribe_in(
@@ -148,11 +148,11 @@ enum Period {
 }
 
 impl Period {
-    fn label(self) -> &'static str {
+    fn label(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Period::Today => "오늘",
-            Period::Yesterday => "어제",
-            Period::ThisWeek => "지난 7일",
+            Period::Today => t!("assistant.history.today"),
+            Period::Yesterday => t!("assistant.history.yesterday"),
+            Period::ThisWeek => t!("assistant.history.last_7_days"),
         }
     }
 }
@@ -268,12 +268,12 @@ const SAMPLE_CONVERSATIONS: &[Conversation] = &[
     },
 ];
 
-/// 빈 대화에서 보여 줄 질문 예시.
+/// 빈 대화에서 보여 줄 질문 예시(번역 키). 누르면 그 언어의 글을 보낸다.
 const SUGGESTIONS: &[&str] = &[
-    "이 시트를 세 문장으로 요약해 줘",
-    "어색한 문장을 찾아 고쳐 줘",
-    "맞춤법과 띄어쓰기를 봐 줘",
-    "다음 장면으로 이어질 아이디어를 줘",
+    "assistant.suggestion.summarize",
+    "assistant.suggestion.fix_awkward",
+    "assistant.suggestion.spelling",
+    "assistant.suggestion.next_scene",
 ];
 
 /// 패널 폭.
@@ -350,14 +350,14 @@ impl WriterApp {
         )
         .child(div().flex_1().min_w_0().truncate().font_semibold().child(
             if self.assistant_history {
-                SharedString::from("대화 기록")
+                SharedString::from(t!("assistant.history.title"))
             } else {
                 conversation.map_or_else(
                     || {
                         live.conversation
                             .title()
                             .map(|title| SharedString::from(title.to_string()))
-                            .unwrap_or_else(|| "새 대화".into())
+                            .unwrap_or_else(|| t!("assistant.new_conversation").into())
                     },
                     |conversation| conversation.title.into(),
                 )
@@ -430,7 +430,7 @@ impl WriterApp {
                             .border_color(pal.danger.opacity(0.4))
                             .text_sm()
                             .text_color(pal.danger)
-                            .child(format!("답을 받지 못했습니다: {error}"))
+                            .child(t!("assistant.error.no_reply", error = error))
                     }))
                     .into_any_element()
             }
@@ -633,7 +633,7 @@ impl WriterApp {
             .and_then(|editor| self.previews.get(editor.path()))
             .map(|(_, preview)| preview.title.trim().to_string())
             .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| "제목 없는 시트".to_string());
+            .unwrap_or_else(|| t!("assistant.untitled_sheet").to_string());
 
         let badge = div()
             .size(px(48.0))
@@ -648,75 +648,79 @@ impl WriterApp {
                     .text_color(pal.tint_foreground),
             );
 
-        let body =
-            if configured {
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_1()
-                    .child(
+        let body = if configured {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .text_lg()
+                        .font_semibold()
+                        .child(t!("assistant.empty.title")),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(pal.muted)
+                        .text_center()
+                        .child(t!("assistant.empty.about_sheet", title = sheet_title)),
+                )
+                .child(div().w_full().mt_5().flex().flex_col().gap_2().children(
+                    SUGGESTIONS.iter().enumerate().map(|(ix, key)| {
+                        let text = t!(*key).to_string();
                         div()
-                            .text_lg()
-                            .font_semibold()
-                            .child("무엇을 도와드릴까요?"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(pal.muted)
-                            .text_center()
-                            .child(format!("「{sheet_title}」을 두고 물어볼 수 있어요.")),
-                    )
-                    .child(div().w_full().mt_5().flex().flex_col().gap_2().children(
-                        SUGGESTIONS.iter().enumerate().map(|(ix, text)| {
-                            div()
-                                .id(("assistant-suggestion", ix))
-                                .px_3()
-                                .py_2()
-                                .rounded_lg()
-                                .border_1()
-                                .border_color(pal.panel_border)
-                                .text_sm()
-                                .cursor_pointer()
-                                .hover(move |style| style.bg(pal.hover))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.send_assistant_message(text.to_string(), window, cx);
-                                }))
-                                .child(*text)
-                        }),
-                    ))
-            } else {
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_semibold()
-                            .child("AI가 설정되지 않았어요"),
-                    )
-                    .child(div().text_sm().text_color(pal.muted).text_center().child(
-                        "설정 › AI에서 제공자와 AWS 프로필을 고르면 대화를 시작할 수 있어요.",
-                    ))
-                    .child(
-                        div()
-                            .id("assistant-open-settings")
-                            .mt_4()
-                            .px_4()
+                            .id(("assistant-suggestion", ix))
+                            .px_3()
                             .py_2()
-                            .rounded_full()
-                            .bg(pal.tint)
-                            .text_color(pal.tint_foreground)
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(pal.panel_border)
                             .text_sm()
-                            .font_medium()
                             .cursor_pointer()
-                            .on_click(|_, _, cx| crate::settings::open(cx))
-                            .child("AI 설정 열기"),
-                    )
-            };
+                            .hover(move |style| style.bg(pal.hover))
+                            .child(text.clone())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.send_assistant_message(text.clone(), window, cx);
+                            }))
+                    }),
+                ))
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .text_lg()
+                        .font_semibold()
+                        .child(t!("assistant.setup.title")),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(pal.muted)
+                        .text_center()
+                        .child(t!("assistant.setup.description")),
+                )
+                .child(
+                    div()
+                        .id("assistant-open-settings")
+                        .mt_4()
+                        .px_4()
+                        .py_2()
+                        .rounded_full()
+                        .bg(pal.tint)
+                        .text_color(pal.tint_foreground)
+                        .text_sm()
+                        .font_medium()
+                        .cursor_pointer()
+                        .on_click(|_, _, cx| crate::settings::open(cx))
+                        .child(t!("assistant.setup.open_settings")),
+                )
+        };
 
         div()
             .id("assistant-empty")
@@ -753,7 +757,7 @@ impl WriterApp {
         // 에이전트가 열린 시트를 고칠 수 있으므로 먼저 저장해 둔다. 저장하지 않은 변경이 남아 있으면
         // 에이전트가 쓴 내용을 다음 자동 저장이 덮어쓴다.
         if let Err(err) = self.save_open_sheet(cx) {
-            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+            self.notify(t!("assistant.error.save_sheet", err = err), window, cx);
             return;
         }
         let workspace = self
@@ -819,7 +823,7 @@ impl WriterApp {
         chat.model_lookup = Some(cx.spawn_in(window, async move |this, cx| {
             let result = lookup
                 .await
-                .unwrap_or_else(|_| Err("확인이 중간에 멈췄습니다.".into()));
+                .unwrap_or_else(|_| Err(t!("assistant.model.lookup_stopped").into()));
             this.update_in(cx, |this, window, cx| {
                 this.apply_assistant_models(result, window, cx)
             })
@@ -884,7 +888,7 @@ impl WriterApp {
 
     /// 입력창 아래 모델 고르기. 확인 중·실패·없음이면 고르기 대신 짧은 안내를 둔다.
     fn render_model_picker(&self, pal: Palette) -> AnyElement {
-        let note = |text: &'static str, color: Hsla| {
+        let note = |text: std::borrow::Cow<'static, str>, color: Hsla| {
             div()
                 .px_2()
                 .text_xs()
@@ -894,8 +898,8 @@ impl WriterApp {
                 .into_any_element()
         };
         match &self.assistant_chat.models {
-            ModelLookup::Idle => note("", pal.muted),
-            ModelLookup::Loading => note("모델 확인 중…", pal.muted),
+            ModelLookup::Idle => note("".into(), pal.muted),
+            ModelLookup::Loading => note(t!("assistant.model.loading"), pal.muted),
             ModelLookup::Failed(err) => div()
                 .id("assistant-model-failed")
                 .px_2()
@@ -908,16 +912,16 @@ impl WriterApp {
                         gpui_kit::component::tooltip::Tooltip::new(err.clone()).build(window, cx)
                     }
                 })
-                .child("모델을 확인하지 못했습니다")
+                .child(t!("assistant.model.failed"))
                 .into_any_element(),
             ModelLookup::Ready(models) if models.is_empty() => {
-                note("이 리전에 쓸 수 있는 모델이 없습니다", pal.danger)
+                note(t!("assistant.model.none_in_region"), pal.danger)
             }
             ModelLookup::Ready(_) => Select::new(&self.assistant_chat.model_picker)
                 .small()
                 .appearance(false)
                 .focus_ring(false)
-                .placeholder("모델 선택")
+                .placeholder(t!("assistant.model.placeholder"))
                 .menu_width(px(220.0))
                 .into_any_element(),
         }
@@ -1035,11 +1039,11 @@ fn change_card(
 ) -> AnyElement {
     let id = card.id as usize;
     let status = match card.state {
-        agent::ChangeState::Pending if card.new_file => "새로 만들려고 합니다",
-        agent::ChangeState::Pending => "고치려고 합니다",
-        agent::ChangeState::Applied => "적용함",
-        agent::ChangeState::Declined => "취소함",
-        agent::ChangeState::Failed => "적용하지 못함",
+        agent::ChangeState::Pending if card.new_file => t!("assistant.change.pending_new"),
+        agent::ChangeState::Pending => t!("assistant.change.pending_edit"),
+        agent::ChangeState::Applied => t!("assistant.change.applied"),
+        agent::ChangeState::Declined => t!("assistant.change.declined"),
+        agent::ChangeState::Failed => t!("assistant.change.failed"),
     };
     let status_color = match card.state {
         agent::ChangeState::Applied => pal.success,
@@ -1111,14 +1115,14 @@ fn change_card(
                     .child(
                         Button::new(("change-decline", id))
                             .small()
-                            .label("취소")
+                            .label(t!("common.cancel"))
                             .on_click(decline),
                     )
                     .child(
                         Button::new(("change-apply", id))
                             .small()
                             .primary()
-                            .label("적용")
+                            .label(t!("assistant.change.apply"))
                             .on_click(apply),
                     ),
             )

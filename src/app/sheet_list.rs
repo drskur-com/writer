@@ -37,7 +37,7 @@ const SHEET_ROW_SPRING: SpringConfig = SpringConfig::new(500.0, 45.0, 1.0);
 /// 목록/에디터에 표시할 시트 이름. 빈 시트는 "빈 시트", 아직 읽지 않았으면 빈 문자열.
 pub(super) fn sheet_label(preview: Option<&library::Preview>) -> String {
     match preview {
-        Some(preview) if preview.is_empty() => "빈 시트".to_string(),
+        Some(preview) if preview.is_empty() => t!("library.sheet.empty").to_string(),
         Some(preview) => preview.title.clone(),
         None => String::new(),
     }
@@ -93,7 +93,7 @@ impl Render for DraggedSheet {
                                 .flex_shrink_0()
                                 .font_normal()
                                 .text_color(pal.muted)
-                                .child(format!("외 {extra}개")),
+                                .child(t!("library.more_count", count = extra)),
                         )
                     }),
             )
@@ -160,7 +160,7 @@ impl WriterApp {
         let title = current
             .as_ref()
             .map(|selection| self.selection_label(selection))
-            .unwrap_or_else(|| "시트".to_string());
+            .unwrap_or_else(|| t!("library.sheet.list_title").to_string());
         let sheets = current
             .as_ref()
             .map(|selection| self.sheets_for(selection))
@@ -242,7 +242,7 @@ impl WriterApp {
                 .justify_center()
                 .text_sm()
                 .text_color(pal.muted)
-                .child("시트 없음")
+                .child(t!("library.sheet.none"))
                 .into_any_element()
         } else {
             // 순서 바꾸기는 수동 정렬일 때만 하고, 다른 그룹으로 옮기는 끌기는 정렬 방법과
@@ -564,9 +564,12 @@ impl WriterApp {
     }
 }
 
-/// 시트 카드 우클릭 메뉴: 시트 접합, 접합 해제.
+/// 시트 카드 우클릭 메뉴: 시트 접합, 접합 해제, 휴지통으로 이동.
 ///
-/// 수동 순서 그룹에서 여러 시트를 선택하고, 선택 안의 시트를 우클릭했을 때만 표시한다.
+/// - 우클릭한 시트가 선택 안에 있으면 선택한 시트 모두에, 아니면 그 시트 하나에 한다.
+/// - 접합·접합 해제는 수동 순서 그룹에서, 할 수 있을 때만 보인다. 접합은 둘 이상 골랐고 아직 다
+///   이어지지 않았을 때, 해제는 범위 안이나 바로 뒤가 이어져 있을 때(시트 하나여도) 보인다.
+/// - 휴지통으로 이동은 늘 보이고, 확인을 받는다.
 fn sheet_menu(
     menu: PopupMenu,
     app: &WeakEntity<WriterApp>,
@@ -575,48 +578,44 @@ fn sheet_menu(
     group_path: Option<&std::path::Path>,
     cx: &App,
 ) -> PopupMenu {
-    if group_path.is_none() {
-        return menu;
-    }
     let Some(clicked) = paths.iter().position(|p| p == path) else {
         return menu;
     };
-    let (range, sheets) = match app.upgrade() {
-        Some(app) => {
-            let app = app.read(cx);
-            let selected: Vec<usize> = app
-                .selected_sheets
-                .iter()
-                .filter_map(|selected| paths.iter().position(|p| p == selected))
-                .collect();
-            let range = match (selected.iter().min(), selected.iter().max()) {
-                (Some(&start), Some(&end)) if selected.contains(&clicked) => start..end + 1,
-                _ => clicked..clicked + 1,
-            };
-            let sheets = group_path
-                .and_then(|group| app.library.as_ref()?.find_group(group))
-                .map(|group| group.sheets.clone())
-                .unwrap_or_default();
-            (range, sheets)
-        }
-        None => return menu,
-    };
-    if range.len() < 2 {
+    let Some(entity) = app.upgrade() else {
         return menu;
-    }
+    };
+    let state = entity.read(cx);
+    let selected: Vec<usize> = state
+        .selected_sheets
+        .iter()
+        .filter_map(|selected| paths.iter().position(|p| p == selected))
+        .collect();
+    let in_selection = selected.contains(&clicked);
+    let targets: Vec<std::path::PathBuf> = if in_selection {
+        selected.iter().map(|index| paths[*index].clone()).collect()
+    } else {
+        vec![paths[clicked].clone()]
+    };
+    let label = sheet_label(state.previews.get(path).map(|(_, preview)| preview));
+    let range = match (selected.iter().min(), selected.iter().max()) {
+        (Some(&start), Some(&end)) if in_selection => start..end + 1,
+        _ => clicked..clicked + 1,
+    };
+    let sheets = group_path
+        .and_then(|group| state.library.as_ref()?.find_group(group))
+        .map(|group| group.sheets.clone())
+        .unwrap_or_default();
     let glued = |index: usize| index > 0 && sheets.get(index).is_some_and(|sheet| sheet.glued);
-    // 접합: 둘 이상 골랐고 아직 다 이어지지 않았을 때. 해제: 범위 안이나 바로 뒤가 이어져 있을 때.
     let can_glue = range.len() > 1 && (range.start + 1..range.end).any(|index| !glued(index));
     let can_unglue = (range.start..range.end + 1).any(glued);
-    let item = |icon, label, enabled: bool, glue: bool| {
+    let glue_item = |icon, label: SharedString, glue: bool| {
         let (app, group, range) = (
             app.clone(),
             group_path.map(std::path::Path::to_path_buf),
             range.clone(),
         );
-        PopupMenuItem::element(move |_, _| menu_row(icon, label, None))
-            .disabled(!enabled || group.is_none())
-            .on_click(move |_, window, cx| {
+        PopupMenuItem::element(move |_, _| menu_row(icon, label.clone(), None)).on_click(
+            move |_, window, cx| {
                 let Some(group) = &group else {
                     return;
                 };
@@ -624,9 +623,39 @@ fn sheet_menu(
                     app.set_glued(group, range.clone(), glue, window, cx)
                 })
                 .ok();
-            })
+            },
+        )
     };
+    let danger = cx.theme().danger;
+    let delete_app = app.clone();
     menu.min_w(px(200.0))
-        .item(item(icons::glue(), "시트 접합", can_glue, true))
-        .item(item(icons::unglue(), "접합 해제", can_unglue, false))
+        .when(group_path.is_some() && can_glue, |menu| {
+            menu.item(glue_item(
+                icons::glue(),
+                t!("library.sheet.glue").into(),
+                true,
+            ))
+        })
+        .when(group_path.is_some() && can_unglue, |menu| {
+            menu.item(glue_item(
+                icons::unglue(),
+                t!("library.sheet.unglue").into(),
+                false,
+            ))
+        })
+        .when(group_path.is_some() && (can_glue || can_unglue), |menu| {
+            menu.separator()
+        })
+        .item(
+            PopupMenuItem::element(move |_, _| {
+                menu_row(icons::trash(), t!("common.move_to_trash"), Some(danger))
+            })
+            .on_click(move |_, window, cx| {
+                delete_app
+                    .update(cx, |app, cx| {
+                        app.confirm_delete_sheets(targets.clone(), label.clone(), window, cx)
+                    })
+                    .ok();
+            }),
+        )
 }

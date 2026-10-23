@@ -165,7 +165,7 @@ impl WriterApp {
     /// 프로젝트 미리보기 창을 연다. 열린 시트를 먼저 저장해 지금 내용이 보이게 한다.
     fn open_book_preview(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(err) = self.save_open_sheet(cx) {
-            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+            self.notify(t!("library.sheet.save_failed", err = err), window, cx);
         }
         super::book_preview::open(dir, cx);
     }
@@ -191,7 +191,7 @@ impl WriterApp {
                 menu.min_w(px(200.0))
                     .item(
                         PopupMenuItem::element(move |_, _| {
-                            menu_row(icons::edit(), "프로젝트 편집…", None)
+                            menu_row(icons::edit(), t!("library.project.edit_menu"), None)
                         })
                         .on_click(move |_, window, cx| {
                             edit_app
@@ -201,7 +201,11 @@ impl WriterApp {
                     )
                     .item(
                         PopupMenuItem::element(move |_, _| {
-                            menu_row(icons::book_info(), "책 정보…", None)
+                            menu_row(
+                                icons::book_info(),
+                                t!("library.project.book_info_menu"),
+                                None,
+                            )
                         })
                         .on_click(move |_, window, cx| {
                             book_app
@@ -211,7 +215,11 @@ impl WriterApp {
                     )
                     .item(
                         PopupMenuItem::element(move |_, _| {
-                            menu_row(icons::book_style(), "책 스타일…", None)
+                            menu_row(
+                                icons::book_style(),
+                                t!("library.project.book_style_menu"),
+                                None,
+                            )
                         })
                         .on_click(move |_, window, cx| {
                             style_app
@@ -222,7 +230,7 @@ impl WriterApp {
                     .separator()
                     .item(
                         PopupMenuItem::element(move |_, _| {
-                            menu_row(icons::export(), "프로젝트 내보내기…", None)
+                            menu_row(icons::export(), t!("library.project.export_menu"), None)
                         })
                         .on_click(move |_, window, cx| {
                             export_app
@@ -237,14 +245,14 @@ impl WriterApp {
     fn export_project(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
         // 지금 에디터에 보이는 내용이 파일에 있어야 한다.
         if let Err(err) = self.save_open_sheet(cx) {
-            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+            self.notify(t!("library.sheet.save_failed", err = err), window, cx);
             return;
         }
 
         let name = dir
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "프로젝트".to_string());
+            .unwrap_or_else(|| t!("library.project.default_name").to_string());
         let default_name = format!("{name}.writer");
         let default_dir = dir
             .parent()
@@ -272,8 +280,10 @@ impl WriterApp {
                     .await;
 
             this.update(cx, |app, cx| match result {
-                Ok(()) => app.set_notice(format!("프로젝트 내보내기 완료: {display_name}"), cx),
-                Err(err) => app.set_notice(format!("프로젝트 내보내기 실패: {err}"), cx),
+                Ok(()) => {
+                    app.set_notice(t!("library.project.export_done", name = display_name), cx)
+                }
+                Err(err) => app.set_notice(t!("library.project.export_failed", err = err), cx),
             })
             .ok();
         })
@@ -308,7 +318,7 @@ impl WriterApp {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_new_group(dir.clone(), true, window, cx);
                     }))
-                    .child("새로운 그룹…")
+                    .child(t!("library.project.new_group"))
                     .into_any_element(),
             );
         }
@@ -330,7 +340,7 @@ impl WriterApp {
                 .text_xs()
                 .font_semibold()
                 .text_color(pal.muted)
-                .child("추가자료")
+                .child(t!("library.project.extras"))
                 .child(
                     div()
                         .id("new-extras-group")
@@ -341,7 +351,7 @@ impl WriterApp {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_new_group(extras_dir.clone(), false, window, cx);
                         }))
-                        .child("추가"),
+                        .child(t!("library.project.add")),
                 )
                 .into_any_element(),
         );
@@ -427,19 +437,21 @@ impl WriterApp {
                 let danger = cx.theme().danger;
                 menu.min_w(px(200.0))
                     .item(
-                        PopupMenuItem::element(move |_, _| menu_row(icons::edit(), "편집…", None))
-                            .on_click(move |_, window, cx| {
-                                edit_app
-                                    .update(cx, |app, cx| {
-                                        app.open_edit_group(&edit_dir, manuscript, window, cx)
-                                    })
-                                    .ok();
-                            }),
+                        PopupMenuItem::element(move |_, _| {
+                            menu_row(icons::edit(), t!("library.menu.edit"), None)
+                        })
+                        .on_click(move |_, window, cx| {
+                            edit_app
+                                .update(cx, |app, cx| {
+                                    app.open_edit_group(&edit_dir, manuscript, window, cx)
+                                })
+                                .ok();
+                        }),
                     )
                     .when(manuscript, |menu| {
                         menu.item(
                             PopupMenuItem::element(move |_, _| {
-                                menu_row(icons::new_group(), "새로운 하위 그룹…", None)
+                                menu_row(icons::new_group(), t!("library.menu.new_subgroup"), None)
                             })
                             .on_click(move |_, window, cx| {
                                 child_app
@@ -453,7 +465,7 @@ impl WriterApp {
                     .separator()
                     .item(
                         PopupMenuItem::element(move |_, _| {
-                            menu_row(icons::trash(), "휴지통으로 이동", Some(danger))
+                            menu_row(icons::trash(), t!("common.move_to_trash"), Some(danger))
                         })
                         .on_click(move |_, window, cx| {
                             delete_app
@@ -520,7 +532,7 @@ impl WriterApp {
                 true
             }
             Err(err) => {
-                self.notify(format!("그룹을 만들 수 없습니다: {err}"), window, cx);
+                self.notify(t!("library.group.create_failed", err = err), window, cx);
                 false
             }
         }
@@ -539,22 +551,23 @@ impl WriterApp {
         let app = cx.entity().downgrade();
         let dir = dir.to_path_buf();
         let sheets: usize = group.descendants().iter().map(|g| g.sheets.len()).sum();
-        let description = format!(
-            "‘{}’ 그룹과 시트 {sheets}개를 휴지통으로 옮깁니다.",
-            group.name
+        let description = t!(
+            "library.group.delete_desc",
+            name = group.name,
+            sheets = sheets
         );
         window.open_alert_dialog(cx, move |alert, _, _| {
             let app = app.clone();
             let dir = dir.clone();
             alert
                 .confirm()
-                .title("그룹을 삭제할까요?")
+                .title(t!("library.group.delete_title"))
                 .description(description.clone())
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_text("삭제")
+                        .ok_text(t!("common.delete"))
                         .ok_variant(ButtonVariant::Danger)
-                        .cancel_text("취소"),
+                        .cancel_text(t!("common.cancel")),
                 )
                 .on_ok(move |_, window, cx| {
                     app.update(cx, |app, cx| app.delete_group(&dir, window, cx))
@@ -593,7 +606,7 @@ impl WriterApp {
                 self.load_previews(cx);
                 cx.notify();
             }
-            Err(err) => self.notify(format!("그룹을 삭제할 수 없습니다: {err}"), window, cx),
+            Err(err) => self.notify(t!("library.group.delete_failed", err = err), window, cx),
         }
     }
 }

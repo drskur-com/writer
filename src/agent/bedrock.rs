@@ -162,7 +162,7 @@ const MAX_TOOL_ROUNDS: usize = 24;
 
 async fn run(request: ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Result<(), String> {
     if request.turns.is_empty() {
-        return Err("보낼 말이 없습니다.".into());
+        return Err(t!("assistant.error.nothing_to_send").into());
     }
     let backend = &request.backend;
     let mut runtime = BedrockRuntime::builder().profile_name(&backend.profile);
@@ -260,7 +260,11 @@ async fn run(request: ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Res
         }
         messages.push(Message::tool_results(results));
     }
-    Err(format!("도구를 {MAX_TOOL_ROUNDS}번 넘게 불러 멈췄습니다."))
+    Err(t!(
+        "assistant.error.too_many_tool_rounds",
+        count = MAX_TOOL_ROUNDS
+    )
+    .into())
 }
 
 #[cfg(test)]

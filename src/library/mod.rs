@@ -38,7 +38,7 @@ pub use manuscript::{ManuscriptSheet, manuscript_sheets};
 pub use meta::{
     append_sheet, create_group, create_project, create_sheet, glue_sheets, move_group,
     move_selected_sheets, move_sheet, move_sheets_between, move_to_trash, set_sort,
-    set_sort_descending, unglue_sheets, update_group, update_project,
+    set_sort_descending, trash_sheets, unglue_sheets, update_group, update_project,
 };
 pub use preview::{Preview, read_preview};
 pub use style::{
@@ -46,6 +46,7 @@ pub use style::{
     StyleSpec, StyleTarget, Styles, VerticalAlign, import_styles, read_styles, write_styles,
 };
 
+use std::borrow::Cow;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -93,10 +94,10 @@ impl SectionKind {
     }
 
     /// 화면 표시 이름.
-    pub fn title(self) -> &'static str {
+    pub fn title(self) -> Cow<'static, str> {
         match self {
-            SectionKind::Notes => "메모",
-            SectionKind::Projects => "프로젝트",
+            SectionKind::Notes => t!("core.section.notes"),
+            SectionKind::Projects => t!("core.section.projects"),
         }
     }
 }
@@ -129,11 +130,16 @@ impl SortMode {
     }
 
     /// 방향 메뉴 이름: (오름차순, 내림차순). 수동은 방향이 없다.
-    pub fn direction_titles(self) -> Option<(&'static str, &'static str)> {
+    pub fn direction_titles(self) -> Option<(Cow<'static, str>, Cow<'static, str>)> {
         match self {
             SortMode::Manual => None,
-            SortMode::Title => Some(("ㄱ부터 ㅎ까지", "ㅎ부터 ㄱ까지")),
-            SortMode::Created | SortMode::Modified => Some(("오래된 항목부터", "최신 항목부터")),
+            SortMode::Title => Some((
+                t!("core.sort.title_ascending"),
+                t!("core.sort.title_descending"),
+            )),
+            SortMode::Created | SortMode::Modified => {
+                Some((t!("core.sort.oldest_first"), t!("core.sort.newest_first")))
+            }
         }
     }
 
@@ -153,12 +159,12 @@ impl SortMode {
     }
 
     /// 화면 표시 이름.
-    pub fn title(self) -> &'static str {
+    pub fn title(self) -> Cow<'static, str> {
         match self {
-            SortMode::Manual => "수동",
-            SortMode::Title => "제목순으로",
-            SortMode::Created => "생성일순으로",
-            SortMode::Modified => "수정일순으로",
+            SortMode::Manual => t!("core.sort.manual"),
+            SortMode::Title => t!("core.sort.by_title"),
+            SortMode::Created => t!("core.sort.by_created"),
+            SortMode::Modified => t!("core.sort.by_modified"),
         }
     }
 }

@@ -14,6 +14,7 @@
 //! 오류 글은 모델이 읽고 고치므로 영어로 쓴다.
 
 pub mod canvas;
+mod path;
 mod scene;
 mod worker;
 
@@ -26,8 +27,15 @@ use std::time::{Duration, Instant, SystemTime};
 
 use mlua::{Function, Lua, Table, Value, VmState};
 
-pub use canvas::{Align, Color, Segment, Shape, Theme};
+pub use canvas::{
+    Align, Color, FillRule, LineCap, LineJoin, Paint, Segment, Shape, StrokeStyle, Theme,
+};
 pub use worker::{Info, Worker};
+
+/// 선분 목록의 lyon 경로(화면 테셀레이션에 쓴다).
+pub fn lyon_path(segments: &[Segment]) -> lyon::path::Path {
+    path::LuaPath::to_lyon(segments)
+}
 
 /// 라이브러리 루트 안의 확장 폴더.
 pub const EXTENSIONS_DIR: &str = "Extensions";
@@ -445,7 +453,14 @@ impl Extension {
         lua.globals()
             .raw_set("require", Value::Nil)
             .map_err(message)?;
+        // 캔버스 `g`는 파일 맨 위에서도 쓸 수 있다(경로·그라디언트를 한 번 만들어 두고 draw에서 다시 쓴다).
+        // 크기는 그릴 때마다 다시 정한다.
+        let (width, height) = DEFAULT_SIZE;
+        let recorder = Rc::new(RefCell::new(canvas::Recorder::new(width, height)));
+        let g = canvas::create(&lua, recorder.clone()).map_err(message)?;
         lua.sandbox(true).map_err(message)?;
+        // sandbox가 그 전 전역 표를 읽기 전용으로 얼리므로(`g.theme`을 그릴 때마다 바꾼다) 그 뒤에 넣는다.
+        lua.globals().raw_set("g", g.clone()).map_err(message)?;
         let deadline = Rc::new(Cell::new(Instant::now() + LOAD_TIMEOUT));
         let check = deadline.clone();
         lua.set_interrupt(move |_| {
@@ -503,9 +518,6 @@ impl Extension {
         {
             return Err(format!("period must be between 0 and {MAX_PERIOD} seconds"));
         }
-        let (width, height) = size.unwrap_or(DEFAULT_SIZE);
-        let recorder = Rc::new(RefCell::new(canvas::Recorder::new(width, height)));
-        let g = canvas::create(&lua, recorder.clone()).map_err(message)?;
         Ok(Self {
             lua,
             module,
@@ -803,7 +815,9 @@ return {
         ];
         let shapes = extension.draw(0.5, &args, &Theme::default()).unwrap();
         assert_eq!(shapes.len(), 3);
-        assert!(matches!(&shapes[0], Shape::Fill { color, .. } if *color == [1.0, 0.0, 0.0, 1.0]));
+        assert!(
+            matches!(&shapes[0], Shape::Fill { paint, .. } if paint.color() == [1.0, 0.0, 0.0, 1.0])
+        );
         let Shape::Stroke { path, .. } = &shapes[1] else {
             panic!("{:?}", shapes[1]);
         };
@@ -815,6 +829,99 @@ return {
             extension.draw(0.5, &args, &Theme::default()).unwrap(),
             shapes
         );
+    }
+
+    const VECTOR: &str = r##"
+local leaf = g.newPath():moveTo(0, 0):curveTo(10, -10, 30, -10, 40, 0):quadTo(20, 10, 0, 0):close()
+local open = g.newPath("M0 0 C 0 20 40 20 40 0 Z")
+local shut = g.newPath("M0 0 C 0 0 40 0 40 0 Z")
+local road = g.newPath("M0 50 L 100 50")
+return {
+  size = {100, 100},
+  draw = function(g, t)
+    g.setColor(g.newLinearGradient(0, 0, 100, 0, {{0, "#ff0000"}, {0.5, "#00ff00"}, {1, "#0000ff"}}))
+    g.push()
+    g.translate(10, 10)
+    g.fill(leaf)
+    g.pop()
+    g.setColor(g.newRadialGradient(50, 50, 30, {"#ffffff", {1, 1, 1, 0}}))
+    g.circle("fill", 50, 50, 30)
+    g.setColor(1, 0, 0)
+    g.setLineJoin("round"); g.setLineCap("round"); g.setLineWidth(4)
+    g.setDash({10, 10}, 5)
+    g.stroke(road)
+    g.setDash()
+    g.setScissor(0, 0, 50, 100)
+    g.fill(g.lerpPath(open, shut, g.ease.inOutSine(0.5)))
+    g.setScissor()
+    local x, y, angle = road:pointAt(0.25)
+    g.stroke(road:trim(0, 0.5):translate(0, 10))
+    g.print(string.format("%d %d %.2f %d", x, y, angle, road:length()), 0, 0)
+  end,
+}
+"##;
+
+    #[test]
+    fn draws_vector_paths_and_gradients() {
+        let extension = Extension::load("vector", VECTOR).unwrap();
+        let shapes = extension.draw(0.0, &[], &Theme::default()).unwrap();
+        let Shape::Fill { path, paint, .. } = &shapes[0] else {
+            panic!("{:?}", shapes[0]);
+        };
+        // 변환을 따라 옮겨지고, 2차 곡선은 3차로 바뀐다.
+        assert_eq!(path[0], Segment::Move([10.0, 10.0]));
+        assert!(matches!(path[2], Segment::Cubic(..)));
+        assert!(matches!(paint, Paint::Linear { stops, .. } if stops.len() == 3));
+        assert!(
+            matches!(&shapes[1], Shape::Fill { paint: Paint::Radial { radius, .. }, .. } if *radius == 30.0)
+        );
+        // 점선: 길이 100을 10/10 무늬로 5만큼 밀면 조각 여섯.
+        let Shape::Stroke { path, style, .. } = &shapes[2] else {
+            panic!("{:?}", shapes[2]);
+        };
+        assert_eq!(style.join, LineJoin::Round);
+        assert_eq!(style.cap, LineCap::Round);
+        assert_eq!(
+            path.iter()
+                .filter(|s| matches!(s, Segment::Move(_)))
+                .count(),
+            6
+        );
+        assert_eq!(shapes[3], Shape::Clip(Some([0.0, 0.0, 50.0, 100.0])));
+        // 모핑: 가운데는 높이 10의 곡선.
+        let Shape::Fill { path, .. } = &shapes[4] else {
+            panic!("{:?}", shapes[4]);
+        };
+        assert_eq!(
+            path[1],
+            Segment::Cubic([0.0, 10.0], [40.0, 10.0], [40.0, 0.0])
+        );
+        assert_eq!(shapes[5], Shape::Clip(None));
+        let Shape::Stroke { path, .. } = &shapes[6] else {
+            panic!("{:?}", shapes[6]);
+        };
+        assert_eq!(path.last(), Some(&Segment::Line([50.0, 60.0])));
+        assert!(matches!(&shapes[7], Shape::Text { text, .. } if text == "25 50 0.00 100"));
+    }
+
+    #[test]
+    fn vector_errors_name_what_is_wrong() {
+        let draw = |body: &str| {
+            let source = format!("return {{ size = {{10, 10}}, draw = function(g) {body} end }}");
+            Extension::load("bad", &source)
+                .unwrap()
+                .draw(0.0, &[], &Theme::default())
+                .unwrap_err()
+        };
+        assert!(draw("g.fill(g.newPath('M0 0 X'))").contains("unknown path command"));
+        assert!(draw("g.newPath():bend()").contains("path:bend does not exist"));
+        assert!(
+            draw("g.lerpPath(g.newPath('M0 0 L1 1'), g.newPath('M0 0 C1 1 1 1 1 1'), 0.5)")
+                .contains("same structure")
+        );
+        assert!(draw("g.setLineJoin('sharp')").contains("line join"));
+        assert!(draw("g.newLinearGradient(0, 0, 1, 1, {})").contains("at least one color stop"));
+        assert!(draw("g.fill(3)").contains("must be a path"));
     }
 
     #[test]
@@ -941,12 +1048,14 @@ return {
             .skip(1)
             .filter_map(|rest| rest.split("\n```").next())
             .collect();
-        assert_eq!(sources.len(), 5);
+        assert_eq!(sources.len(), 7);
         let theme = Theme::default();
         let args = [
             ("values".to_string(), "12, 30, 21, 8".to_string()),
             ("labels".to_string(), "봄, 여름, 가을, 겨울".to_string()),
             ("label".to_string(), "명중!".to_string()),
+            ("sway".to_string(), "1".to_string()),
+            ("from".to_string(), "서울".to_string()),
         ];
         for source in sources {
             let extension = Extension::load("example", source).unwrap();
@@ -980,6 +1089,7 @@ return {
                                     })
                                     .collect(),
                                 Shape::Text { origin, .. } => vec![*origin],
+                                Shape::Clip(_) => Vec::new(),
                             };
                             assert!(points.into_iter().all(inside), "t = {t}: {shape:?}");
                         }
@@ -1035,7 +1145,7 @@ return {
         // 정면에서 본 상자는 앞면 하나만 보이고, 선은 상자 앞(먼저 그린 면 위)에 온다.
         assert_eq!(shapes.len(), 3, "{shapes:?}");
         assert!(
-            matches!(&shapes[0], Shape::Fill { color, .. } if color[0] > 0.3 && color[1] == 0.0),
+            matches!(&shapes[0], Shape::Fill { paint, .. } if paint.color()[0] > 0.3 && paint.color()[1] == 0.0),
             "{shapes:?}"
         );
         assert!(matches!(&shapes[1], Shape::Stroke { .. }));
@@ -1067,6 +1177,8 @@ return {
         )
         .unwrap();
         let shapes = extension.draw(0.0, &[], &Theme::default()).unwrap();
-        assert!(matches!(&shapes[0], Shape::Fill { color, .. } if *color == [1.0, 0.0, 0.0, 1.0]));
+        assert!(
+            matches!(&shapes[0], Shape::Fill { paint, .. } if paint.color() == [1.0, 0.0, 0.0, 1.0])
+        );
     }
 }

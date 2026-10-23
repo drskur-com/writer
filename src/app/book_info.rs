@@ -74,7 +74,7 @@ impl BookInfoForm {
         });
         let authors = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("여럿이면 쉼표로 구분")
+                .placeholder(t!("book.info.authors_placeholder"))
                 .default_value(book.authors.join(", "))
         });
         let description = cx.new(|cx| {
@@ -108,7 +108,7 @@ impl BookInfoForm {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("표지 이미지 선택".into()),
+            prompt: Some(t!("book.info.pick_cover").into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(mut paths))) = receiver.await else {
@@ -136,7 +136,7 @@ impl BookInfoForm {
                 self.cover_error = None;
             }
             None => {
-                self.cover_error = Some("JPEG·PNG·GIF·WebP·SVG 이미지만 쓸 수 있습니다.".into());
+                self.cover_error = Some(t!("book.info.cover_formats").into());
             }
         }
         cx.notify();
@@ -207,7 +207,7 @@ impl Render for BookInfoForm {
             .border_1()
             .border_color(pal.panel_border)
             .bg(pal.panel)
-            .tooltip("이미지를 끌어다 놓거나 눌러서 선택")
+            .tooltip(t!("book.info.cover_tooltip"))
             .drag_over::<ExternalPaths>(move |style, _, _, _| {
                 style.border_color(pal.foreground).bg(pal.hover)
             })
@@ -234,23 +234,25 @@ impl Render for BookInfoForm {
             .dropdown_menu(move |menu, _, _| {
                 let (pick_form, clear_form) = (form.clone(), form.clone());
                 menu.min_w(px(160.0))
-                    .item(
-                        PopupMenuItem::new("이미지 선택…").on_click(move |_, window, cx| {
+                    .item(PopupMenuItem::new(t!("book.info.choose_image")).on_click(
+                        move |_, window, cx| {
                             pick_form
                                 .update(cx, |form, cx| form.pick_cover(window, cx))
                                 .ok();
-                        }),
-                    )
+                        },
+                    ))
                     .when(has_cover, |menu| {
-                        menu.item(PopupMenuItem::new("지우기").on_click(move |_, _, cx| {
-                            clear_form
-                                .update(cx, |form, cx| {
-                                    form.cover = None;
-                                    form.cover_error = None;
-                                    cx.notify();
-                                })
-                                .ok();
-                        }))
+                        menu.item(PopupMenuItem::new(t!("book.info.clear_image")).on_click(
+                            move |_, _, cx| {
+                                clear_form
+                                    .update(cx, |form, cx| {
+                                        form.cover = None;
+                                        form.cover_error = None;
+                                        cx.notify();
+                                    })
+                                    .ok();
+                            },
+                        ))
                     })
             });
         // 왼쪽 위에 표지, 오른쪽에 나머지 항목.
@@ -272,16 +274,20 @@ impl Render for BookInfoForm {
             .gap_4()
             .child(form_row(
                 pal,
-                "제목",
+                t!("book.info.title"),
                 Input::new(&self.title).focus_ring(false),
             ))
             .child(form_row(
                 pal,
-                "지은이",
+                t!("book.info.authors"),
                 Input::new(&self.authors).focus_ring(false),
             ))
-            .child(form_row(pal, "언어", language))
-            .child(form_row(pal, "소개", Textarea::new(&self.description)));
+            .child(form_row(pal, t!("book.info.language"), language))
+            .child(form_row(
+                pal,
+                t!("book.info.description"),
+                Textarea::new(&self.description),
+            ));
 
         div()
             .flex()
@@ -315,20 +321,20 @@ impl WriterApp {
             let ok_form = form.clone();
             dialog
                 .w(px(DIALOG_WIDTH))
-                .title("책 정보")
+                .title(t!("book.info.dialog_title"))
                 .close_button(false)
                 .child(form.clone())
                 .footer(
                     DialogFooter::new()
                         .child(
                             Button::new("book-info-cancel")
-                                .label("취소")
+                                .label(t!("common.cancel"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("book-info-ok")
                                 .primary()
-                                .label("완료")
+                                .label(t!("book.info.done"))
                                 .on_click(move |_, window, cx| {
                                     ok_form.update(cx, |form, cx| form.submit(window, cx));
                                 }),
@@ -366,7 +372,7 @@ impl WriterApp {
                 true
             }
             Err(err) => {
-                self.notify(format!("책 정보를 저장할 수 없습니다: {err}"), window, cx);
+                self.notify(t!("book.info.save_failed", err = err), window, cx);
                 false
             }
         }

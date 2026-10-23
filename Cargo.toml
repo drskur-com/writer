@@ -27,6 +27,11 @@ gpui-kit = { version = "0.8", features = [
 tree-sitter = "0.26"
 # `LineStyle`처럼 gpui-kit이 다시 내보내지 않는 타입용. 버전은 gpui-kit과 맞춘다.
 gpui-base = "0.8"
+# UI 문자열 번역(`locales/<언어>/*.yml`). gpui-component와 같은 크레이트라 언어 설정을 함께 쓴다.
+rust-i18n = "4"
+sys-locale = "0.3"
+# 확장 캔버스의 경로 측정·자르기·점선과 화면 테셀레이션(ADR-0026). 버전은 gpui와 맞춘다.
+lyon = "1.0"
 dirs = "5"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

@@ -20,12 +20,18 @@ pub fn read_sheet(path: &Path) -> io::Result<String> {
 /// 중간에 끊겨도 원래 파일은 온전하다. 임시 파일은 `.md`가 아니라 스캔에 잡히지 않는다.
 pub fn write_sheet(path: &Path, text: &str) -> io::Result<u128> {
     use std::io::Write as _;
-    let dir = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "상위 폴더가 없습니다"))?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "파일 이름이 없습니다"))?;
+    let dir = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            t!("core.error.no_parent").into_owned(),
+        )
+    })?;
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            t!("core.error.no_file_name").into_owned(),
+        )
+    })?;
     let temp = dir.join(format!(".{}.writer-tmp", name.to_string_lossy()));
 
     let result = (|| {

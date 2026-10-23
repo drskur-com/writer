@@ -19,13 +19,16 @@ impl WriterApp {
         cx: &mut Context<Self>,
     ) {
         let Some(editor) = &self.editor else {
-            self.notify("먼저 시트를 여세요.", window, cx);
+            self.notify(t!("common.open_sheet_first"), window, cx);
             return;
         };
         let target = editor.state().clone();
         let app = cx.entity().downgrade();
-        let columns = cx.new(|cx| InputState::new(window, cx).placeholder("열 수 (기본 3)"));
-        let rows = cx.new(|cx| InputState::new(window, cx).placeholder("본문 행 수 (기본 2)"));
+        let columns = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("insert.table.columns_placeholder"))
+        });
+        let rows = cx
+            .new(|cx| InputState::new(window, cx).placeholder(t!("insert.table.rows_placeholder")));
         let submit = {
             let columns = columns.clone();
             let rows = rows.clone();
@@ -46,7 +49,7 @@ impl WriterApp {
                     count(&rows.read(cx).value(), 2),
                 ) else {
                     app.update(cx, |app, cx| {
-                        app.notify("열과 행 수는 1~100 사이의 정수로 입력하세요.", window, cx);
+                        app.notify(t!("insert.table.invalid"), window, cx);
                     })
                     .ok();
                     return false;
@@ -66,7 +69,7 @@ impl WriterApp {
             let (enter, ok) = (submit.clone(), submit.clone());
             dialog
                 .w(px(440.))
-                .title("표 삽입")
+                .title(t!("insert.table.title"))
                 .close_button(false)
                 .on_ok(move |_, window, cx| enter(window, cx))
                 .child(Input::new(&columns).focus_ring(false))
@@ -75,13 +78,13 @@ impl WriterApp {
                     DialogFooter::new()
                         .child(
                             Button::new("insert-table-cancel")
-                                .label("취소")
+                                .label(t!("common.cancel"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("insert-table-ok")
                                 .primary()
-                                .label("삽입")
+                                .label(t!("common.insert"))
                                 .on_click(move |_, window, cx| {
                                     if ok(window, cx) {
                                         window.close_dialog(cx);
@@ -104,7 +107,7 @@ impl WriterApp {
             return;
         };
         if editor.state() != target {
-            self.notify("표를 넣을 시트가 닫혔습니다.", window, cx);
+            self.notify(t!("insert.table.sheet_closed"), window, cx);
             return;
         }
         editor.state().update(cx, |state, cx| {

@@ -77,7 +77,9 @@ impl NewProjectForm {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let initial_name = editing.map_or("무제".to_string(), |group| group.name.clone());
+        let initial_name = editing.map_or(t!("library.untitled").to_string(), |group| {
+            group.name.clone()
+        });
         let name = cx.new(|cx| InputState::new(window, cx).default_value(initial_name));
         // 새 그룹의 기본값: 원고는 본문 색 + 문서 묶음, 추가자료는 파랑 + 폴더.
         let (default_color, default_icon) = match &target {
@@ -269,17 +271,17 @@ impl Render for NewProjectForm {
             .gap_4()
             .child(form_row(
                 pal,
-                "이름",
+                t!("library.form.name"),
                 Input::new(&self.name).focus_ring(false),
             ))
             .child(form_row(
                 pal,
-                "색상",
+                t!("library.form.color"),
                 div().flex().flex_wrap().gap_2().children(swatches),
             ))
             .child(form_row(
                 pal,
-                "아이콘",
+                t!("library.form.icon"),
                 div().flex().gap_2().children(icon_buttons),
             ))
     }
@@ -321,7 +323,8 @@ struct IconPicker {
 
 impl IconPicker {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("검색"));
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("library.form.search")));
         let subscription = cx.subscribe(&search, |this, search, event, cx| {
             if let InputEvent::Change = event {
                 let query = search.read(cx).value().trim().to_lowercase();
@@ -404,9 +407,10 @@ impl Render for IconPicker {
 /// 폼 한 줄: 오른쪽 정렬 라벨 + 컨트롤.
 pub(super) fn form_row(
     pal: Palette,
-    label: &'static str,
+    label: impl Into<SharedString>,
     control: impl IntoElement,
 ) -> impl IntoElement {
+    let label: SharedString = label.into();
     div()
         .flex()
         .items_center()
@@ -486,21 +490,22 @@ impl WriterApp {
             }
             _ => None,
         };
-        let title = match &target {
-            FormTarget::NewProject => "새로운 프로젝트",
-            FormTarget::EditProject(_) => "프로젝트 편집",
+        let title: SharedString = match &target {
+            FormTarget::NewProject => t!("library.form.new_project"),
+            FormTarget::EditProject(_) => t!("library.form.edit_project"),
             FormTarget::NewGroup {
                 manuscript: false, ..
-            } => "새로운 추가자료",
+            } => t!("library.form.new_extra"),
             FormTarget::NewGroup { parent, .. } if self.open_project.as_ref() == Some(parent) => {
-                "새로운 그룹"
+                t!("library.form.new_group")
             }
             FormTarget::NewGroup { parent, .. } if self.is_notes_section(parent) => {
-                "새로운 메모 그룹"
+                t!("library.form.new_note_group")
             }
-            FormTarget::NewGroup { .. } => "새로운 하위 그룹",
-            FormTarget::EditGroup { .. } => "그룹 편집",
-        };
+            FormTarget::NewGroup { .. } => t!("library.form.new_subgroup"),
+            FormTarget::EditGroup { .. } => t!("library.form.edit_group"),
+        }
+        .into();
         let app = cx.entity().downgrade();
         let form = cx.new(|cx| NewProjectForm::new(app, target, group.as_ref(), window, cx));
         // 처음 그릴 때만 이름 칸에 포커스를 주고 "무제"를 전부 선택해 바로 고쳐 쓰게 한다.
@@ -516,20 +521,20 @@ impl WriterApp {
             let ok_form = form.clone();
             dialog
                 .w(px(DIALOG_WIDTH))
-                .title(title)
+                .title(title.clone())
                 .close_button(false)
                 .child(form.clone())
                 .footer(
                     DialogFooter::new()
                         .child(
                             Button::new("new-project-cancel")
-                                .label("취소")
+                                .label(t!("common.cancel"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("new-project-ok")
                                 .primary()
-                                .label("완료")
+                                .label(t!("library.form.done"))
                                 .on_click(move |_, window, cx| {
                                     ok_form.update(cx, |form, cx| form.submit(window, cx));
                                 }),
@@ -568,7 +573,7 @@ impl WriterApp {
         if open_inside.is_some()
             && let Err(err) = self.save_open_sheet(cx)
         {
-            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+            self.notify(t!("library.sheet.save_failed", err = err), window, cx);
             return false;
         }
         let updated = if group {
@@ -609,8 +614,12 @@ impl WriterApp {
                 true
             }
             Err(err) => {
-                let what = if group { "그룹" } else { "프로젝트" };
-                self.notify(format!("{what}을 고칠 수 없습니다: {err}"), window, cx);
+                let message = if group {
+                    t!("library.group.update_failed", err = err)
+                } else {
+                    t!("library.project.update_failed", err = err)
+                };
+                self.notify(message, window, cx);
                 false
             }
         }
@@ -629,22 +638,23 @@ impl WriterApp {
         let app = cx.entity().downgrade();
         let dir = dir.to_path_buf();
         let sheets: usize = group.descendants().iter().map(|g| g.sheets.len()).sum();
-        let description = format!(
-            "‘{}’ 프로젝트와 시트 {sheets}개를 휴지통으로 옮깁니다.",
-            group.name
+        let description = t!(
+            "library.project.delete_desc",
+            name = group.name,
+            sheets = sheets
         );
         window.open_alert_dialog(cx, move |alert, _, _| {
             let app = app.clone();
             let dir = dir.clone();
             alert
                 .confirm()
-                .title("프로젝트를 삭제할까요?")
+                .title(t!("library.project.delete_title"))
                 .description(description.clone())
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_text("삭제")
+                        .ok_text(t!("common.delete"))
                         .ok_variant(ButtonVariant::Danger)
-                        .cancel_text("취소"),
+                        .cancel_text(t!("common.cancel")),
                 )
                 .on_ok(move |_, window, cx| {
                     app.update(cx, |app, cx| app.delete_project(&dir, window, cx))
@@ -686,7 +696,7 @@ impl WriterApp {
                 self.load_previews(cx);
                 cx.notify();
             }
-            Err(err) => self.notify(format!("프로젝트를 삭제할 수 없습니다: {err}"), window, cx),
+            Err(err) => self.notify(t!("library.project.delete_failed", err = err), window, cx),
         }
     }
 
@@ -713,7 +723,7 @@ impl WriterApp {
                 true
             }
             Err(err) => {
-                self.notify(format!("프로젝트를 만들 수 없습니다: {err}"), window, cx);
+                self.notify(t!("library.project.create_failed", err = err), window, cx);
                 false
             }
         }

@@ -111,7 +111,7 @@ impl ImageBlocks {
                 .text_xs()
                 .text_color(pal.muted)
                 .child(Icon::new(icons::image()).small())
-                .child(format!("이미지를 찾을 수 없음: {destination}"))
+                .child(t!("editor.image.not_found", path = destination))
                 .into_any_element(),
             source => {
                 // 파일은 칸 비율이 이미지 비율과 같아 가장자리까지 채우고, 웹 이미지는 비율을 몰라

@@ -4,6 +4,7 @@
 //! 빠진 값은 대상별 기본값([`StyleTarget::defaults`])으로 채운다.
 //! 다른 프로젝트의 스타일은 값을 그대로 복사해 가져온다([`import_styles`]).
 
+use std::borrow::Cow;
 use std::io;
 use std::path::Path;
 
@@ -43,12 +44,12 @@ impl StyleTarget {
     }
 
     /// 표시 이름.
-    pub fn title(self) -> &'static str {
+    pub fn title(self) -> Cow<'static, str> {
         match self {
-            StyleTarget::Body => "본문",
-            StyleTarget::Part => "부 제목",
-            StyleTarget::Chapter => "장 제목",
-            StyleTarget::Section => "절 제목",
+            StyleTarget::Body => t!("book.style.target.body"),
+            StyleTarget::Part => t!("book.style.target.part"),
+            StyleTarget::Chapter => t!("book.style.target.chapter"),
+            StyleTarget::Section => t!("book.style.target.section"),
         }
     }
 
@@ -131,12 +132,12 @@ impl Align {
     pub const ALL: [Align; 4] = [Align::Left, Align::Center, Align::Right, Align::Justify];
 
     /// 표시 이름.
-    pub fn title(self) -> &'static str {
+    pub fn title(self) -> Cow<'static, str> {
         match self {
-            Align::Left => "왼쪽",
-            Align::Center => "가운데",
-            Align::Right => "오른쪽",
-            Align::Justify => "양쪽",
+            Align::Left => t!("book.style.align.left"),
+            Align::Center => t!("book.style.align.center"),
+            Align::Right => t!("book.style.align.right"),
+            Align::Justify => t!("book.style.align.justify"),
         }
     }
 }
@@ -157,11 +158,11 @@ impl Placement {
     pub const ALL: [Placement; 3] = [Placement::Inline, Placement::Page, Placement::Hidden];
 
     /// 표시 이름.
-    pub fn title(self) -> &'static str {
+    pub fn title(self) -> Cow<'static, str> {
         match self {
-            Placement::Inline => "본문 첫머리",
-            Placement::Page => "별도 제목 페이지",
-            Placement::Hidden => "제목 숨김",
+            Placement::Inline => t!("book.style.placement.inline"),
+            Placement::Page => t!("book.style.placement.page"),
+            Placement::Hidden => t!("book.style.placement.hidden"),
         }
     }
 }
@@ -183,11 +184,11 @@ impl VerticalAlign {
     ];
 
     /// 표시 이름.
-    pub fn title(self) -> &'static str {
+    pub fn title(self) -> Cow<'static, str> {
         match self {
-            VerticalAlign::Top => "위",
-            VerticalAlign::Center => "가운데",
-            VerticalAlign::Bottom => "아래",
+            VerticalAlign::Top => t!("book.style.valign.top"),
+            VerticalAlign::Center => t!("book.style.valign.center"),
+            VerticalAlign::Bottom => t!("book.style.valign.bottom"),
         }
     }
 }

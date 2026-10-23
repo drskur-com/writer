@@ -211,7 +211,7 @@ fn page_break_mark(size: Size<Pixels>, cx: &App) -> AnyElement {
         .text_xs()
         .text_color(pal.muted)
         .child(rule())
-        .child("여기서 페이지가 나뉩니다")
+        .child(t!("editor.page_break"))
         .child(rule())
         .into_any_element()
 }
@@ -509,7 +509,7 @@ impl WriterApp {
                             .right_6()
                             .text_xs()
                             .text_color(pal.muted)
-                            .child(format!("{} 개 단어", editor.words)),
+                            .child(t!("editor.word_count", count = editor.words)),
                     )
                     .into_any_element()
             }
@@ -522,9 +522,9 @@ impl WriterApp {
                 .text_color(pal.muted.opacity(0.7))
                 // 파일 그룹을 보고 있으면 파일을 고르라고 안내한다.
                 .child(if self.viewing_file_group() {
-                    "선택한 파일 없음"
+                    t!("editor.no_file_selected")
                 } else {
-                    "선택한 시트 없음"
+                    t!("editor.no_sheet_selected")
                 })
                 .into_any_element(),
         };
@@ -573,7 +573,7 @@ impl WriterApp {
         let already_open = self.editor.as_ref().map(|editor| &editor.path) == path.as_ref();
         if !already_open {
             if let Err(err) = self.save_open_sheet(cx) {
-                self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+                self.notify(t!("editor.save_failed", err = err), window, cx);
                 return;
             }
             self.editor = None;
@@ -601,7 +601,7 @@ impl WriterApp {
         let text = match library::read_sheet(&path) {
             Ok(text) => crate::text_transform::to_editor(&text),
             Err(err) => {
-                self.notify(format!("시트를 열 수 없습니다: {err}"), window, cx);
+                self.notify(t!("editor.open_failed", err = err), window, cx);
                 return;
             }
         };
@@ -766,7 +766,7 @@ impl WriterApp {
                 // 포커스가 빠지면 기다리지 않고 저장한다.
                 InputEvent::Blur => {
                     if let Err(err) = this.save_open_sheet(cx) {
-                        this.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+                        this.notify(t!("editor.save_failed", err = err), window, cx);
                     }
                 }
                 _ => {}
@@ -840,7 +840,7 @@ impl WriterApp {
             cx.background_executor().timer(AUTOSAVE_DELAY).await;
             this.update_in(cx, |this, window, cx| {
                 if let Err(err) = this.save_open_sheet(cx) {
-                    this.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+                    this.notify(t!("editor.save_failed", err = err), window, cx);
                 }
             })
             .ok();

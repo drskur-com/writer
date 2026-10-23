@@ -83,7 +83,7 @@ pub fn set_cover(project_dir: &Path, source: &Path) -> io::Result<String> {
     if !COVER_EXTENSIONS.contains(&extension.as_str()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "표지로 쓸 수 없는 이미지 형식입니다",
+            t!("book.cover.unsupported_format").into_owned(),
         ));
     }
     let dir = ensure_attachments(project_dir)?;

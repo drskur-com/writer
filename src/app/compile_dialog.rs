@@ -34,11 +34,11 @@ impl CompileFormat {
         }
     }
 
-    pub fn description(self) -> &'static str {
+    pub fn description(self) -> std::borrow::Cow<'static, str> {
         match self {
-            CompileFormat::Epub => "표준 전자책 형식 (리더기·스마트폰·태블릿)",
-            CompileFormat::Pdf => "인쇄용 고정 판형 문서 (미리보기와 같은 배치)",
-            CompileFormat::Docx => "Microsoft Word 문서 (Word 스타일로 고쳐 쓸 수 있음)",
+            CompileFormat::Epub => t!("compile.format.epub_description"),
+            CompileFormat::Pdf => t!("compile.format.pdf_description"),
+            CompileFormat::Docx => t!("compile.format.docx_description"),
         }
     }
 
@@ -193,12 +193,12 @@ impl CompileDialog {
                     app.update(cx, |writer, cx| match result {
                         Ok(()) => {
                             writer.set_notice(
-                                format!("{label} 컴파일 완료: {file_display_name}"),
+                                t!("compile.done", format = label, file = file_display_name),
                                 cx,
                             );
                         }
                         Err(err) => {
-                            writer.set_notice(format!("{label} 컴파일 실패: {err}"), cx);
+                            writer.set_notice(t!("compile.failed", format = label, err = err), cx);
                         }
                     });
                 }
@@ -219,7 +219,7 @@ impl Render for CompileDialog {
         };
 
         let author_text = if self.book.authors.is_empty() {
-            "지은이 미지정".to_string()
+            t!("compile.no_author").into_owned()
         } else {
             self.book.authors.join(", ")
         };
@@ -260,9 +260,11 @@ impl Render for CompileDialog {
                             .flex_col()
                             .gap_0p5()
                             .child(div().font_semibold().truncate().child(title.to_string()))
-                            .child(div().text_xs().text_color(pal.muted).truncate().child(
-                                format!("{author_text} · 원고 시트 {}개", self.sheet_count),
-                            )),
+                            .child(div().text_xs().text_color(pal.muted).truncate().child(t!(
+                                "compile.summary",
+                                author = author_text,
+                                count = self.sheet_count
+                            ))),
                     ),
             )
             .child(
@@ -271,7 +273,7 @@ impl Render for CompileDialog {
                     .flex()
                     .flex_col()
                     .gap_1p5()
-                    .child(div().font_medium().child("내보내기 형식"))
+                    .child(div().font_medium().child(t!("compile.format")))
                     .child(
                         div()
                             .flex()
@@ -328,7 +330,9 @@ impl Render for CompileDialog {
                                                                 .rounded(px(4.0))
                                                                 .bg(pal.muted.opacity(0.2))
                                                                 .text_color(pal.muted)
-                                                                .child("준비 중"),
+                                                                .child(t!(
+                                                                    "compile.format.coming_soon"
+                                                                )),
                                                         )
                                                     }),
                                             )
@@ -379,7 +383,7 @@ impl CompileDialog {
         let chips = Paper::ALL.into_iter().map(|paper| {
             let selected = self.paper == paper;
             div()
-                .id(paper.short_title())
+                .id(("compile-paper", paper as usize))
                 .px_2p5()
                 .py_1()
                 .rounded_md()
@@ -403,11 +407,11 @@ impl CompileDialog {
             .flex()
             .flex_col()
             .gap_1p5()
-            .child(div().font_medium().child("판형"))
+            .child(div().font_medium().child(t!("compile.paper")))
             .child(div().flex().flex_wrap().gap_1p5().children(chips))
             .child(
                 Checkbox::new("compile-generate-toc")
-                    .label("목차 생성")
+                    .label(SharedString::from(t!("compile.generate_toc")))
                     .checked(self.generate_toc)
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.generate_toc = *checked;
@@ -421,7 +425,7 @@ impl WriterApp {
     /// 프로젝트 컴파일 대화상자를 연다. 열린 시트를 먼저 저장한다.
     pub fn open_compile_dialog(&mut self, dir: &Path, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(err) = self.save_open_sheet(cx) {
-            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+            self.notify(t!("compile.save_sheet_failed", err = err), window, cx);
         }
 
         let Some(project) = self.find_group(dir) else {
@@ -436,7 +440,7 @@ impl WriterApp {
         let app = cx.entity().downgrade();
         let dialog_view =
             cx.new(|_| CompileDialog::new(app, dir.to_path_buf(), project_name, book, sheet_count));
-        self.show_compile_dialog(dialog_view, "프로젝트 컴파일", window, cx);
+        self.show_compile_dialog(dialog_view, t!("compile.title.project"), window, cx);
     }
 
     /// 에디터에서 선택한 범위를 미리보기와 같은 방식으로 컴파일한다.
@@ -446,24 +450,20 @@ impl WriterApp {
         cx: &mut Context<Self>,
     ) {
         let Some(selected) = self.editor_selection() else {
-            self.notify("컴파일할 그룹이나 시트를 선택하세요.", window, cx);
+            self.notify(t!("compile.select_first"), window, cx);
             return;
         };
         let Some(root) = self.library.as_ref().map(|lib| lib.root.clone()) else {
             return;
         };
         if let Err(err) = self.save_open_sheet(cx) {
-            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+            self.notify(t!("compile.save_sheet_failed", err = err), window, cx);
             return;
         }
         let project = match crate::export::load_selection(&root, &selected) {
             Ok(project) => project,
             Err(err) => {
-                self.notify(
-                    format!("컴파일할 원고를 읽을 수 없습니다: {err}"),
-                    window,
-                    cx,
-                );
+                self.notify(t!("compile.read_failed", err = err), window, cx);
                 return;
             }
         };
@@ -479,13 +479,13 @@ impl WriterApp {
             dialog.selection = Some((root, selected));
             dialog
         });
-        self.show_compile_dialog(dialog_view, "선택 범위 컴파일", window, cx);
+        self.show_compile_dialog(dialog_view, t!("compile.title.selection"), window, cx);
     }
 
     fn show_compile_dialog(
         &self,
         dialog_view: Entity<CompileDialog>,
-        title: &'static str,
+        title: std::borrow::Cow<'static, str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -494,20 +494,20 @@ impl WriterApp {
             let ok_view = compile_action_view.clone();
             dialog
                 .w(px(DIALOG_WIDTH))
-                .title(title)
+                .title(title.clone())
                 .close_button(true)
                 .child(dialog_view.clone())
                 .footer(
                     DialogFooter::new()
                         .child(
                             Button::new("compile-cancel")
-                                .label("취소")
+                                .label(t!("common.cancel"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("compile-start")
                                 .primary()
-                                .label("컴파일...")
+                                .label(t!("compile.start"))
                                 .on_click(move |_, window, cx| {
                                     ok_view.update(cx, |dialog, cx| {
                                         dialog.start_compile(window, cx);

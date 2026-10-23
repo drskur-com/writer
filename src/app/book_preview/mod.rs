@@ -19,6 +19,7 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, WindowExt as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -70,14 +71,19 @@ pub(super) struct Chunk {
 
 /// 프로젝트 원고·책 정보·스타일을 읽는다.
 fn load_source(project_dir: &Path) -> io::Result<BookSource> {
-    let root = project_dir
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "프로젝트 폴더가 아닙니다"))?;
+    let root = project_dir.parent().and_then(Path::parent).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            t!("book.preview.not_project").into_owned(),
+        )
+    })?;
     let library = library::scan(root)?;
-    let project = library
-        .find_project(project_dir)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "프로젝트를 찾을 수 없습니다"))?;
+    let project = library.find_project(project_dir).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            t!("book.preview.project_not_found").into_owned(),
+        )
+    })?;
     let book = library::read_book(project_dir);
     let styles = library::read_styles(project_dir);
     let preserve_line_breaks = styles
@@ -210,23 +216,23 @@ impl Paper {
         Paper::Letter,
     ];
 
-    pub(crate) fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> Cow<'static, str> {
         match self {
-            Paper::Shinguk => "신국판 (152×225mm)",
-            Paper::A5 => "A5 (148×210mm)",
-            Paper::SixFour => "4·6판 (128×188mm)",
-            Paper::A4 => "A4 (210×297mm)",
-            Paper::Letter => "US Letter (8.5×11in)",
+            Paper::Shinguk => t!("book.paper.shinguk"),
+            Paper::A5 => "A5 (148×210mm)".into(),
+            Paper::SixFour => t!("book.paper.six_four"),
+            Paper::A4 => "A4 (210×297mm)".into(),
+            Paper::Letter => "US Letter (8.5×11in)".into(),
         }
     }
 
-    pub(crate) fn short_title(self) -> &'static str {
+    pub(crate) fn short_title(self) -> Cow<'static, str> {
         match self {
-            Paper::Shinguk => "신국판",
-            Paper::A5 => "A5",
-            Paper::SixFour => "4·6판",
-            Paper::A4 => "A4",
-            Paper::Letter => "Letter",
+            Paper::Shinguk => t!("book.paper.shinguk_short"),
+            Paper::A5 => "A5".into(),
+            Paper::SixFour => t!("book.paper.six_four_short"),
+            Paper::A4 => "A4".into(),
+            Paper::Letter => "Letter".into(),
         }
     }
 
@@ -266,10 +272,10 @@ enum Device {
 impl Device {
     const ALL: [Device; 2] = [Device::Phone, Device::Tablet];
 
-    fn title(self) -> &'static str {
+    fn title(self) -> Cow<'static, str> {
         match self {
-            Device::Phone => "휴대폰",
-            Device::Tablet => "태블릿",
+            Device::Phone => t!("book.device.phone"),
+            Device::Tablet => t!("book.device.tablet"),
         }
     }
 
@@ -348,7 +354,7 @@ fn open_preview(project: &Path, selected: Option<Vec<PathBuf>>, cx: &mut App) {
         window_bounds,
         window_min_size: Some(size(px(560.0), px(480.0))),
         titlebar: Some(TitlebarOptions {
-            title: Some("미리보기".into()),
+            title: Some(t!("book.preview.title").into()),
             appears_transparent: true,
             traffic_light_position: Some(point(
                 px(PANEL_INSET + 12.0),
@@ -448,11 +454,14 @@ impl BookPreview {
             this.update_in(cx, |this, window, cx| {
                 match loaded {
                     Ok(source) => {
-                        window.set_window_title(&format!("{} — 미리보기", source.title));
+                        window.set_window_title(&t!(
+                            "book.preview.window_title",
+                            title = source.title
+                        ));
                         this.source = Some(Rc::new(source));
                         this.error = None;
                     }
-                    Err(err) => this.error = Some(format!("원고를 읽을 수 없습니다: {err}").into()),
+                    Err(err) => this.error = Some(t!("book.preview.read_failed", err = err).into()),
                 }
                 this.revision += 1;
                 cx.notify();
@@ -587,8 +596,8 @@ impl BookPreview {
                 .await;
             this.update_in(cx, |_, window, cx| {
                 let message = match result {
-                    Ok(()) => format!("PDF 내보내기 완료: {name}"),
-                    Err(err) => format!("PDF 내보내기 실패: {err}"),
+                    Ok(()) => t!("book.export.done", format = "PDF", file = name),
+                    Err(err) => t!("book.export.failed", format = "PDF", err = err),
                 };
                 window.push_notification(
                     gpui_kit::component::notification::Notification::info(SharedString::from(
@@ -638,7 +647,11 @@ impl BookPreview {
                     Ok(()) => {
                         window.push_notification(
                             gpui_kit::component::notification::Notification::info(
-                                SharedString::from(format!("ePub 내보내기 완료: {file_name}")),
+                                SharedString::from(t!(
+                                    "book.export.done",
+                                    format = "ePub",
+                                    file = file_name
+                                )),
                             ),
                             cx,
                         );
@@ -646,7 +659,11 @@ impl BookPreview {
                     Err(err) => {
                         window.push_notification(
                             gpui_kit::component::notification::Notification::info(
-                                SharedString::from(format!("ePub 내보내기 실패: {err}")),
+                                SharedString::from(t!(
+                                    "book.export.failed",
+                                    format = "ePub",
+                                    err = err
+                                )),
                             ),
                             cx,
                         );
@@ -776,7 +793,7 @@ impl BookPreview {
                             .max_w(px(360.0))
                             .max_h(px(480.0))
                             .scrollable(true)
-                            .label("차례");
+                            .label(t!("book.preview.toc"));
                         entries.iter().fold(menu, |menu, (title, depth, page)| {
                             let (view, page) = (view.clone(), *page);
                             let indent = "\u{2003}".repeat(*depth);
@@ -882,7 +899,7 @@ impl BookPreview {
                             .flex_shrink_0()
                             .text_xs()
                             .text_color(pal.muted)
-                            .child(format!("{pages}쪽")),
+                            .child(t!("book.preview.pages", pages = pages)),
                     )
                 }),
         )
@@ -890,7 +907,7 @@ impl BookPreview {
         .when(self.format == Format::Pdf, |this| {
             this.child(
                 Checkbox::new("preview-generate-toc")
-                    .label("목차 생성")
+                    .label(SharedString::from(t!("compile.generate_toc")))
                     .checked(self.generate_toc)
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.generate_toc = *checked;
@@ -1016,7 +1033,7 @@ impl Render for BookPreview {
         };
         let body = match (layout, &self.error) {
             (_, Some(error)) => message(error.clone()),
-            (None, None) => message("원고를 읽는 중…".into()),
+            (None, None) => message(t!("book.preview.loading").into()),
             (Some(layout), None) => match self.format {
                 Format::Pdf => self.render_pdf(layout),
                 Format::Epub => self.render_epub(layout, window, cx),
@@ -1039,7 +1056,7 @@ impl Render for BookPreview {
                 TitleBar::new()
                     .bg(theme.title_bar)
                     .border_color(theme.title_bar_border)
-                    .child(div().text_sm().child("미리보기")),
+                    .child(div().text_sm().child(t!("book.preview.title"))),
             )
         };
 

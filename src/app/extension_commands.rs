@@ -43,7 +43,7 @@ impl WriterApp {
             return;
         };
         let Some(editor) = &self.editor else {
-            self.notify("먼저 시트를 여세요.", window, cx);
+            self.notify(t!("common.open_sheet_first"), window, cx);
             return;
         };
         let state = editor.state().clone();
@@ -71,7 +71,7 @@ impl WriterApp {
             Ok(Some(inserted)) => inserted,
             Ok(None) => return,
             Err(err) => {
-                self.notify(format!("확장 명령이 실패했습니다: {err}"), window, cx);
+                self.notify(t!("extensions.command_failed", err = err), window, cx);
                 return;
             }
         };

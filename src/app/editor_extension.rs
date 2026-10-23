@@ -19,8 +19,9 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use super::extension_painter::{TessCache, paint};
 use super::style::Palette;
-use crate::extension::{self, Host, Loaded, Segment, Shape};
+use crate::extension::{self, Host, Loaded, Shape};
 
 /// 캔버스 위·아래 여백(이미지 블록과 같다).
 const PADDING_TOP: f32 = 4.0;
@@ -45,6 +46,8 @@ pub(super) enum Frame {
 pub(super) struct Player {
     /// 만든 때. 애니메이션의 `t`는 여기서 잰다.
     started: Instant,
+    /// 모양별 삼각형 캐시. 같은 프레임·같은 모양을 다시 나누지 않는다.
+    cache: Rc<RefCell<TessCache>>,
     state: RefCell<PlayerState>,
 }
 
@@ -78,8 +81,13 @@ impl Player {
     pub(super) fn new() -> Self {
         Self {
             started: Instant::now(),
+            cache: Rc::default(),
             state: RefCell::default(),
         }
+    }
+
+    pub(super) fn cache(&self) -> Rc<RefCell<TessCache>> {
+        self.cache.clone()
     }
 
     /// 지금 그릴 프레임. 필요하면 작업 스레드에 다음 프레임을 요청하고, 다시 그릴 때를 예약한다.
@@ -308,7 +316,13 @@ impl ExtensionBlocks {
                 .h(size.height)
                 .pt(px(PADDING_TOP))
                 .pl(left)
-                .child(shapes_canvas(shapes, canvas_size, width, height))
+                .child(shapes_canvas(
+                    shapes,
+                    block.player.cache(),
+                    canvas_size,
+                    width,
+                    height,
+                ))
                 .into_any_element(),
         )
     }
@@ -332,6 +346,7 @@ impl ExtensionBlocks {
 /// 좌표가 이 크기 기준이다). 모양이 아직 없으면 빈 자리다.
 pub(super) fn shapes_canvas(
     shapes: Option<Rc<Vec<Shape>>>,
+    cache: Rc<RefCell<TessCache>>,
     canvas_size: (f32, f32),
     width: Pixels,
     height: Pixels,
@@ -342,7 +357,7 @@ pub(super) fn shapes_canvas(
         move |bounds, (), window, cx| {
             if let Some(shapes) = shapes {
                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                    paint(&shapes, bounds.origin, scale, window, cx);
+                    paint(&shapes, bounds.origin, scale, &cache, window, cx);
                 });
             }
         },
@@ -376,10 +391,6 @@ pub(super) fn theme(pal: Palette) -> Theme {
     }
 }
 
-fn hsla([r, g, b, a]: extension::Color) -> Hsla {
-    Rgba { r, g, b, a }.into()
-}
-
 fn error_box(name: &str, err: &str, size: Size<Pixels>, pal: Palette) -> AnyElement {
     div()
         .w(size.width)
@@ -398,79 +409,7 @@ fn error_box(name: &str, err: &str, size: Size<Pixels>, pal: Palette) -> AnyElem
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .child(format!("확장 {name}: {err}")),
+                .child(t!("extensions.block_error", name = name, err = err)),
         )
         .into_any_element()
-}
-
-fn paint(shapes: &[Shape], origin: Point<Pixels>, scale: f32, window: &mut Window, cx: &mut App) {
-    let at = |[x, y]: [f32; 2]| point(origin.x + px(x * scale), origin.y + px(y * scale));
-    let build = |mut builder: PathBuilder, path: &[Segment]| {
-        for segment in path {
-            match *segment {
-                Segment::Move(p) => builder.move_to(at(p)),
-                Segment::Line(p) => builder.line_to(at(p)),
-                Segment::Cubic(a, b, p) => builder.cubic_bezier_to(at(p), at(a), at(b)),
-                Segment::Close => builder.close(),
-            }
-        }
-        builder.build().ok()
-    };
-    let font = window.text_style().font();
-    for shape in shapes {
-        match shape {
-            Shape::Fill { path, color } => {
-                if let Some(path) = build(PathBuilder::fill(), path) {
-                    window.paint_path(path, hsla(*color));
-                }
-            }
-            Shape::Stroke { path, width, color } => {
-                if *width <= 0.0 {
-                    continue;
-                }
-                if let Some(path) = build(PathBuilder::stroke(px(width * scale)), path) {
-                    window.paint_path(path, hsla(*color));
-                }
-            }
-            Shape::Text {
-                text,
-                origin: text_origin,
-                size,
-                color,
-                align,
-                width,
-            } => {
-                if text.is_empty() {
-                    continue;
-                }
-                let font_size = px(size * scale);
-                let run = TextRun {
-                    len: text.len(),
-                    font: font.clone(),
-                    color: hsla(*color),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-                let line =
-                    window
-                        .text_system()
-                        .shape_line(text.clone().into(), font_size, &[run], None);
-                let align = match align {
-                    extension::Align::Left => TextAlign::Left,
-                    extension::Align::Center => TextAlign::Center,
-                    extension::Align::Right => TextAlign::Right,
-                };
-                line.paint(
-                    at(*text_origin),
-                    font_size * extension::canvas::LINE_HEIGHT,
-                    align,
-                    width.map(|width| px(width * scale)),
-                    window,
-                    cx,
-                )
-                .ok();
-            }
-        }
-    }
 }

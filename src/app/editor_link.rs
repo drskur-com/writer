@@ -49,7 +49,7 @@ impl WriterApp {
             return;
         };
         let Some(path) = library::resolve_image_path(&dir, None, &target) else {
-            self.notify(format!("링크 대상을 찾을 수 없습니다: {url}"), window, cx);
+            self.notify(t!("editor.link.target_not_found", url = url), window, cx);
             return;
         };
         let in_library = self

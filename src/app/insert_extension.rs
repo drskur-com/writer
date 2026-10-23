@@ -107,7 +107,7 @@ impl ExtensionPicker {
         // 배율은 앱이 처리하므로 어느 확장에나 있다.
         let scale = (
             extension::SCALE_ARG.to_string(),
-            "크기 배율(0.1~4). 기본값 1.".to_string(),
+            t!("extensions.scale_arg").to_string(),
         );
         let fields = meta
             .args
@@ -120,7 +120,7 @@ impl ExtensionPicker {
             let value = example(&key);
             let input = cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder("기본값")
+                    .placeholder(t!("extensions.arg_default"))
                     .default_value(value)
             });
             self._subscriptions
@@ -153,62 +153,66 @@ impl ExtensionPicker {
     fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.select(self.selected, window, cx);
     }
+}
 
-    fn render_preview(
-        &self,
-        meta: &Meta,
-        args: &[(String, String)],
-        pal: Palette,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> AnyElement {
-        let loaded = self.host.get(&meta.name);
-        let scale = extension::scale_of(args);
-        let args = &extension::without_scale(args);
-        let message = |text: String| {
-            div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .text_xs()
-                .text_color(pal.danger)
-                .child(text)
-                .into_any_element()
-        };
-        let canvas_size = match &*loaded {
-            Ok(worker) => worker.size(args),
-            Err(err) => Err(err.clone()),
-        };
-        let canvas_size = match canvas_size {
-            Ok(canvas_size) => canvas_size,
-            Err(err) => return message(err),
-        };
-        let shapes = match self
-            .player
-            .frame(&loaded, args, theme(pal), &self.ticker, window, cx)
-        {
-            Frame::Shapes(shapes) => Some(shapes),
-            Frame::Pending => None,
-            Frame::Error(err) => return message(err),
-        };
-        let (width, height) = fit(scaled(canvas_size, scale), px(PREVIEW_WIDTH));
-        // 높이도 칸에 맞춘다(세로로 긴 캔버스).
-        let shrink = (PREVIEW_HEIGHT / f32::from(height)).min(1.0);
+/// 확장 `name`을 `args`로 그린 미리보기. `width`×`height` 칸 가운데에 비율을 지켜 맞춘다.
+/// 읽기·그리기 오류는 칸에 글로 보인다. 확장 관리 대화상자도 쓴다.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_preview(
+    host: &Host,
+    player: &Player,
+    ticker: &Ticker,
+    name: &str,
+    args: &[(String, String)],
+    (width, height): (f32, f32),
+    pal: Palette,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let loaded = host.get(name);
+    let scale = extension::scale_of(args);
+    let args = &extension::without_scale(args);
+    let message = |text: String| {
         div()
             .size_full()
             .flex()
             .items_center()
             .justify_center()
-            .child(shapes_canvas(
-                shapes,
-                canvas_size,
-                width * shrink,
-                height * shrink,
-            ))
+            .p_4()
+            .text_xs()
+            .text_color(pal.danger)
+            .child(text)
             .into_any_element()
-    }
+    };
+    let canvas_size = match &*loaded {
+        Ok(worker) => worker.size(args),
+        Err(err) => Err(err.clone()),
+    };
+    let canvas_size = match canvas_size {
+        Ok(canvas_size) => canvas_size,
+        Err(err) => return message(err),
+    };
+    let shapes = match player.frame(&loaded, args, theme(pal), ticker, window, cx) {
+        Frame::Shapes(shapes) => Some(shapes),
+        Frame::Pending => None,
+        Frame::Error(err) => return message(err),
+    };
+    let (fit_width, fit_height) = fit(scaled(canvas_size, scale), px(width));
+    // 높이도 칸에 맞춘다(세로로 긴 캔버스).
+    let shrink = (height / f32::from(fit_height)).min(1.0);
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(shapes_canvas(
+            shapes,
+            player.cache(),
+            canvas_size,
+            fit_width * shrink,
+            fit_height * shrink,
+        ))
+        .into_any_element()
 }
 
 impl Render for ExtensionPicker {
@@ -224,10 +228,8 @@ impl Render for ExtensionPicker {
                 .gap_1()
                 .text_sm()
                 .text_color(pal.muted)
-                .child("그림을 그리는 확장이 없습니다.")
-                .child(
-                    "어시스턴트에게 만들어 달라고 해 보세요. 예: “궁수가 활을 쏘는 그림을 넣어 줘”",
-                )
+                .child(t!("extensions.no_drawing"))
+                .child(t!("extensions.ask_assistant_example"))
                 .into_any_element();
         }
         let list = div()
@@ -267,7 +269,17 @@ impl Render for ExtensionPicker {
             }));
         let meta = self.selected().cloned().unwrap_or_default();
         let args = self.args(cx);
-        let preview = self.render_preview(&meta, &args, pal, window, cx);
+        let preview = render_preview(
+            &self.host,
+            &self.player,
+            &self.ticker,
+            &meta.name,
+            &args,
+            (PREVIEW_WIDTH, PREVIEW_HEIGHT),
+            pal,
+            window,
+            cx,
+        );
         // 순서는 상관없이 예시 값과 다른지 본다(칸은 `args` 순서, 예시는 적힌 순서다).
         let changed = {
             let sorted = |mut pairs: Vec<(String, String)>| {
@@ -296,7 +308,8 @@ impl Render for ExtensionPicker {
                 div()
                     .text_sm()
                     .when(meta.description.is_empty(), |this| {
-                        this.text_color(pal.muted).child("설명이 없습니다.")
+                        this.text_color(pal.muted)
+                            .child(t!("extensions.no_description"))
                     })
                     .child(meta.description.clone()),
             )
@@ -308,7 +321,7 @@ impl Render for ExtensionPicker {
                         .justify_between()
                         .text_xs()
                         .text_color(pal.muted)
-                        .child("인자")
+                        .child(t!("extensions.args"))
                         .when(changed, |this| {
                             this.child(
                                 div()
@@ -318,7 +331,7 @@ impl Render for ExtensionPicker {
                                     .on_click(cx.listener(|picker, _, window, cx| {
                                         picker.reset(window, cx);
                                     }))
-                                    .child("예시 값으로 되돌리기"),
+                                    .child(t!("extensions.reset_args")),
                             )
                         }),
                 )
@@ -379,7 +392,7 @@ impl WriterApp {
             return;
         };
         let Some(editor) = &self.editor else {
-            self.notify("먼저 시트를 여세요.", window, cx);
+            self.notify(t!("common.open_sheet_first"), window, cx);
             return;
         };
         let target = editor.state().clone();
@@ -408,7 +421,7 @@ impl WriterApp {
             let (enter, ok) = (submit.clone(), submit.clone());
             dialog
                 .w(px(DIALOG_WIDTH))
-                .title("확장 삽입")
+                .title(t!("extensions.insert_title"))
                 .close_button(false)
                 // 인자 칸의 Enter는 대화상자의 확인으로 올라온다.
                 .on_ok(move |_, window, cx| enter(window, cx))
@@ -417,14 +430,14 @@ impl WriterApp {
                     DialogFooter::new()
                         .child(
                             Button::new("insert-extension-cancel")
-                                .label("취소")
+                                .label(t!("common.cancel"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .when(has_items, |footer| {
                             footer.child(
                                 Button::new("insert-extension-ok")
                                     .primary()
-                                    .label("삽입")
+                                    .label(t!("common.insert"))
                                     .on_click(move |_, window, cx| {
                                         if ok(window, cx) {
                                             window.close_dialog(cx);
@@ -449,7 +462,7 @@ impl WriterApp {
             return;
         };
         if editor.state() != target {
-            self.notify("확장을 넣을 시트가 닫혔습니다.", window, cx);
+            self.notify(t!("extensions.sheet_closed"), window, cx);
             return;
         }
         editor.state().update(cx, |state, cx| {

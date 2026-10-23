@@ -1,5 +1,7 @@
 //! 라이브러리 열기·감시·다시 스캔·미리보기·시트 만들기/옮기기 (상태 변경 로직).
 
+use gpui_kit::component::button::ButtonVariant;
+use gpui_kit::component::dialog::DialogButtonProps;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::*;
 use gpui_kit::gpui::*;
@@ -22,7 +24,7 @@ impl WriterApp {
     /// 기본 제안 경로에 새 라이브러리를 만든다.
     pub(super) fn create_default_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = config::default_library_root() else {
-            self.set_notice("기본 라이브러리 위치를 찾을 수 없습니다.", cx);
+            self.set_notice(t!("library.notice.no_default_location"), cx);
             return;
         };
         self.initialize_at(root, window, cx);
@@ -37,7 +39,7 @@ impl WriterApp {
     ) {
         match library::initialize(&root) {
             Ok(()) => self.adopt(root, window, cx),
-            Err(err) => self.set_notice(format!("라이브러리를 만들 수 없습니다: {err}"), cx),
+            Err(err) => self.set_notice(t!("library.notice.create_failed", err = err), cx),
         }
     }
 
@@ -57,7 +59,7 @@ impl WriterApp {
             Ok(library::FolderKind::NonEmpty) => {
                 self.initialize_at(path.join(APP_NAME), window, cx);
             }
-            Err(err) => self.set_notice(format!("폴더를 사용할 수 없습니다: {err}"), cx),
+            Err(err) => self.set_notice(t!("library.notice.folder_unusable", err = err), cx),
         }
     }
 
@@ -72,7 +74,7 @@ impl WriterApp {
                     eprintln!("설정 저장 실패: {err}");
                 }
                 window.push_notification(
-                    Notification::info(format!("라이브러리 열기: {}", opened.root.display())),
+                    Notification::info(t!("library.notice.opened", path = opened.root.display())),
                     cx,
                 );
                 self.close_sheet(cx);
@@ -88,7 +90,7 @@ impl WriterApp {
                 self.load_previews(cx);
                 cx.notify();
             }
-            Err(err) => self.set_notice(format!("라이브러리를 읽을 수 없습니다: {err}"), cx),
+            Err(err) => self.set_notice(t!("library.notice.read_failed", err = err), cx),
         }
     }
 
@@ -98,7 +100,7 @@ impl WriterApp {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("라이브러리 폴더 선택".into()),
+            prompt: Some(t!("library.pick_folder").into()),
         });
 
         cx.spawn_in(window, async move |this, cx| {
@@ -402,7 +404,7 @@ impl WriterApp {
         if self.editor.is_some()
             && let Err(err) = self.save_open_sheet(cx)
         {
-            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+            self.notify(t!("library.sheet.save_failed", err = err), window, cx);
             return;
         }
         let open_path = self
@@ -415,7 +417,7 @@ impl WriterApp {
             match library::move_group(source, target_path) {
                 Ok(new_path) => moved.push((source.clone(), new_path)),
                 Err(err) => {
-                    self.notify(format!("그룹을 옮길 수 없습니다: {err}"), window, cx);
+                    self.notify(t!("library.group.move_failed", err = err), window, cx);
                     break;
                 }
             }
@@ -427,11 +429,7 @@ impl WriterApp {
         match library::scan(&root) {
             Ok(scanned) => self.library = Some(scanned),
             Err(err) => {
-                self.notify(
-                    format!("라이브러리를 다시 읽을 수 없습니다: {err}"),
-                    window,
-                    cx,
-                );
+                self.notify(t!("library.reread_failed", err = err), window, cx);
                 return;
             }
         }
@@ -472,9 +470,10 @@ impl WriterApp {
         self.expanded_groups.insert(target_path.to_path_buf());
         self.load_previews(cx);
         self.notify(
-            format!(
-                "그룹 {}개를 ‘{target_name}’ 아래로 옮겼습니다.",
-                moved.len()
+            t!(
+                "library.group.moved",
+                count = moved.len(),
+                target = target_name
             ),
             window,
             cx,
@@ -504,7 +503,7 @@ impl WriterApp {
             library::move_selected_sheets(group, indices, anchor, to)
         };
         if let Err(err) = result {
-            self.notify(format!("순서를 저장할 수 없습니다: {err}"), window, cx);
+            self.notify(t!("library.order_save_failed", err = err), window, cx);
             return;
         }
         if !self.selected_sheets.is_empty() {
@@ -551,7 +550,7 @@ impl WriterApp {
             return;
         };
         if target.kind == library::GroupKind::Files {
-            self.notify("파일 그룹에는 시트를 넣을 수 없습니다.", window, cx);
+            self.notify(t!("library.sheet.no_sheets_in_file_group"), window, cx);
             return;
         }
         let target_name = target.name.clone();
@@ -561,7 +560,7 @@ impl WriterApp {
         if self.editor.is_some()
             && let Err(err) = self.save_open_sheet(cx)
         {
-            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+            self.notify(t!("library.sheet.save_failed", err = err), window, cx);
             return;
         }
         let open_path = self
@@ -577,7 +576,7 @@ impl WriterApp {
         let moved = match library::move_sheets_between(&mut source, &mut target, &indices) {
             Ok(moved) => moved,
             Err(err) => {
-                self.notify(format!("시트를 옮길 수 없습니다: {err}"), window, cx);
+                self.notify(t!("library.sheet.move_failed", err = err), window, cx);
                 return;
             }
         };
@@ -613,9 +612,10 @@ impl WriterApp {
         self.expanded_groups.insert(target_path.to_path_buf());
         self.load_previews(cx);
         self.notify(
-            format!(
-                "시트 {}개를 ‘{target_name}’ 그룹으로 옮겼습니다.",
-                moved.len()
+            t!(
+                "library.sheet.moved",
+                count = moved.len(),
+                target = target_name
             ),
             window,
             cx,
@@ -644,8 +644,100 @@ impl WriterApp {
             library::unglue_sheets(group, range)
         };
         if let Err(err) = result {
-            self.notify(format!("시트 접합을 저장할 수 없습니다: {err}"), window, cx);
+            self.notify(t!("library.sheet.glue_save_failed", err = err), window, cx);
             return;
+        }
+        cx.notify();
+    }
+
+    /// 확인을 받은 뒤 시트 `paths`를 운영체제 휴지통으로 옮긴다. `label`은 하나일 때 보일 제목이다.
+    pub(super) fn confirm_delete_sheets(
+        &mut self,
+        paths: Vec<PathBuf>,
+        label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let description = match paths.len() {
+            0 => return,
+            1 => t!("library.sheet.delete_one", label = label),
+            count => t!("library.sheet.delete_many", count = count),
+        };
+        let app = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let app = app.clone();
+            let paths = paths.clone();
+            alert
+                .confirm()
+                .title(t!("library.sheet.delete_title"))
+                .description(description.clone())
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(t!("common.delete"))
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text(t!("common.cancel")),
+                )
+                .on_ok(move |_, window, cx| {
+                    app.update(cx, |app, cx| app.delete_sheets(&paths, window, cx))
+                        .ok();
+                    true
+                })
+        });
+    }
+
+    /// 시트를 휴지통으로 옮긴다. 열린 시트가 그 안에 있으면 저장하고 닫는다. 그룹의 접합은
+    /// [`library::trash_sheets`]가 맞춘다.
+    fn delete_sheets(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.library.as_ref().map(|lib| lib.root.clone()) else {
+            return;
+        };
+        if self
+            .selected_sheet
+            .as_ref()
+            .is_some_and(|path| paths.contains(path))
+        {
+            self.close_sheet(cx);
+        }
+        // 그룹별로 나눠 옮긴다. 그룹에 속하지 않은 시트(섹션 바로 아래)는 파일만 옮긴다.
+        let mut by_dir: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
+        for path in paths {
+            let dir = path.parent().unwrap_or(&root).to_path_buf();
+            match by_dir.iter_mut().find(|(d, _)| *d == dir) {
+                Some((_, list)) => list.push(path.clone()),
+                None => by_dir.push((dir, vec![path.clone()])),
+            }
+        }
+        let mut error = None;
+        for (dir, list) in by_dir {
+            match self
+                .library
+                .as_mut()
+                .and_then(|lib| lib.find_group_mut(&dir))
+            {
+                Some(group) => {
+                    if let (_, Some(err)) = library::trash_sheets(group, &list) {
+                        error.get_or_insert(err);
+                    }
+                }
+                None => {
+                    for path in &list {
+                        if let Err(err) = library::move_to_trash(path) {
+                            error.get_or_insert(err);
+                        }
+                    }
+                }
+            }
+        }
+        match library::scan(&root) {
+            Ok(scanned) => self.library = Some(scanned),
+            Err(err) => {
+                error.get_or_insert(err);
+            }
+        }
+        self.selected_sheets.retain(|path| path.is_file());
+        self.load_previews(cx);
+        if let Some(err) = error {
+            self.notify(t!("library.sheet.delete_failed", err = err), window, cx);
         }
         cx.notify();
     }
@@ -667,7 +759,7 @@ impl WriterApp {
             return;
         };
         if let Err(err) = library::move_file(group, from, to) {
-            self.notify(format!("순서를 저장할 수 없습니다: {err}"), window, cx);
+            self.notify(t!("library.order_save_failed", err = err), window, cx);
             return;
         }
         cx.notify();
@@ -693,7 +785,7 @@ impl WriterApp {
             SortChange::Descending(descending) => library::set_sort_descending(group, descending),
         };
         if let Err(err) = saved {
-            self.notify(format!("정렬 방법을 저장할 수 없습니다: {err}"), window, cx);
+            self.notify(t!("library.sort_save_failed", err = err), window, cx);
             return;
         }
         cx.notify();
@@ -760,7 +852,7 @@ impl WriterApp {
         cx: &mut Context<Self>,
     ) {
         let Some(lib) = &self.library else {
-            self.notify("먼저 라이브러리를 여세요.", window, cx);
+            self.notify(t!("common.open_library_first"), window, cx);
             return;
         };
         let root = lib.root.clone();
@@ -776,7 +868,7 @@ impl WriterApp {
             .find_group(&dir)
             .is_some_and(|group| group.kind == library::GroupKind::Files)
         {
-            self.notify("파일 그룹에는 시트를 만들 수 없습니다.", window, cx);
+            self.notify(t!("library.sheet.cant_create_in_file_group"), window, cx);
             return;
         }
 
@@ -792,14 +884,14 @@ impl WriterApp {
                     && let Some(group) = scanned.find_group_mut(&dir)
                     && let Err(err) = library::append_sheet(group, &path)
                 {
-                    self.notify(format!("시트 순서를 저장할 수 없습니다: {err}"), window, cx);
+                    self.notify(t!("library.sheet.order_save_failed", err = err), window, cx);
                 }
                 self.library = Some(scanned);
                 // 새 시트는 바로 쓸 수 있게 에디터에 열고 포커스를 준다.
                 self.select_sheet(Some(path), true, window, cx);
                 self.load_previews(cx);
             }
-            Err(err) => self.notify(format!("시트를 만들 수 없습니다: {err}"), window, cx),
+            Err(err) => self.notify(t!("library.sheet.create_failed", err = err), window, cx),
         }
     }
 }

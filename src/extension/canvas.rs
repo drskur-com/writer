@@ -3,12 +3,16 @@
 //! 함수 이름과 인자는 LÖVE(`love.graphics`)를 따른다. 모델이 그 코드를 많이 봐서 틀리지 않고 쓴다.
 //! 변환(`translate`·`rotate`·`scale`)은 모으면서 점에 바로 적용해, 모양 목록에는 캔버스 좌표만 남는다.
 //! 원·호도 3차 베지어로 바꿔 두므로 그리는 쪽(에디터, 나중에 PDF·SVG)은 경로와 글자만 알면 된다.
+//!
+//! LÖVE에 없는 벡터 기능(경로·그라디언트·선 모양·점선·자르기·보간)은 [`super::path`]와 아래 `g.*`에 더했다.
 
 use std::cell::RefCell;
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::rc::Rc;
 
 use mlua::{Lua, MultiValue, Table, Value};
+
+use super::path::{GradientShape, LuaGradient, LuaPath, parse_stops, path_arg};
 
 /// RGBA(0..1).
 pub type Color = [f32; 4];
@@ -20,7 +24,8 @@ pub type Point = [f32; 2];
 pub const STILL_SHAPE_LIMIT: usize = 20_000;
 
 /// 애니메이션 한 프레임에 그릴 수 있는 가장 많은 모양. 모양을 삼각형으로 나누고 그리는 일은 UI 스레드에서
-/// 하므로 매 프레임의 몫에 상한을 둔다.
+/// 하므로 매 프레임의 몫에 상한을 둔다. 바뀌지 않은 모양은 캐시에서 꺼내므로(`extension_painter`) 실제 비용은
+/// 그 프레임에 바뀐 모양 수를 따른다.
 pub const ANIMATED_SHAPE_LIMIT: usize = 2_000;
 
 /// 기본 글자 크기(LÖVE 기본 서체와 같다).
@@ -42,16 +47,78 @@ pub enum Align {
     Right,
 }
 
+/// 칠하는 방법(캔버스 좌표). 그라디언트의 멈춤은 (자리 0..1, 색)이고 자리순이며 둘 이상이다.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Paint {
+    Solid(Color),
+    /// `from`에서 `to`까지. 바깥은 끝 색이 이어진다.
+    Linear {
+        from: Point,
+        to: Point,
+        stops: Vec<(f32, Color)>,
+    },
+    /// `center`에서 `radius`까지 동심원. 바깥은 끝 색이 이어진다.
+    Radial {
+        center: Point,
+        radius: f32,
+        stops: Vec<(f32, Color)>,
+    },
+}
+
+impl Paint {
+    /// 대표 색(그라디언트는 첫 멈춤).
+    #[cfg(test)]
+    pub fn color(&self) -> Color {
+        match self {
+            Paint::Solid(color) => *color,
+            Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => stops[0].1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FillRule {
+    #[default]
+    NonZero,
+    EvenOdd,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineJoin {
+    #[default]
+    Miter,
+    Round,
+    Bevel,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineCap {
+    #[default]
+    Butt,
+    Round,
+    Square,
+}
+
+/// 선 모양. 굵기는 캔버스 좌표(변환의 배율을 곱한 값)다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StrokeStyle {
+    pub width: f32,
+    pub join: LineJoin,
+    pub cap: LineCap,
+    pub miter_limit: f32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
     Fill {
         path: Vec<Segment>,
-        color: Color,
+        paint: Paint,
+        rule: FillRule,
     },
     Stroke {
         path: Vec<Segment>,
-        width: f32,
-        color: Color,
+        paint: Paint,
+        style: StrokeStyle,
     },
     /// 글자 한 줄. `origin`은 글자 상자 왼쪽 위, `width`가 있으면 그 폭 안에서 `align`으로 맞춘다.
     Text {
@@ -62,6 +129,8 @@ pub enum Shape {
         align: Align,
         width: Option<f32>,
     },
+    /// 뒤 모양들을 이 사각형(x, y, w, h, 캔버스 좌표)으로 자른다. `None`이면 자르지 않는다.
+    Clip(Option<[f32; 4]>),
 }
 
 /// 테마 색. `g.theme`으로 Lua에 넘긴다.
@@ -125,7 +194,15 @@ pub(super) struct Recorder {
     pub(super) width: f32,
     pub(super) height: f32,
     pub(super) color: Color,
+    /// `setColor(gradient)`로 고른 그라디언트(지역 좌표). 있으면 `color`는 그 첫 색이다.
+    gradient: Option<LuaGradient>,
     line_width: f32,
+    line_join: LineJoin,
+    line_cap: LineCap,
+    miter_limit: f32,
+    /// 점선 무늬와 밀기(지역 좌표).
+    dash: Option<(Vec<f32>, f32)>,
+    fill_rule: FillRule,
     font_size: f32,
     transform: Transform,
     stack: Vec<Transform>,
@@ -139,7 +216,13 @@ impl Recorder {
             width,
             height,
             color: [1.0, 1.0, 1.0, 1.0],
+            gradient: None,
             line_width: 1.0,
+            line_join: LineJoin::Miter,
+            line_cap: LineCap::Butt,
+            miter_limit: 10.0,
+            dash: None,
+            fill_rule: FillRule::NonZero,
             font_size: DEFAULT_FONT_SIZE,
             transform: Transform::IDENTITY,
             stack: Vec::new(),
@@ -182,8 +265,32 @@ impl Recorder {
             .collect()
     }
 
+    /// 지금 칠(색 또는 그라디언트)을 캔버스 좌표로.
+    fn paint(&self) -> Paint {
+        let Some(gradient) = &self.gradient else {
+            return Paint::Solid(self.color);
+        };
+        if gradient.stops.len() < 2 {
+            return Paint::Solid(self.color);
+        }
+        let stops = gradient.stops.clone();
+        match gradient.shape {
+            GradientShape::Linear { from, to } => Paint::Linear {
+                from: self.transform.apply(from),
+                to: self.transform.apply(to),
+                stops,
+            },
+            GradientShape::Radial { center, radius } => Paint::Radial {
+                center: self.transform.apply(center),
+                radius: radius * self.transform.scale(),
+                stops,
+            },
+        }
+    }
+
     fn draw(&mut self, mode: Mode, local: &[Segment]) -> mlua::Result<()> {
-        self.draw_with(mode, local, self.color)
+        let paint = self.paint();
+        self.draw_paint(mode, local, paint)
     }
 
     /// 지금 색 대신 `color`로 그린다(3차원 장면이 면마다 밝기를 바꾼다).
@@ -193,12 +300,32 @@ impl Recorder {
         local: &[Segment],
         color: Color,
     ) -> mlua::Result<()> {
-        let path = self.path(local);
+        self.draw_paint(mode, local, Paint::Solid(color))
+    }
+
+    fn draw_paint(&mut self, mode: Mode, local: &[Segment], paint: Paint) -> mlua::Result<()> {
         match mode {
-            Mode::Fill => self.push(Shape::Fill { path, color }),
+            Mode::Fill => {
+                let path = self.path(local);
+                let rule = self.fill_rule;
+                self.push(Shape::Fill { path, paint, rule })
+            }
             Mode::Line => {
-                let width = self.line_width * self.transform.scale();
-                self.push(Shape::Stroke { path, width, color })
+                // 점선은 지역 좌표에서 나눈다(무늬 길이가 변환을 따른다).
+                let path = match &self.dash {
+                    Some((pattern, offset)) => self.path(&LuaPath::dash(local, pattern, *offset)),
+                    None => self.path(local),
+                };
+                if path.is_empty() {
+                    return Ok(());
+                }
+                let style = StrokeStyle {
+                    width: self.line_width * self.transform.scale(),
+                    join: self.line_join,
+                    cap: self.line_cap,
+                    miter_limit: self.miter_limit,
+                };
+                self.push(Shape::Stroke { path, paint, style })
             }
         }
     }
@@ -211,7 +338,7 @@ pub(super) enum Mode {
 }
 
 /// 원·타원 호를 3차 베지어로 잇는다(90°씩 나눈다). `move_to`면 시작점으로 옮기고 시작한다.
-fn ellipse_arc(
+pub(super) fn ellipse_arc(
     out: &mut Vec<Segment>,
     [cx, cy]: Point,
     [rx, ry]: [f32; 2],
@@ -252,7 +379,7 @@ pub(super) fn polyline(points: &[Point], closed: bool) -> Vec<Segment> {
     path
 }
 
-fn rounded_rect(x: f32, y: f32, w: f32, h: f32, rx: f32, ry: f32) -> Vec<Segment> {
+pub(super) fn rounded_rect(x: f32, y: f32, w: f32, h: f32, rx: f32, ry: f32) -> Vec<Segment> {
     let rx = rx.min(w / 2.0).max(0.0);
     let ry = ry.min(h / 2.0).max(0.0);
     if rx == 0.0 || ry == 0.0 {
@@ -310,6 +437,24 @@ impl Args {
     /// `g:rectangle(...)`처럼 콜론으로 불러 앞에 `g`가 붙었으면 뗀다.
     fn new(name: &'static str, values: MultiValue) -> Self {
         Self::with_self("g.", CANVAS_MARK, name, values)
+    }
+
+    /// 값의 메서드 인자(`path:curveTo`). 값 자신은 이미 뗐다.
+    pub(super) fn method(prefix: &'static str, name: &'static str, values: MultiValue) -> Self {
+        Self {
+            prefix,
+            name,
+            values: values.into_iter().collect(),
+        }
+    }
+
+    /// 같은 함수 이름으로 다른 값을 읽는다(표 안의 색 등).
+    pub(super) fn with_values(&self, values: Vec<Value>) -> Self {
+        Self {
+            prefix: self.prefix,
+            name: self.name,
+            values,
+        }
     }
 
     /// `mark`가 붙은 표(`g`, 3차원 장면)가 첫 인자면 콜론 호출로 보고 뗀다.
@@ -390,7 +535,7 @@ impl Args {
     }
 
     /// `ix`부터의 좌표: 숫자 여럿 또는 숫자 표 하나.
-    fn points(&self, ix: usize) -> mlua::Result<Vec<Point>> {
+    pub(super) fn points(&self, ix: usize) -> mlua::Result<Vec<Point>> {
         let numbers = self.numbers(ix)?;
         if !numbers.len().is_multiple_of(2) {
             return Err(self.error("coordinates must come in x, y pairs"));
@@ -471,7 +616,54 @@ pub(super) const FUNCTIONS: &[&str] = &[
     "rotate",
     "scale",
     "newScene",
+    "fill",
+    "stroke",
+    "newPath",
+    "newLinearGradient",
+    "newRadialGradient",
+    "setLineJoin",
+    "setLineCap",
+    "setMiterLimit",
+    "setDash",
+    "setFillRule",
+    "setScissor",
+    "lerpPath",
+    "lerp",
+    "lerpColor",
+    "ease",
 ];
+
+/// `g.ease`: 0..1을 0..1로 바꾸는 완급 함수(easings.net의 이름).
+const EASE_LUA: &str = r#"
+local pi, sin, cos, sqrt = math.pi, math.sin, math.cos, math.sqrt
+local e = {}
+function e.linear(t) return t end
+function e.inQuad(t) return t * t end
+function e.outQuad(t) return 1 - (1 - t) * (1 - t) end
+function e.inOutQuad(t) if t < 0.5 then return 2 * t * t end return 1 - (-2 * t + 2) ^ 2 / 2 end
+function e.inCubic(t) return t * t * t end
+function e.outCubic(t) return 1 - (1 - t) ^ 3 end
+function e.inOutCubic(t) if t < 0.5 then return 4 * t * t * t end return 1 - (-2 * t + 2) ^ 3 / 2 end
+function e.inSine(t) return 1 - cos(t * pi / 2) end
+function e.outSine(t) return sin(t * pi / 2) end
+function e.inOutSine(t) return -(cos(pi * t) - 1) / 2 end
+function e.inBack(t) local c = 1.70158 return (c + 1) * t * t * t - c * t * t end
+function e.outBack(t) local c = 1.70158 return 1 + (c + 1) * (t - 1) ^ 3 + c * (t - 1) ^ 2 end
+function e.outElastic(t)
+  if t == 0 or t == 1 then return t end
+  return 2 ^ (-10 * t) * sin((t * 10 - 0.75) * (2 * pi) / 3) + 1
+end
+function e.outBounce(t)
+  local n, d = 7.5625, 2.75
+  if t < 1 / d then return n * t * t
+  elseif t < 2 / d then t = t - 1.5 / d return n * t * t + 0.75
+  elseif t < 2.5 / d then t = t - 2.25 / d return n * t * t + 0.9375
+  else t = t - 2.625 / d return n * t * t + 0.984375 end
+end
+-- pingPong(t): 0→1→0. 되풀이 애니메이션에 쓴다.
+function e.pingPong(t) t = t % 2 if t > 1 then return 2 - t end return t end
+return e
+"#;
 
 fn color_table(lua: &Lua, color: Color) -> mlua::Result<Table> {
     lua.create_sequence_from(color)
@@ -498,8 +690,17 @@ pub(super) fn create(lua: &Lua, recorder: Rc<RefCell<Recorder>>) -> mlua::Result
         }};
     }
 
+    // setColor(color) 또는 setColor(gradient). 그라디언트는 뒤 fill·stroke·도형에 쓰이고 글자는 첫 색으로 쓴다.
     function!("setColor", |rec, args| {
+        if let Some(Value::UserData(ud)) = args.values.first()
+            && let Ok(gradient) = ud.borrow::<LuaGradient>()
+        {
+            rec.color = gradient.stops[0].1;
+            rec.gradient = Some(gradient.clone());
+            return Ok(MultiValue::new());
+        }
         rec.color = args.color(0)?;
+        rec.gradient = None;
         Ok(MultiValue::new())
     });
     function!("getColor", |rec, args| {
@@ -560,7 +761,11 @@ pub(super) fn create(lua: &Lua, recorder: Rc<RefCell<Recorder>>) -> mlua::Result
         };
         let (w, h) = (rec.width, rec.height);
         let path = polyline(&[[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]], true);
-        rec.push(Shape::Fill { path, color })?;
+        rec.push(Shape::Fill {
+            path,
+            paint: Paint::Solid(color),
+            rule: FillRule::NonZero,
+        })?;
         Ok(MultiValue::new())
     });
     function!("rectangle", |rec, args| {
@@ -713,6 +918,186 @@ pub(super) fn create(lua: &Lua, recorder: Rc<RefCell<Recorder>>) -> mlua::Result
         rec.transform = rec.transform.then([sx, 0.0, 0.0, sy, 0.0, 0.0]);
         Ok(MultiValue::new())
     });
+
+    // --- 벡터(LÖVE에 없다) ------------------------------------------------
+
+    // fill(path), stroke(path): 경로 값 또는 SVG 경로 문자열을 지금 칠·선 모양·변환으로 그린다.
+    function!("fill", |rec, args| {
+        let path = path_arg(&args, 0)?;
+        rec.draw(Mode::Fill, &path)?;
+        Ok(MultiValue::new())
+    });
+    function!("stroke", |rec, args| {
+        let path = path_arg(&args, 0)?;
+        rec.draw(Mode::Line, &path)?;
+        Ok(MultiValue::new())
+    });
+    function!("setLineJoin", |rec, args| {
+        rec.line_join = match args.string(0)?.as_str() {
+            "miter" => LineJoin::Miter,
+            "round" => LineJoin::Round,
+            "bevel" | "none" => LineJoin::Bevel,
+            other => {
+                return Err(args.error(format!(
+                    "line join must be \"miter\", \"round\" or \"bevel\", got \"{other}\""
+                )));
+            }
+        };
+        Ok(MultiValue::new())
+    });
+    function!("setLineCap", |rec, args| {
+        rec.line_cap = match args.string(0)?.as_str() {
+            "butt" | "none" => LineCap::Butt,
+            "round" => LineCap::Round,
+            "square" => LineCap::Square,
+            other => {
+                return Err(args.error(format!(
+                    "line cap must be \"butt\", \"round\" or \"square\", got \"{other}\""
+                )));
+            }
+        };
+        Ok(MultiValue::new())
+    });
+    function!("setMiterLimit", |rec, args| {
+        rec.miter_limit = args.number(0)?.max(1.0);
+        Ok(MultiValue::new())
+    });
+    // setDash({on, off, …}[, offset]). 인자가 없으면 실선으로 돌아간다.
+    function!("setDash", |rec, args| {
+        if args.len() == 0 || matches!(args.values.first(), Some(Value::Nil)) {
+            rec.dash = None;
+            return Ok(MultiValue::new());
+        }
+        let Some(Value::Table(table)) = args.values.first() else {
+            return Err(args.error("argument #1 must be a table of lengths, e.g. {6, 4}"));
+        };
+        let pattern: Vec<f32> = table
+            .sequence_values::<f32>()
+            .collect::<mlua::Result<_>>()
+            .map_err(|_| args.error("the dash table must hold only numbers"))?;
+        if pattern.is_empty() || pattern.iter().any(|len| *len < 0.0) {
+            return Err(args.error("dash lengths must be zero or more"));
+        }
+        if pattern.iter().sum::<f32>() <= 0.0 {
+            return Err(args.error("dash lengths must not all be zero"));
+        }
+        // 홀수 개면 두 번 이어 쓴다(SVG와 같다).
+        let pattern = if pattern.len() % 2 == 1 {
+            [pattern.clone(), pattern].concat()
+        } else {
+            pattern
+        };
+        let offset = args.opt_number(1)?.unwrap_or(0.0);
+        rec.dash = Some((pattern, offset));
+        Ok(MultiValue::new())
+    });
+    function!("setFillRule", |rec, args| {
+        rec.fill_rule = match args.string(0)?.as_str() {
+            "nonzero" => FillRule::NonZero,
+            "evenodd" => FillRule::EvenOdd,
+            other => {
+                return Err(args.error(format!(
+                    "fill rule must be \"nonzero\" or \"evenodd\", got \"{other}\""
+                )));
+            }
+        };
+        Ok(MultiValue::new())
+    });
+    // setScissor(x, y, w, h): 뒤 모양을 이 사각형으로 자른다(캔버스 좌표, 변환과 상관없다). 인자가 없으면 푼다.
+    function!("setScissor", |rec, args| {
+        let rect = if args.len() == 0 {
+            None
+        } else {
+            let (x, y, w, h) = (
+                args.number(0)?,
+                args.number(1)?,
+                args.number(2)?,
+                args.number(3)?,
+            );
+            Some([x, y, w.max(0.0), h.max(0.0)])
+        };
+        rec.push(Shape::Clip(rect))?;
+        Ok(MultiValue::new())
+    });
+
+    // newPath([svg]): 빈 경로 또는 SVG 경로 문자열로 만든 경로.
+    g.raw_set(
+        "newPath",
+        lua.create_function(|lua, values: MultiValue| {
+            let args = Args::new("newPath", values);
+            let mut path = LuaPath::default();
+            if args.len() > 0 && !matches!(args.values.first(), Some(Value::Nil)) {
+                path.segments = path_arg(&args, 0)?;
+            }
+            lua.create_userdata(path)
+        })?,
+    )?;
+    // newLinearGradient(x1, y1, x2, y2, stops), newRadialGradient(cx, cy, r, stops). 좌표는 그릴 때의 변환을 따른다.
+    g.raw_set(
+        "newLinearGradient",
+        lua.create_function(|lua, values: MultiValue| {
+            let args = Args::new("newLinearGradient", values);
+            let from = [args.number(0)?, args.number(1)?];
+            let to = [args.number(2)?, args.number(3)?];
+            let stops = parse_stops(&args, 4)?;
+            lua.create_userdata(LuaGradient {
+                shape: GradientShape::Linear { from, to },
+                stops,
+            })
+        })?,
+    )?;
+    g.raw_set(
+        "newRadialGradient",
+        lua.create_function(|lua, values: MultiValue| {
+            let args = Args::new("newRadialGradient", values);
+            let center = [args.number(0)?, args.number(1)?];
+            let radius = args.number(2)?.max(0.0);
+            let stops = parse_stops(&args, 3)?;
+            lua.create_userdata(LuaGradient {
+                shape: GradientShape::Radial { center, radius },
+                stops,
+            })
+        })?,
+    )?;
+    // lerpPath(a, b, t): 구조가 같은 두 경로 사이(모핑).
+    g.raw_set(
+        "lerpPath",
+        lua.create_function(|lua, values: MultiValue| {
+            let args = Args::new("lerpPath", values);
+            let a = LuaPath {
+                segments: path_arg(&args, 0)?,
+            };
+            let b = LuaPath {
+                segments: path_arg(&args, 1)?,
+            };
+            let t = args.number(2)?;
+            let mixed = a.lerp(&b, t).map_err(|err| args.error(err))?;
+            lua.create_userdata(mixed)
+        })?,
+    )?;
+    // lerp(a, b, t), lerpColor(c1, c2, t) → {r, g, b, a}.
+    g.raw_set(
+        "lerp",
+        lua.create_function(|_, values: MultiValue| {
+            let args = Args::new("lerp", values);
+            let (a, b, t) = (args.number(0)?, args.number(1)?, args.number(2)?);
+            Ok(a + (b - a) * t)
+        })?,
+    )?;
+    g.raw_set(
+        "lerpColor",
+        lua.create_function(|lua, values: MultiValue| {
+            let args = Args::new("lerpColor", values);
+            let (a, b) = (args.color(0)?, args.color(1)?);
+            let t = args.number(2)?;
+            let mixed: Vec<f32> = a.iter().zip(&b).map(|(a, b)| a + (b - a) * t).collect();
+            lua.create_sequence_from(mixed)
+        })?,
+    )?;
+    g.raw_set(
+        "ease",
+        lua.load(EASE_LUA).set_name("=ease").eval::<Table>()?,
+    )?;
 
     // 3차원 장면([`super::scene`]).
     {

@@ -17,6 +17,7 @@ use gpui_kit::gpui::*;
 use crate::app::style::{PANEL_INSET, Palette, TOOLBAR_HEIGHT, window_drag_area};
 use crate::aws_profiles::{self, AwsProfile};
 use crate::config::Config;
+use crate::i18n::{self, Language};
 use crate::icons;
 
 /// 설정 창 크기.
@@ -45,6 +46,8 @@ pub struct Prefs {
     pub aws_region: Option<SharedString>,
     /// 어시스턴트가 부를 Bedrock 모델(추론 프로필) ID. 어시스턴트 패널에서 고른다.
     pub ai_model: Option<SharedString>,
+    /// UI 언어(ADR-0027).
+    pub language: Language,
 }
 
 impl Global for Prefs {}
@@ -89,7 +92,23 @@ impl Prefs {
             aws_profile: config.aws_profile.clone().map(SharedString::from),
             aws_region: config.aws_region.clone().map(SharedString::from),
             ai_model: config.ai_model.clone().map(SharedString::from),
+            language: Language::from_key(config.language.as_deref()),
         });
+        rust_i18n::set_locale(cx.global::<Prefs>().language.locale());
+    }
+
+    /// UI 언어를 바꾸고 저장한다. 메뉴와 창은 바로 바뀐다.
+    fn set_language(language: Language, cx: &mut App) {
+        if cx.global::<Prefs>().language == language {
+            return;
+        }
+        cx.global_mut::<Prefs>().language = language;
+        let mut config = Config::load();
+        config.language = language.key().map(str::to_string);
+        if let Err(err) = config.save() {
+            eprintln!("설정 저장 실패: {err}");
+        }
+        i18n::apply(language, cx);
     }
 
     /// 에디터에 쓸 서체: 고른 서체, 없으면 테마 서체.
@@ -214,7 +233,7 @@ pub fn open(cx: &mut App) {
         window_bounds,
         window_min_size: Some(size(px(560.0), px(360.0))),
         titlebar: Some(TitlebarOptions {
-            title: Some("설정".into()),
+            title: Some(t!("settings.title").into()),
             appears_transparent: true,
             traffic_light_position: Some(point(
                 px(PANEL_INSET + 12.0),
@@ -242,10 +261,17 @@ enum Page {
 impl Page {
     const ALL: [Page; 2] = [Page::General, Page::Ai];
 
-    fn title(self) -> &'static str {
+    fn id(self) -> &'static str {
         match self {
-            Page::General => "일반",
-            Page::Ai => "AI",
+            Page::General => "general",
+            Page::Ai => "ai",
+        }
+    }
+
+    fn title(self) -> SharedString {
+        match self {
+            Page::General => t!("settings.page.general").into(),
+            Page::Ai => t!("settings.page.ai").into(),
         }
     }
 
@@ -298,7 +324,7 @@ impl SearchableListItem for FontItem {
 
 /// 서체 선택지: 맨 앞의 기본 항목(`value`가 `None`, `default_family`로 그림) + 설치된 서체.
 pub(crate) fn font_items(
-    default_title: &'static str,
+    default_title: impl Into<SharedString>,
     default_family: SharedString,
     cx: &App,
 ) -> Vec<FontItem> {
@@ -370,6 +396,9 @@ impl SearchableListItem for ChoiceItem {
 /// 설정 창 화면.
 struct SettingsWindow {
     page: Page,
+    /// 선택지를 만들 때의 언어. 바뀌면 선택지를 다시 만든다(이름이 그 언어로 들어 있다).
+    language: Language,
+    language_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
     font_picker: Entity<SelectState<SearchableVec<FontItem>>>,
     font_size_picker: Entity<SelectState<SearchableVec<FontSizeItem>>>,
     provider_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
@@ -382,8 +411,29 @@ struct SettingsWindow {
 
 impl SettingsWindow {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // 언어: 시스템, English, 한국어.
+        let language = cx.global::<Prefs>().language;
+        let languages: Vec<_> = Language::ALL
+            .into_iter()
+            .map(|language| ChoiceItem {
+                title: language.title().into(),
+                value: language.key().map(SharedString::from),
+            })
+            .collect();
+        let selected_language = Language::ALL
+            .iter()
+            .position(|item| *item == language)
+            .unwrap_or(0);
+        let language_picker = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(languages),
+                Some(IndexPath::new(selected_language)),
+                window,
+                cx,
+            )
+        });
         let system_family = cx.theme().font_family.clone();
-        let items = font_items("시스템 서체", system_family, cx);
+        let items = font_items(t!("settings.font.system"), system_family, cx);
         let current = cx.global::<Prefs>().editor_font.clone();
         let selected = items
             .iter()
@@ -410,7 +460,7 @@ impl SettingsWindow {
         });
         // AI 제공자: 맨 앞은 "사용 안 함".
         let providers: Vec<_> = std::iter::once(ChoiceItem {
-            title: "사용 안 함".into(),
+            title: t!("settings.ai.provider.none").into(),
             value: None,
         })
         .chain(AiProvider::ALL.into_iter().map(|provider| ChoiceItem {
@@ -458,7 +508,7 @@ impl SettingsWindow {
         // 리전: 맨 앞은 "프로필 리전 따르기". 저장한 리전이 목록에 없으면(직접 고친 설정) 끝에 더한다.
         let current_region = cx.global::<Prefs>().aws_region.clone();
         let mut regions: Vec<_> = std::iter::once(ChoiceItem {
-            title: "프로필 리전 따르기".into(),
+            title: t!("settings.ai.region.follow_profile").into(),
             value: None,
         })
         .chain(
@@ -495,6 +545,15 @@ impl SettingsWindow {
         });
 
         let subscriptions = vec![
+            cx.subscribe(
+                &language_picker,
+                |_, _, event: &SelectEvent<SearchableVec<ChoiceItem>>, cx| {
+                    let SelectEvent::Confirm(value) = event;
+                    if let Some(key) = value {
+                        Prefs::set_language(Language::from_key(key.as_deref()), cx);
+                    }
+                },
+            ),
             cx.subscribe(
                 &font_picker,
                 |_, _, event: &SelectEvent<SearchableVec<FontItem>>, cx| {
@@ -540,11 +599,21 @@ impl SettingsWindow {
                     }
                 },
             ),
-            cx.observe_global::<Prefs>(|_, cx| cx.notify()),
+            // 언어가 바뀌면 선택지 이름도 그 언어로 다시 만든다. 보던 페이지는 그대로 둔다.
+            cx.observe_global_in::<Prefs>(window, |this, window, cx| {
+                if cx.global::<Prefs>().language != this.language {
+                    let page = this.page;
+                    *this = Self::new(window, cx);
+                    this.page = page;
+                }
+                cx.notify();
+            }),
         ];
 
         Self {
             page: Page::General,
+            language,
+            language_picker,
             font_picker,
             font_size_picker,
             provider_picker,
@@ -565,7 +634,7 @@ impl SettingsWindow {
                 (pal.foreground, pal.foreground.opacity(0.7))
             };
             div()
-                .id(page.title())
+                .id(page.id())
                 .mx_2()
                 .px_2()
                 .h(px(30.0))
@@ -609,25 +678,40 @@ impl SettingsWindow {
         )
     }
 
-    /// 일반: 에디터 서체와 글자 크기.
+    /// 일반: 언어, 에디터 서체와 글자 크기.
     fn render_general(&self) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
             .gap_4()
             .child(
-                Select::new(&self.font_picker)
-                    .large()
-                    .focus_ring(false)
-                    .menu_max_h(px(320.0))
-                    .search_placeholder("서체 검색"),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(t!("settings.language"))
+                    .child(Select::new(&self.language_picker).large().focus_ring(false)),
             )
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child("에디터 폰트 크기")
+                    .child(t!("settings.font"))
+                    .child(
+                        Select::new(&self.font_picker)
+                            .large()
+                            .focus_ring(false)
+                            .menu_max_h(px(320.0))
+                            .search_placeholder(t!("settings.font.search")),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(t!("settings.font.size"))
                     .child(
                         Select::new(&self.font_size_picker)
                             .large()
@@ -650,22 +734,22 @@ impl SettingsWindow {
         });
         // 프로필 아래 안내: 프로필이 없거나 사라졌다는 안내, 아니면 프로필을 읽는 곳.
         let hint: Option<SharedString> = if self.aws_profiles.is_empty() {
-            Some("~/.aws/config에 프로필이 없습니다. 터미널에서 aws configure로 만드세요.".into())
+            Some(t!("settings.ai.profile.hint_none").into())
         } else if profile.is_some() {
             None
         } else if let Some(name) = &saved_profile {
-            Some(format!("저장한 프로필 '{name}'을 찾을 수 없습니다. 다시 고르세요.").into())
+            Some(t!("settings.ai.profile.hint_missing", name = name).into())
         } else {
-            Some("~/.aws/config와 ~/.aws/credentials의 프로필에서 고릅니다.".into())
+            Some(t!("settings.ai.profile.hint_source").into())
         };
         // 리전 아래 안내: 프로필 리전을 따를 때 실제로 쓰일 리전.
         let region_hint: Option<SharedString> = match (&prefs.aws_region, profile) {
             (Some(_), _) => None,
             (None, Some(profile)) => Some(match &profile.region {
-                Some(region) => format!("프로필 리전 {region}을 씁니다.").into(),
-                None => "프로필에 리전이 없습니다. AWS_REGION 환경 변수를 따릅니다.".into(),
+                Some(region) => t!("settings.ai.region.hint_profile", region = region).into(),
+                None => t!("settings.ai.region.hint_env").into(),
             }),
-            (None, None) => Some("프로필을 고르면 그 프로필의 리전을 씁니다.".into()),
+            (None, None) => Some(t!("settings.ai.region.hint_pick").into()),
         };
 
         div()
@@ -677,7 +761,7 @@ impl SettingsWindow {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child("AI 제공자")
+                    .child(t!("settings.ai.provider"))
                     .child(Select::new(&self.provider_picker).large().focus_ring(false)),
             )
             .when(prefs.ai_provider == Some(AiProvider::Bedrock), |this| {
@@ -686,15 +770,15 @@ impl SettingsWindow {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child("AWS 프로필")
+                        .child(t!("settings.ai.profile"))
                         .child(
                             Select::new(&self.profile_picker)
                                 .large()
                                 .focus_ring(false)
                                 .disabled(self.aws_profiles.is_empty())
-                                .placeholder("프로필 선택")
+                                .placeholder(t!("settings.ai.profile.placeholder"))
                                 .menu_max_h(px(240.0))
-                                .search_placeholder("프로필 검색"),
+                                .search_placeholder(t!("settings.ai.profile.search")),
                         )
                         .children(
                             hint.map(|hint| div().text_sm().text_color(pal.muted).child(hint)),
@@ -705,13 +789,13 @@ impl SettingsWindow {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child("리전")
+                        .child(t!("settings.ai.region"))
                         .child(
                             Select::new(&self.region_picker)
                                 .large()
                                 .focus_ring(false)
                                 .menu_max_h(px(240.0))
-                                .search_placeholder("리전 검색"),
+                                .search_placeholder(t!("settings.ai.region.search")),
                         )
                         .children(
                             region_hint
@@ -774,7 +858,7 @@ impl Render for SettingsWindow {
                 TitleBar::new()
                     .bg(theme.title_bar)
                     .border_color(theme.title_bar_border)
-                    .child(div().text_sm().child("설정")),
+                    .child(div().text_sm().child(t!("settings.title"))),
             )
         };
 

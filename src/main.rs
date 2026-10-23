@@ -1,5 +1,11 @@
 #![recursion_limit = "512"]
 
+#[macro_use]
+extern crate rust_i18n;
+
+// UI 문자열(ADR-0027). 없는 번역은 영어로 보인다.
+i18n!("locales", fallback = "en");
+
 #[cfg(not(target_os = "macos"))]
 use gpui_kit::component::*;
 use gpui_kit::gpui::*;
@@ -15,6 +21,7 @@ mod config;
 mod dock_icon;
 pub mod export;
 mod extension;
+mod i18n;
 mod icons;
 mod library;
 mod markdown;
@@ -40,6 +47,7 @@ actions!(
         InsertTable,
         InsertExtension,
         InsertSpecialChar,
+        ManageExtensions,
         ToggleLineGroup,
         CompileProject,
         OpenLibrary,
@@ -107,9 +115,10 @@ fn main() {
                 theme::set_theme(theme::DEFAULT_LIGHT, cx);
             }
 
+            // 언어를 먼저 정해야 메뉴와 첫 화면이 그 언어로 나온다.
+            settings::Prefs::init(&config, cx);
             // macOS: 네이티브 메뉴 / Windows·Linux: 인윈도우 AppMenuBar용 메뉴 등록
             install_menus(cx);
-            settings::Prefs::init(&config, cx);
             // 설정 창은 어느 창에 포커스가 있든(또는 없든) 열 수 있어야 하므로 앱 전역에서 받는다.
             cx.on_action(|_: &OpenSettings, cx| settings::open(cx));
 
@@ -145,9 +154,7 @@ fn main() {
                 .and_then(|root| library::open(root).ok())
                 .inspect(|library| sync_builtin_skills(&library.root));
             let notice = if config.library_root.is_some() && library.is_none() {
-                Some(SharedString::from(
-                    "저장된 라이브러리를 열 수 없습니다. 폴더를 다시 선택하세요.",
-                ))
+                Some(SharedString::from(t!("library.notice.saved_unopenable")))
             } else {
                 None
             };

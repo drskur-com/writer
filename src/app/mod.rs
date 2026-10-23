@@ -15,6 +15,7 @@ mod editor_link;
 mod editor_table;
 mod editor_task;
 mod extension_commands;
+mod extension_painter;
 mod file_view;
 mod insert_extension;
 mod insert_footnote;
@@ -23,6 +24,7 @@ mod insert_special_char;
 mod insert_table;
 mod library_ops;
 mod library_panel;
+mod manage_extensions;
 mod new_project;
 mod onboarding;
 mod project_panel;
@@ -150,6 +152,9 @@ impl WriterApp {
             cx.observe_global_in::<crate::settings::Prefs>(window, |this, window, cx| {
                 this.refresh_editor_preferences(cx);
                 this.refresh_assistant_models(window, cx);
+                // 언어가 바뀌었을 수 있다(메뉴는 `i18n::apply`가 다시 설치한다).
+                #[cfg(not(target_os = "macos"))]
+                this.menu_bar.update(cx, |menu_bar, cx| menu_bar.reload(cx));
                 cx.notify();
             });
         let quit_subscription = cx.on_app_quit(|this, cx| {
@@ -211,7 +216,7 @@ impl WriterApp {
 
     fn on_save_sheet(&mut self, _: &SaveSheet, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(err) = self.save_open_sheet(cx) {
-            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+            self.notify(t!("library.sheet.save_failed", err = err), window, cx);
         }
     }
 
@@ -223,7 +228,7 @@ impl WriterApp {
         cx: &mut Context<Self>,
     ) {
         let Some(editor) = &self.editor else {
-            self.notify("먼저 시트를 여세요.", window, cx);
+            self.notify(t!("common.open_sheet_first"), window, cx);
             return;
         };
         editor.state().update(cx, |state, cx| {
@@ -247,7 +252,7 @@ impl WriterApp {
         if let Some(project_dir) = self.active_project() {
             self.open_compile_dialog(&project_dir, window, cx);
         } else {
-            self.notify("컴파일할 프로젝트를 먼저 선택하세요.", window, cx);
+            self.notify(t!("library.compile_select_project"), window, cx);
         }
     }
 
@@ -296,7 +301,7 @@ impl WriterApp {
 
     fn on_show_about(&mut self, _: &ShowAbout, window: &mut Window, cx: &mut Context<Self>) {
         self.notify(
-            format!("{APP_NAME} v0.1.0 · 아이콘: {}", icons::PACK),
+            t!("library.about", app = APP_NAME, pack = icons::PACK),
             window,
             cx,
         );
@@ -310,7 +315,7 @@ impl WriterApp {
     /// 선택 영역(또는 커서 위치)의 굵게 표시를 켜고 끈다.
     fn on_toggle_bold(&mut self, _: &ToggleBold, window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.is_none() {
-            self.notify("먼저 시트를 여세요.", window, cx);
+            self.notify(t!("common.open_sheet_first"), window, cx);
             return;
         }
         self.toggle_inline(markdown::SpanKind::Strong, "**", window, cx);
@@ -319,7 +324,7 @@ impl WriterApp {
     /// 선택 영역(또는 커서 위치)의 기울임 표시를 켜고 끈다.
     fn on_toggle_italic(&mut self, _: &ToggleItalic, window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.is_none() {
-            self.notify("먼저 시트를 여세요.", window, cx);
+            self.notify(t!("common.open_sheet_first"), window, cx);
             return;
         }
         self.toggle_inline(markdown::SpanKind::Emphasis, "_", window, cx);
@@ -341,14 +346,14 @@ impl WriterApp {
         cx: &mut Context<Self>,
     ) {
         let Some(selected) = self.editor_selection() else {
-            self.notify("미리보기할 그룹이나 시트를 선택하세요.", window, cx);
+            self.notify(t!("library.preview_select"), window, cx);
             return;
         };
         let Some(root) = self.library.as_ref().map(|lib| lib.root.clone()) else {
             return;
         };
         if let Err(err) = self.save_open_sheet(cx) {
-            self.notify(format!("시트를 저장할 수 없습니다: {err}"), window, cx);
+            self.notify(t!("library.sheet.save_failed", err = err), window, cx);
             return;
         }
         book_preview::open_selection(&root, &selected, cx);
@@ -565,7 +570,7 @@ impl WriterApp {
     /// 선택 항목의 표시 이름. 그룹은 메타의 표시 이름(`title`)을 쓴다.
     fn selection_label(&self, selection: &Selection) -> String {
         match selection {
-            Selection::Section(library::SectionKind::Notes) => "모두".to_string(),
+            Selection::Section(library::SectionKind::Notes) => t!("library.all").to_string(),
             Selection::Section(kind) => kind.title().to_string(),
             Selection::Group(path) => self
                 .library
@@ -632,6 +637,7 @@ impl Render for WriterApp {
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_set_theme))
             .on_action(cx.listener(Self::on_run_extension_command))
+            .on_action(cx.listener(Self::on_manage_extensions))
             .on_action(cx.listener(Self::on_quit));
 
         // 커스텀 타이틀바 + 메뉴바 (macOS는 투명 타이틀바 + 네이티브 메뉴를 쓰므로 생략)

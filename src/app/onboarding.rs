@@ -18,7 +18,7 @@ impl WriterApp {
     ) -> impl IntoElement {
         let suggested = config::default_library_root()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "(위치를 찾을 수 없음)".to_string());
+            .unwrap_or_else(|| t!("library.onboarding.location_unknown").to_string());
 
         div()
             .flex_1()
@@ -42,7 +42,7 @@ impl WriterApp {
                         div()
                             .text_sm()
                             .text_color(pal.muted)
-                            .child("모든 메모와 프로젝트를 담을 폴더를 선택하세요."),
+                            .child(t!("library.onboarding.prompt")),
                     )
                     .child(
                         div()
@@ -54,7 +54,7 @@ impl WriterApp {
                             .bg(pal.panel)
                             .text_xs()
                             .text_color(pal.muted)
-                            .child(format!("제안 위치: {suggested}")),
+                            .child(t!("library.onboarding.suggested", path = suggested)),
                     )
                     .when_some(self.notice.clone(), |this, notice| {
                         this.child(div().text_sm().text_color(pal.danger).child(notice))
@@ -66,14 +66,14 @@ impl WriterApp {
                             .child(
                                 Button::new("create-library")
                                     .primary()
-                                    .label("라이브러리 만들기")
+                                    .label(t!("library.onboarding.create"))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.create_default_library(window, cx)
                                     })),
                             )
                             .child(
                                 Button::new("open-library")
-                                    .label("기존 라이브러리 열기")
+                                    .label(t!("library.onboarding.open"))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.pick_library(window, cx)
                                     })),

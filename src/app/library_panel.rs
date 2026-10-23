@@ -56,7 +56,7 @@ impl Render for DraggedGroups {
                                 .flex_shrink_0()
                                 .font_normal()
                                 .text_color(pal.muted)
-                                .child(format!("외 {extra}개")),
+                                .child(t!("library.more_count", count = extra)),
                         )
                     }),
             )
@@ -141,7 +141,11 @@ impl WriterApp {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.toggle_section(kind, cx);
                                         }))
-                                        .child(if collapsed { "보기" } else { "가리기" }),
+                                        .child(if collapsed {
+                                            t!("library.section.show")
+                                        } else {
+                                            t!("library.section.hide")
+                                        }),
                                 ),
                         )
                         .into_any_element(),
@@ -161,7 +165,7 @@ impl WriterApp {
                             pal,
                             "all-notes".into(),
                             icons::all_sheets(),
-                            "모두".into(),
+                            t!("library.all").into(),
                             None,
                             selected,
                             selection,
@@ -242,7 +246,7 @@ impl WriterApp {
                                 menu.min_w(px(200.0))
                                     .item(
                                         PopupMenuItem::element(move |_, _| {
-                                            menu_row(icons::edit(), "편집…", None)
+                                            menu_row(icons::edit(), t!("library.menu.edit"), None)
                                         })
                                         .on_click(
                                             move |_, window, cx| {
@@ -268,7 +272,7 @@ impl WriterApp {
                                         PopupMenuItem::element(move |_, _| {
                                             menu_row(
                                                 icons::trash(),
-                                                "휴지통으로 이동",
+                                                t!("common.move_to_trash"),
                                                 Some(danger),
                                             )
                                         })
@@ -320,7 +324,7 @@ impl WriterApp {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_new_project(window, cx);
                             }))
-                            .child("새로운 프로젝트…")
+                            .child(t!("library.new_project_button"))
                             .into_any_element(),
                     );
                 }
@@ -606,12 +610,16 @@ pub(super) enum Disclosure {
 }
 
 /// 우클릭 메뉴 한 줄: 아이콘 + 글자. 모든 줄이 같은 모양이어야 글자가 나란히 선다.
-pub(super) fn menu_row(icon: AssetIcon, label: &'static str, color: Option<Hsla>) -> Div {
+pub(super) fn menu_row(
+    icon: AssetIcon,
+    label: impl Into<SharedString>,
+    color: Option<Hsla>,
+) -> Div {
     div()
         .flex()
         .items_center()
         .gap_2()
         .when_some(color, |this, color| this.text_color(color))
         .child(Icon::new(icon).small())
-        .child(label)
+        .child(label.into())
 }

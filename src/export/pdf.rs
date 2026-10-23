@@ -109,8 +109,10 @@ pub fn render(document: &PdfDocument) -> Result<Vec<u8>, ExportError> {
     pdf.set_metadata(metadata);
 
     for page in &document.pages {
-        let settings = PageSettings::from_wh(page.width.max(1.), page.height.max(1.))
-            .ok_or_else(|| ExportError::InvalidProject("페이지 크기가 잘못되었습니다".into()))?;
+        let settings =
+            PageSettings::from_wh(page.width.max(1.), page.height.max(1.)).ok_or_else(|| {
+                ExportError::InvalidProject(t!("export.error.page_size").into_owned())
+            })?;
         let mut pdf_page = pdf.start_page_with(settings);
         let mut surface = pdf_page.surface();
         for item in &page.items {
@@ -160,8 +162,9 @@ pub fn render(document: &PdfDocument) -> Result<Vec<u8>, ExportError> {
         surface.finish();
         pdf_page.finish();
     }
-    pdf.finish()
-        .map_err(|err| ExportError::InvalidProject(format!("PDF를 만들 수 없습니다: {err:?}")))
+    pdf.finish().map_err(|err| {
+        ExportError::InvalidProject(t!("export.error.pdf", err = format!("{err:?}")).into_owned())
+    })
 }
 
 fn fill_rect(surface: &mut Surface, x: f32, y: f32, width: f32, height: f32, color: [u8; 3]) {

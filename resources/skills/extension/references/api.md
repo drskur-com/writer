@@ -12,7 +12,7 @@
 | `draw` | `function(g, t, args)` | Draws the block. |
 | `commands` | list of `{ title = string, run = function(ctx) }` | Items in the Extensions menu, in this order. |
 
-The table needs `draw`, `commands`, or both. Other fields are ignored. Code outside the returned functions (helpers, constants) runs once at load; keep it free of side effects.
+The table needs `draw`, `commands`, or both. Other fields are ignored. Code outside the returned functions (helpers, constants) runs once at load; keep it free of side effects. The canvas `g` is also a global there, so build paths and gradients once at the top of the file (`local LEAF = g.newPath(...)`) and reuse them in every `draw`; drawing at load time does nothing.
 
 ## The header
 
@@ -57,7 +57,7 @@ other: value
 ## `draw(g, t, args)`
 
 - `t`: seconds since the block appeared (always `0` when not animated). Frames are 1/30 s apart. With `period`, `t` runs from 0 to `period` and repeats.
-- Each call starts with an empty canvas, no transform, line width 1, font size 12, and the theme's text color.
+- Each call starts with an empty canvas, no transform, line width 1, `"miter"` joins, `"butt"` caps, no dash, no scissor, the `"nonzero"` fill rule, font size 12, and the theme's text color.
 - `draw` runs on its own thread, so a slow `draw` makes only its own block update less often; it never stops the editor. Still keep a frame under about 10 ms.
 - Limits per call: 0.1 s; 20,000 shapes for a still picture, 2,000 per frame for an animation.
 - Code outside the returned functions runs once when the file loads and must finish within 0.1 s: keep it to constants and helper functions.
@@ -112,6 +112,67 @@ Text uses the app's interface font. Line height is 1.25 × the font size.
 | `g.origin()` | Reset the transform. |
 | `g.translate(dx, dy)`, `g.rotate(angle)`, `g.scale(sx[, sy])` | Apply to everything drawn after it, as in LÖVE (the last call applies first to points). |
 
+### Paths
+
+Beyond LÖVE: vector paths with curves. Build a path once (at the top of the file) and draw it as often as you like; each draw uses the current color, line style, and transform.
+
+| Function | Meaning |
+|---|---|
+| `g.newPath([svg])` | An empty path, or one read from an SVG path string (`d` attribute): `M L H V C S Q T A Z` and their lowercase relative forms. |
+| `g.fill(path)` / `g.stroke(path)` | Fill or outline it. A path string works too: `g.fill("M0 0 L 10 0 L 5 8 Z")`. |
+| `g.lerpPath(a, b, t)` | The path between `a` (`t = 0`) and `b` (`t = 1`). Both need the same commands in the same order (build them with the same calls and change only the numbers). Use it to morph shapes and animate control points. |
+
+Building (each returns the path, so calls chain: `g.newPath():moveTo(0, 0):lineTo(10, 0):close()`):
+
+| Method | Meaning |
+|---|---|
+| `p:moveTo(x, y)` | Start a new subpath. |
+| `p:lineTo(x, y)` | |
+| `p:curveTo(c1x, c1y, c2x, c2y, x, y)` | Cubic Bézier. |
+| `p:quadTo(cx, cy, x, y)` | Quadratic Bézier. |
+| `p:arc(x, y, r, a1, a2)` | Circular arc around `x, y` from `a1` to `a2` (radians, clockwise on screen); joined to the current point with a line. |
+| `p:rect(x, y, w, h[, rx, ry])`, `p:circle(x, y, r)`, `p:ellipse(x, y, rx[, ry])`, `p:polygon(x1, y1, ...)` | Add a closed shape. |
+| `p:svg(d)` | Append an SVG path string. |
+| `p:close()` | Close the subpath back to its start. |
+
+Reading and changing (these return numbers or a **new** path; the original stays as it is):
+
+| Method | Meaning |
+|---|---|
+| `p:length()` | Length along the path. |
+| `p:pointAt(s)` | `x, y, angle` at fraction `s` (0–1) of the length; `angle` is the direction of travel. Move things along a path with it (`g.translate(x, y); g.rotate(angle)`). |
+| `p:trim(s1, s2)` | The part from fraction `s1` to `s2`. `p:trim(0, s)` with a growing `s` draws a line as if by hand. Curves stay curves. |
+| `p:bounds()` | `x, y, w, h`. |
+| `p:points()` / `p:withPoints(list)` | All anchor and control points as one list `{ x1, y1, x2, y2, ... }`, and the same path with other points (same count). Animate single control points with them. |
+| `p:lerp(other, t)` | Same as `g.lerpPath(p, other, t)`. |
+| `p:translate(dx, dy)`, `p:rotate(angle[, cx, cy])`, `p:scale(sx[, sy, cx, cy])` | Moved, turned around `cx, cy`, or scaled from `cx, cy` (default origin). |
+| `p:clone()` | A copy you can keep building on. |
+
+### Gradients
+
+`g.newLinearGradient(x1, y1, x2, y2, stops)` and `g.newRadialGradient(cx, cy, r, stops)` return a gradient; pass it to `g.setColor` and every fill and outline after it uses it (text uses its first color). `stops` is `{ {0, color}, {0.6, color}, {1, color} }` with positions from 0 to 1, or just `{ color, color, ... }` spread evenly. Colors take any color form, including alpha: `{ 1, 1, 1, 0 }` fades out. Outside the range the end colors continue.
+
+Gradient coordinates follow the transform at the time you draw, like a shape's. Make a gradient once at the top of the file when it does not change.
+
+### Line style, fill rule, and clipping
+
+| Function | Meaning |
+|---|---|
+| `g.setLineJoin(join)` | `"miter"` (default), `"round"`, `"bevel"`. |
+| `g.setLineCap(cap)` | `"butt"` (default), `"round"`, `"square"`. |
+| `g.setMiterLimit(n)` | How far sharp miter joins may reach (default 10). |
+| `g.setDash({on, off, ...}[, offset])` / `g.setDash()` | Dashed outlines; lengths follow the transform. Change `offset` with `t` for "marching ants". `g.setDash()` returns to solid lines. |
+| `g.setFillRule(rule)` | `"nonzero"` (default) or `"evenodd"`. With `"evenodd"`, an inner subpath cuts a hole (a ring, the letter O) regardless of its direction. |
+| `g.setScissor(x, y, w, h)` / `g.setScissor()` | Draw only inside that canvas rectangle (ignores the transform), as in LÖVE. |
+
+### Animation helpers
+
+| Function | Meaning |
+|---|---|
+| `g.ease.<name>(t)` | Easing curves from 0–1 to 0–1: `linear`, `inQuad`, `outQuad`, `inOutQuad`, `inCubic`, `outCubic`, `inOutCubic`, `inSine`, `outSine`, `inOutSine`, `inBack`, `outBack`, `outElastic`, `outBounce`, and `pingPong` (0 → 1 → 0 as `t` goes 0 → 1 → 2). |
+| `g.lerp(a, b, t)` | `a + (b - a) * t`. |
+| `g.lerpColor(c1, c2, t)` | Mixed color as `{ r, g, b, a }`. |
+
 ### Theme
 
 `g.theme.foreground`, `g.theme.background`, `g.theme.muted` (secondary text), `g.theme.accent`, `g.theme.border`: `{ r, g, b, a }` tables for the current theme. Pass them to `g.setColor`.
@@ -149,7 +210,7 @@ Coordinates: right-handed, **y up**, in any unit you like (sizes around 1 work w
 
 ### Not available
 
-Anything else in LÖVE: images, canvases, shaders, GPU meshes, textures, per-pixel lighting, fonts from files, `love.update`/`love.draw` callbacks, input, sound. Calling a function that does not exist fails with a list of the available ones.
+Anything else in LÖVE: images, canvases, shaders, GPU meshes, textures, per-pixel lighting, fonts from files, `love.update`/`love.draw` callbacks, input, sound. Also: clipping to a path (only rectangles, `g.setScissor`), boolean operations on paths, blend modes, blur and soft shadows (layer a few translucent copies instead), text along a path. Calling a function that does not exist fails with a list of the available ones.
 
 ## Commands
 

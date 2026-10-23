@@ -1,0 +1,13 @@
+_version: 1
+# 여러 화면이 함께 쓰는 짧은 글. 다른 파일은 여기 키를 쓰기만 하고 같은 키를 다시 적지 않는다.
+common.cancel: "Cancel"
+common.ok: "OK"
+common.close: "Close"
+common.delete: "Delete"
+common.insert: "Insert"
+common.save: "Save"
+common.create: "Create"
+common.reveal_in_finder: "Show in Finder"
+common.move_to_trash: "Move to Trash"
+common.open_sheet_first: "Open a sheet first."
+common.open_library_first: "Open a library first."
