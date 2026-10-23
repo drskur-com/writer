@@ -22,7 +22,9 @@ use zip::write::SimpleFileOptions;
 
 use super::{ExportError, ExportProject};
 use crate::library::{Align, HeadingNumbers, Placement, ResolvedStyle, StyleTarget, VerticalAlign};
-use crate::markdown::{Block, ColumnAlign, ImageAlign, ImageLine, Inline, Rich, Table};
+use crate::markdown::{
+    Block, ColumnAlign, ImageAlign, ImageLine, Inline, InlineObject, Rich, Table,
+};
 
 /// 판형과 서체(컴파일 대화상자에서 정한다). 길이는 pt.
 #[derive(Clone, Debug)]
@@ -344,6 +346,12 @@ impl<'a> DocBuilder<'a> {
     fn runs_with(&mut self, rich: &[Inline], bold: bool) -> String {
         let mut out = String::new();
         for inline in rich {
+            if let Some(object) = &inline.object {
+                if let Some(drawing) = self.inline_drawing(object) {
+                    out.push_str(&format!("<w:r>{drawing}</w:r>"));
+                }
+                continue;
+            }
             let mut rpr = String::new();
             // 글자 속성 순서는 OOXML 스키마를 따른다(rFonts → b → i → strike).
             if inline.marks.code {
@@ -695,6 +703,27 @@ impl<'a> DocBuilder<'a> {
             &format!("<w:r>{drawing}</w:r>"),
         );
         Ok(())
+    }
+
+    /// 문단 안 확장 그림(ADR-0036)의 `w:drawing`. 높이는 본문 행 높이 × 인라인 `scale=`이고(에디터와 같다)
+    /// 칸보다 넓으면 줄인다. 그리지 못하거나 빼는 그림이면 `None`(그 자리는 비운다).
+    fn inline_drawing(&mut self, object: &InlineObject) -> Option<String> {
+        let key = (object.name.clone(), object.args.clone());
+        let index = match self.drawing_ids.get(&key) {
+            Some(index) => *index,
+            None => {
+                let index = self.load_drawing(&object.name, &object.args);
+                self.drawing_ids.insert(key, index);
+                index
+            }
+        };
+        let index = index.ok()??;
+        let (w, h) = self.drawing_size(index);
+        let line_height = self.project.styles.resolve(StyleTarget::Body).line_height as f32;
+        let height = self.em(line_height * crate::extension::scale_of(&object.args));
+        let width = height * w / h.max(f32::EPSILON);
+        let fit = (self.content_width() / width).min(1.);
+        Some(self.drawing(index, width * fit, height * fit, &object.name))
     }
 
     /// 확장 그림의 기본 크기(pt): 캔버스 × `scale:`.
@@ -1367,6 +1396,29 @@ mod tests {
         let image = image::load_from_memory(&png).unwrap();
         // 캔버스 × scale 2 × 해상도 3.
         assert_eq!((image.width(), image.height()), (240, 120));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn inline_drawings_are_drawings_in_the_paragraph() {
+        let root = std::env::temp_dir().join(format!("docx-inline-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("Extensions")).unwrap();
+        std::fs::write(
+            root.join("Extensions/dot.lua"),
+            "return { size = { 40, 20 }, draw = function(g) g.circle('fill', 10, 10, 5) end }",
+        )
+        .unwrap();
+        let mut project = project("앞 {{dot}} 뒤\n");
+        project.root = root.clone();
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        build(&project, &DocxOptions::default(), &mut bytes).unwrap();
+        let document = read(&bytes.into_inner(), "word/document.xml");
+        let paragraph = document
+            .split("<w:p>")
+            .find(|p| p.contains("앞"))
+            .unwrap_or_default();
+        assert!(paragraph.contains("<wp:inline"), "{document}");
+        assert!(paragraph.contains("뒤"), "{document}");
         std::fs::remove_dir_all(root).ok();
     }
 

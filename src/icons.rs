@@ -169,6 +169,19 @@ pub fn ai_settings() -> IconName {
     IconName::Sparkles
 }
 
+/// 검토 점수의 별: 가득, 반, 빈 별.
+pub fn star_full() -> IconName {
+    IconName::StarFill
+}
+
+pub fn star_half() -> IconName {
+    IconName::StarHalf
+}
+
+pub fn star_empty() -> IconName {
+    IconName::Star
+}
+
 /// 어시스턴트 대화 기록.
 pub fn history() -> IconName {
     IconName::Clock

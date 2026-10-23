@@ -8,6 +8,7 @@
 //! 고칠 때는 블록 원문을 직접 고칠 수도 있다.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::input::{
     EditorState, Input, InputEvent, InputState, Textarea, TextareaState,
@@ -22,7 +23,7 @@ use super::editor_extension::{
 };
 use super::style::Palette;
 use crate::extension::{self, Host, Meta};
-use crate::{EditExtensionBlock, InsertExtension};
+use crate::InsertExtension;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -72,7 +73,7 @@ struct ExtensionPicker {
     edit: Option<EditBlock>,
     /// 원문을 직접 고치는 중이면 그 입력창. 미리보기와 저장이 이 글을 쓴다.
     source: Option<Entity<TextareaState>>,
-    /// 블록 자리(`align:`)와 내보내기(`export:`). `None`은 적지 않는다(가운데, 확장을 따름).
+    /// 블록 자리(`align:`)와 내보내기(`export:`). `None`은 적지 않는다(가운데, 확장의 기본값).
     align: Option<extension::Align>,
     export: Option<bool>,
     _subscriptions: Vec<Subscription>,
@@ -290,6 +291,17 @@ impl ExtensionPicker {
         })
     }
 
+    /// 고른 확장이 내보내기에 넣는 것이 기본인지. 확장을 읽지 못하면 넣는다(그리지 못하면 코드 블록이다).
+    fn export_default(&self) -> bool {
+        self.selected().is_none_or(|meta| {
+            self.host
+                .get(&meta.name)
+                .as_ref()
+                .as_ref()
+                .map_or(true, |worker| worker.info.export)
+        })
+    }
+
     fn is_inline(&self) -> bool {
         self.edit.as_ref().is_some_and(|edit| edit.inline)
     }
@@ -478,37 +490,46 @@ impl ExtensionPicker {
                 cx.notify();
             }))
         });
-        let exports = [
-            (None, t!("extensions.export_default")),
-            (Some(true), t!("extensions.export_on")),
-            (Some(false), t!("extensions.export_off")),
-        ]
-        .map(|(value, label)| {
-            chip(
-                format!("extension-export-{value:?}").into(),
-                label,
-                self.export == value,
-            )
-            .on_click(cx.listener(move |picker, _, _, cx| {
-                picker.export = value;
+        // 내보내기는 이 블록의 실제 결과로 보이고, 확장의 기본값과 다를 때만 블록에 적는다.
+        let default = self.export_default();
+        let export = Checkbox::new("extension-export")
+            .label(t!("extensions.export").to_string())
+            .checked(self.export.unwrap_or(default))
+            .on_click(cx.listener(move |picker, checked: &bool, _, cx| {
+                picker.export = (*checked != default).then_some(*checked);
                 cx.notify();
-            }))
-        });
+            }));
+        let hint = if default {
+            t!("extensions.export_hint")
+        } else {
+            t!("extensions.export_hint_off")
+        };
         let inline = self.is_inline();
         div()
             .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_1()
+            .flex_col()
+            .gap_2()
             .text_xs()
             .text_color(pal.muted)
             .when(!inline, |this| {
-                this.child(div().w(px(72.)).child(t!("extensions.align")))
-                    .children(aligns)
-                    .child(div().w(px(16.)))
+                this.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1()
+                        .child(div().w(px(72.)).child(t!("extensions.align")))
+                        .children(aligns),
+                )
             })
-            .child(div().pr_1().child(t!("extensions.export")))
-            .children(exports)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(export)
+                    .child(hint),
+            )
     }
 }
 
@@ -764,24 +785,6 @@ impl WriterApp {
         let target = editor.state().clone();
         let picker = cx.new(|cx| ExtensionPicker::new(&root, window, cx));
         self.open_extension_dialog(picker, target, window, cx);
-    }
-
-    /// 커서가 있는 확장 블록을 편집 대화상자로 연다.
-    pub(super) fn on_edit_extension_block(
-        &mut self,
-        _: &EditExtensionBlock,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(editor) = &self.editor else {
-            self.notify(t!("common.open_sheet_first"), window, cx);
-            return;
-        };
-        let state = editor.state().read(cx);
-        let text = state.value();
-        let cursor = state.cursor().min(text.len());
-        let row = text[..cursor].matches('\n').count();
-        self.edit_extension_block(row, window, cx);
     }
 
     /// 줄 `row`가 속한 확장 블록을 편집 대화상자로 연다. 블록이 아니면 알린다.

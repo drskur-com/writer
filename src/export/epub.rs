@@ -18,7 +18,7 @@ use zip::write::SimpleFileOptions;
 
 use super::{ExportError, ExportProject, load_project};
 use crate::library::{Align, HeadingNumbers, Placement, ResolvedStyle, StyleTarget, VerticalAlign};
-use crate::markdown::{Block, ColumnAlign, Inline, Marks, Rich};
+use crate::markdown::{Block, ColumnAlign, Inline, InlineObject, Marks, Rich};
 
 /// XML 특수문자를 이스케이프한다.
 fn escape_xml(s: &str) -> String {
@@ -109,6 +109,8 @@ struct Notes {
     sheet: usize,
     /// 본문에서 이미 나온 각주 번호. 처음 나온 참조에만 돌아올 자리(id)를 단다.
     referenced: HashSet<usize>,
+    /// 문단 안 확장 그림(ADR-0036)의 `<img>`. 글자 조각을 XHTML로 바꿀 때 그 자리에 넣는다(모든 시트에 같다).
+    drawings: HashMap<InlineObject, String>,
 }
 
 impl Notes {
@@ -237,6 +239,31 @@ impl<'a> EpubBuilder<'a> {
         });
         self.image_dest_map.insert(key, filename.clone());
         Ok(Some(format!("../{filename}")))
+    }
+
+    /// 문단 안 확장 그림을 SVG로 넣고 그 `<img>`를 [`Notes::drawings`]에 둔다. 높이는 본문 행 높이 × 인라인
+    /// `scale=`이다(에디터와 같다). 그리지 못한 그림은 넣지 않는다(그 자리는 비운다).
+    fn embed_inline_drawings(&mut self, blocks: &[Block]) {
+        let mut objects: Vec<InlineObject> = Vec::new();
+        crate::markdown::for_each_rich(blocks, &mut |rich| {
+            objects.extend(rich.iter().filter_map(|inline| inline.object.clone()));
+        });
+        let line_height = self.project.styles.resolve(StyleTarget::Body).line_height;
+        for object in objects {
+            if self.notes.drawings.contains_key(&object) {
+                continue;
+            }
+            let Ok(Some(src)) = self.embed_drawing(&object.name, &object.args) else {
+                continue;
+            };
+            let height = line_height * f64::from(crate::extension::scale_of(&object.args));
+            let img = format!(
+                "<img class=\"inline-extension\" src=\"{}\" alt=\"{}\" style=\"height: {height:.3}em\"/>",
+                escape_xml(&src),
+                escape_xml(&object.name)
+            );
+            self.notes.drawings.insert(object, img);
+        }
     }
 
     /// 제목 블록을 스타일 설정에 맞춰 렌더링한다.
@@ -740,6 +767,7 @@ pub fn build<W: Write + Seek>(project: &ExportProject, writer: &mut W) -> Result
             builder.finish_section();
         }
         builder.notes.next_sheet();
+        builder.embed_inline_drawings(&blocks);
 
         for block in &blocks {
             builder.render_block(block, sheet_dir);
@@ -914,6 +942,12 @@ fn render_rich(rich: &[Inline], notes: &mut Notes) -> String {
             out.push_str(&notes.reference(number));
             continue;
         }
+        if let Some(object) = &inline.object {
+            if let Some(img) = notes.drawings.get(object) {
+                out.push_str(img);
+            }
+            continue;
+        }
         let escaped = escape_xml(&inline.text).replace('\n', "<br/>\n");
         let marks = inline.marks;
         if marks == Marks::default() {
@@ -1025,6 +1059,12 @@ p {{
 /* 줄 묶음(ADR-0016): 첫 줄 들여쓰기 없음 */
 p.lines {{
   text-indent: 0;
+}}
+
+/* 문단 안 확장 그림(ADR-0036): 높이는 행 높이 × scale(요소의 style), 글자 아래에 맞춘다 */
+img.inline-extension {{
+  width: auto;
+  vertical-align: text-bottom;
 }}
 
 .blank-line {{
@@ -1815,6 +1855,19 @@ mod image_tests {
             opf.contains(r#"href="images/ext_0001.svg" media-type="image/svg+xml""#),
             "{opf}"
         );
+    }
+
+    #[test]
+    fn inline_drawings_become_images_in_the_paragraph() {
+        let mut archive = build_with("앞 {{dot r=3}} 뒤 {{dot r=3 scale=2}}\n");
+        let html = section(&mut archive);
+        // 같은 그림(scale만 다름)은 파일 하나를 쓰고, 높이는 행 높이 × scale이다.
+        assert!(
+            html.contains(r#"<p>앞 <img class="inline-extension" src="../images/ext_0001.svg" alt="dot" style="height: 1.600em"/> 뒤 "#),
+            "{html}"
+        );
+        assert!(html.contains(r#"style="height: 3.200em"/>"#), "{html}");
+        assert!(archive.by_name("OEBPS/images/ext_0001.svg").is_ok());
     }
 
     #[test]

@@ -31,6 +31,8 @@ pub struct Info {
     pub values: bool,
     /// 창에서 실행한다(`play`).
     pub plays: bool,
+    /// 책 미리보기·내보내기에 넣는 것이 기본인지(반환 표의 `export`).
+    pub export: bool,
     pub commands: Vec<String>,
 }
 

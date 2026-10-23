@@ -1194,6 +1194,7 @@ impl WriterApp {
                     .text_color(pal.muted)
                     .child(SharedString::from(summary.clone()))
                     .into_any_element(),
+                agent::Activity::Review { file, score } => review_line(file, *score, pal),
                 agent::Activity::Change(card) => {
                     let scroll = self
                         .assistant_chat
@@ -1209,6 +1210,43 @@ impl WriterApp {
             .collect();
         assistant_reply(id, false, text, activity, pal)
     }
+}
+
+/// 검토 줄: "검토 · 파일"과 점수(10점을 별 다섯 개로, 반 별까지). 통과 점수부터 성공 색, 그 아래는 옅은 색,
+/// 3점 이하는 위험 색이다. 숫자는 별 뒤에 작게 둔다.
+fn review_line(file: &str, score: Option<u8>, pal: Palette) -> AnyElement {
+    let line = div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_xs()
+        .text_color(pal.muted)
+        .child(
+            div()
+                .truncate()
+                .child(format!("{} · {file}", t!("assistant.tool.reviewed"))),
+        );
+    let Some(score) = score else {
+        return line.into_any_element();
+    };
+    let color = if score >= crate::agent::PASS_SCORE {
+        pal.success
+    } else if score <= 3 {
+        pal.danger
+    } else {
+        pal.muted
+    };
+    let stars = (0..5u8).map(|ix| {
+        let icon = match score.saturating_sub(ix * 2) {
+            0 => icons::star_empty(),
+            1 => icons::star_half(),
+            _ => icons::star_full(),
+        };
+        Icon::new(icon).xsmall().text_color(color)
+    });
+    line.child(div().flex().flex_none().children(stars))
+        .child(div().flex_none().child(format!("{score}/10")))
+        .into_any_element()
 }
 
 /// 승인 카드: 바꿀 파일, 변경 내용(diff), 그리고 기다리는 중이면 [취소] [적용] 버튼.

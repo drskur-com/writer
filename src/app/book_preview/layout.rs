@@ -242,9 +242,28 @@ struct Context {
     scale: f32,
 }
 
-/// 줄 하나: (조각 시작 x, 원문 범위)들.
+/// 줄 하나: (조각 시작 x, 원문 범위)들과 줄 안 확장 그림(시작 x, [`InlineBox`] 번호), 행 높이.
+#[derive(Default)]
 struct Line {
     fragments: Vec<(Pixels, Range<usize>)>,
+    objects: Vec<(Pixels, usize)>,
+    /// 글자 행 높이, 그보다 큰 그림이 있으면 그 높이.
+    height: Pixels,
+}
+
+/// 원문에서 줄 안 확장 그림의 자리를 맡는 글자. 배치에서만 쓰고 그리지 않는다.
+const OBJECT: char = '\u{FFFC}';
+
+/// 줄 안에 놓을 확장 그림(ADR-0036): 원문의 [`OBJECT`] 자리와 크기.
+struct InlineBox {
+    at: usize,
+    size: Size<Pixels>,
+    still: crate::extension::Still,
+}
+
+/// 줄들의 높이 합.
+fn lines_height(lines: &[Line]) -> Pixels {
+    lines.iter().map(|line| line.height).sum()
 }
 
 /// 본문 배치 결과(쪽 번호·차례는 바깥에서 붙인다).
@@ -357,12 +376,58 @@ impl<'a> Flow<'a> {
         self.style(StyleTarget::Body)
     }
 
-    /// 글자 조각들을 원문 + TextRun으로.
+    /// 글자 조각들을 원문 + TextRun으로. 확장 그림 조각은 뺀다.
     fn runs(&self, rich: &[Inline], style: &TextStyle) -> (String, Vec<TextRun>) {
+        let (text, runs, _) = self.laid(rich, style, false);
+        (text, runs)
+    }
+
+    /// 글자 조각들을 원문 + TextRun으로, `objects`면 확장 그림 조각(그린 것만)을 [`OBJECT`] 자리와 함께.
+    /// 그림 높이는 행 높이 × 인라인 `scale=`이다(에디터와 같다).
+    fn laid(
+        &self,
+        rich: &[Inline],
+        style: &TextStyle,
+        objects: bool,
+    ) -> (String, Vec<TextRun>, Vec<InlineBox>) {
         let mut text = String::new();
         let mut runs = Vec::new();
+        let mut boxes = Vec::new();
         for inline in rich {
-            if inline.text.is_empty() {
+            let still = inline
+                .object
+                .as_ref()
+                .filter(|_| objects)
+                .and_then(|object| {
+                    self.drawings?
+                        .get(&(object.name.clone(), object.args.clone()))?
+                        .as_ref()
+                        .ok()?
+                        .as_ref()
+                        .filter(|still| still.canvas.0 > 0. && still.canvas.1 > 0.)
+                        .map(|still| (still, crate::extension::scale_of(&object.args)))
+                });
+            if let Some((still, scale)) = still {
+                let height = style.line_height * scale;
+                boxes.push(InlineBox {
+                    at: text.len(),
+                    size: size(height * (still.canvas.0 / still.canvas.1), height),
+                    still: still.clone(),
+                });
+                text.push(OBJECT);
+                runs.push(TextRun {
+                    len: OBJECT.len_utf8(),
+                    font: font(style.family.clone()),
+                    color: style.color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                });
+                continue;
+            }
+            // 원문에 든 자리 글자는 지운다(그림 자리와 헷갈리지 않게).
+            let content = inline.text.replace(OBJECT, "");
+            if content.is_empty() {
                 continue;
             }
             let marks = inline.marks;
@@ -386,9 +451,9 @@ impl<'a> Flow<'a> {
                 },
                 ..font(family)
             };
-            text.push_str(&inline.text);
+            text.push_str(&content);
             runs.push(TextRun {
-                len: inline.text.len(),
+                len: content.len(),
                 font,
                 color: style.color,
                 background_color: None,
@@ -399,7 +464,7 @@ impl<'a> Flow<'a> {
                 }),
             });
         }
-        (text, runs)
+        (text, runs, boxes)
     }
 
     // --- 페이지 ---------------------------------------------------------------
@@ -461,6 +526,25 @@ impl<'a> Flow<'a> {
         width: Pixels,
         indent: Pixels,
     ) -> Vec<Line> {
+        self.break_lines_with(text, runs, &mut [], style, width, indent)
+    }
+
+    /// [`Self::break_lines`]에 줄 안 확장 그림(`boxes`, 원문의 [`OBJECT`] 자리)을 더한다. 그림은 쪼개지 않는
+    /// 한 덩어리이고 폭보다 크면 줄인다. 그림이 든 줄은 그 높이만큼 행이 커진다.
+    fn break_lines_with(
+        &self,
+        text: &str,
+        runs: &[TextRun],
+        boxes: &mut [InlineBox],
+        style: &TextStyle,
+        width: Pixels,
+        indent: Pixels,
+    ) -> Vec<Line> {
+        for object in boxes.iter_mut() {
+            if object.size.width > width {
+                object.size = fit(object.size, size(width, object.size.height));
+            }
+        }
         let mut lines = Vec::new();
         let mut start = 0;
         for segment in text.split('\n') {
@@ -468,7 +552,8 @@ impl<'a> Flow<'a> {
             start = range.end + 1;
             if segment.is_empty() {
                 lines.push(Line {
-                    fragments: Vec::new(),
+                    height: style.line_height,
+                    ..Line::default()
                 });
                 continue;
             }
@@ -476,22 +561,28 @@ impl<'a> Flow<'a> {
             let layout = self
                 .text_system
                 .layout_line(segment, style.size, &segment_runs, None);
+            // 이 조각의 그림: (조각 안 자리, 그림 번호, 크기).
+            let own: Vec<(usize, usize, Size<Pixels>)> = boxes
+                .iter()
+                .enumerate()
+                .filter(|(_, object)| range.contains(&object.at))
+                .map(|(ix, object)| (object.at - range.start, ix, object.size))
+                .collect();
+            let x = with_objects(|ix| layout.x_for_index(ix), &own);
             let first = lines.is_empty();
             let broken = break_segment(
                 segment,
-                |ix| layout.x_for_index(ix),
+                &x,
                 width,
                 if first { indent } else { px(0.) },
                 style.align,
             );
             lines.extend(broken.into_iter().map(|line| {
-                Line {
-                    fragments: line
-                        .fragments
-                        .into_iter()
-                        .map(|(x, r)| (x, r.start + range.start..r.end + range.start))
-                        .collect(),
+                let mut line = split_at_objects(line, &own, &x, style.line_height);
+                for (_, r) in &mut line.fragments {
+                    *r = r.start + range.start..r.end + range.start;
                 }
+                line
             }));
         }
         lines
@@ -507,17 +598,47 @@ impl<'a> Flow<'a> {
         left: Pixels,
         top: Pixels,
     ) {
-        for (ix, line) in lines.iter().enumerate() {
-            let y = top + style.line_height * ix as f32;
+        self.place_lines_with(lines, text, runs, &[], style, left, top);
+    }
+
+    /// [`Self::place_lines`]에 줄 안 확장 그림을 더한다. 행이 그림 때문에 크면 글자와 그림은 행 아래에 맞춘다.
+    #[allow(clippy::too_many_arguments)]
+    fn place_lines_with(
+        &mut self,
+        lines: &[Line],
+        text: &str,
+        runs: &[TextRun],
+        boxes: &[InlineBox],
+        style: &TextStyle,
+        left: Pixels,
+        top: Pixels,
+    ) {
+        let mut y = top;
+        for line in lines {
+            let text_top = y + line.height - style.line_height;
             for (x, range) in &line.fragments {
                 self.page.items.push(Item::Text {
-                    origin: point(left + *x, y),
+                    origin: point(left + *x, text_top),
                     line_height: style.line_height,
                     font_size: style.size,
                     text: text[range.clone()].to_string().into(),
                     runs: slice_runs(runs, range.clone()),
                 });
             }
+            for &(x, ix) in &line.objects {
+                let object = &boxes[ix];
+                self.page.items.push(Item::Drawing {
+                    bounds: Bounds::new(
+                        point(left + x, y + line.height - object.size.height),
+                        object.size,
+                    ),
+                    drawing: PageDrawing {
+                        still: object.still.clone(),
+                        cache: Default::default(),
+                    },
+                });
+            }
+            y += line.height;
         }
     }
 
@@ -533,7 +654,7 @@ impl<'a> Flow<'a> {
         let (text, runs) = self.runs(rich, style);
         let lines = self.break_lines(&text, &runs, style, width, px(0.));
         self.place_lines(&lines, &text, &runs, style, left, top);
-        style.line_height * lines.len() as f32
+        lines_height(&lines)
     }
 
     // --- 블록 ---------------------------------------------------------------
@@ -639,8 +760,9 @@ impl<'a> Flow<'a> {
         ctx: &Context,
         marker: Option<(&str, Pixels)>,
     ) {
-        let (text, runs) = self.runs(rich, style);
-        let lines = self.break_lines(&text, &runs, style, ctx.width, style.indent);
+        let (text, runs, mut boxes) = self.laid(rich, style, true);
+        let lines =
+            self.break_lines_with(&text, &runs, &mut boxes, style, ctx.width, style.indent);
         self.space(style.before);
         // 한 줄씩 놓아 페이지 끝에서 문단이 나뉘게 한다. 첫 줄만 페이지 끝에 남거나(외톨이 줄)
         // 마지막 줄만 다음 페이지로 넘어가지(과부 줄) 않게 그다음 줄과 함께 둔다.
@@ -653,11 +775,12 @@ impl<'a> Flow<'a> {
                 (ix, last) if last > 2 && ix + 1 == last => style.line_height,
                 _ => px(0.),
             };
-            let top = self.reserve(style.line_height, keep);
-            self.place_lines(
+            let top = self.reserve(line.height, keep);
+            self.place_lines_with(
                 std::slice::from_ref(line),
                 &text,
                 &runs,
+                &boxes,
                 style,
                 ctx.left,
                 top,
@@ -724,12 +847,13 @@ impl<'a> Flow<'a> {
                 after: self.em(0.25),
                 ..self.body_style()
             };
-            let (string, runs) = self.runs(text, &style);
-            let lines = self.break_lines(&string, &runs, &style, ctx.width, px(0.));
+            let (string, runs, mut boxes) = self.laid(text, &style, true);
+            let lines =
+                self.break_lines_with(&string, &runs, &mut boxes, &style, ctx.width, px(0.));
             self.space(style.before);
-            let height = style.line_height * lines.len() as f32;
+            let height = lines_height(&lines);
             let top = self.reserve(height, self.body_style().line_height);
-            self.place_lines(&lines, &string, &runs, &style, ctx.left, top);
+            self.place_lines_with(&lines, &string, &runs, &boxes, &style, ctx.left, top);
             self.space(style.after);
             return;
         };
@@ -776,9 +900,10 @@ impl<'a> Flow<'a> {
             });
         }
 
-        let (string, runs) = self.runs(&title, &style);
-        let lines = self.break_lines(&string, &runs, &style, ctx.width, style.indent);
-        let height = style.line_height * lines.len() as f32;
+        let (string, runs, mut boxes) = self.laid(&title, &style, true);
+        let lines =
+            self.break_lines_with(&string, &runs, &mut boxes, &style, ctx.width, style.indent);
+        let height = lines_height(&lines);
         match resolved.placement {
             Placement::Hidden => {}
             Placement::Page => {
@@ -789,7 +914,7 @@ impl<'a> Flow<'a> {
                     VerticalAlign::Bottom => free,
                 };
                 let top = self.setup.margin.top + offset;
-                self.place_lines(&lines, &string, &runs, &style, ctx.left, top);
+                self.place_lines_with(&lines, &string, &runs, &boxes, &style, ctx.left, top);
                 self.no_folio.push(page);
                 self.y = self.content_height();
                 self.page_break();
@@ -797,7 +922,7 @@ impl<'a> Flow<'a> {
             Placement::Inline => {
                 self.space(style.before);
                 let top = self.reserve(height, self.body_style().line_height);
-                self.place_lines(&lines, &string, &runs, &style, ctx.left, top);
+                self.place_lines_with(&lines, &string, &runs, &boxes, &style, ctx.left, top);
                 self.space(style.after);
             }
         }
@@ -1393,12 +1518,13 @@ fn tokens(text: &str) -> Vec<Token> {
         }
         let start = ix;
         let mut end = ix;
-        if is_cjk(c) {
+        // 한중일 글자와 확장 그림 자리는 저마다 한 덩어리다(앞뒤에서 나눌 수 있다).
+        if is_cjk(c) || c == OBJECT {
             chars.next();
             end += c.len_utf8();
         } else {
             while let Some(&(ix, c)) = chars.peek() {
-                if is_break_space(c) || is_cjk(c) {
+                if is_break_space(c) || is_cjk(c) || c == OBJECT {
                     break;
                 }
                 chars.next();
@@ -1547,6 +1673,54 @@ fn break_segment(
     lines
 }
 
+/// 글자 위치 `x`에서 그림 자리 글자([`OBJECT`])의 폭을 그림 폭으로 바꾼 위치. `objects`는 (자리, 그림 번호,
+/// 크기)이고 자리 순서다.
+fn with_objects<'a>(
+    x: impl Fn(usize) -> Pixels + 'a,
+    objects: &'a [(usize, usize, Size<Pixels>)],
+) -> impl Fn(usize) -> Pixels + 'a {
+    move |ix| {
+        let mut at = x(ix);
+        for &(object, _, size) in objects.iter().take_while(|(object, ..)| *object < ix) {
+            at += size.width - (x(object + OBJECT.len_utf8()) - x(object));
+        }
+        at
+    }
+}
+
+/// 줄 조각들을 그림 자리에서 나누고 그림(시작 x, 그림 번호)을 따로 둔다. 행 높이는 `line_height`와 그 줄
+/// 그림 높이 중 큰 것이다. `x`는 [`with_objects`]의 위치다.
+fn split_at_objects(
+    line: Line,
+    objects: &[(usize, usize, Size<Pixels>)],
+    x: &impl Fn(usize) -> Pixels,
+    line_height: Pixels,
+) -> Line {
+    let mut placed = Line {
+        height: line_height,
+        ..Line::default()
+    };
+    for (left, r) in line.fragments {
+        let mut from = r.start;
+        for &(object, ix, size) in objects.iter().filter(|(at, ..)| r.contains(at)) {
+            if from < object {
+                placed
+                    .fragments
+                    .push((left + x(from) - x(r.start), from..object));
+            }
+            placed.objects.push((left + x(object) - x(r.start), ix));
+            placed.height = placed.height.max(size.height);
+            from = object + OBJECT.len_utf8();
+        }
+        if from < r.end {
+            placed
+                .fragments
+                .push((left + x(from) - x(r.start), from..r.end));
+        }
+    }
+    placed
+}
+
 /// 덩어리들을 한 줄로 놓는다.
 fn align_line(
     tokens: &[Token],
@@ -1562,6 +1736,7 @@ fn align_line(
     let slack = (available - used).max(px(0.));
     let whole = |offset: Pixels| Line {
         fragments: vec![(indent + offset, start..end)],
+        ..Line::default()
     };
     match align {
         Align::Left => whole(px(0.)),
@@ -1592,7 +1767,10 @@ fn align_line(
                     shift += extra;
                 }
             }
-            Line { fragments }
+            Line {
+                fragments,
+                ..Line::default()
+            }
         }
     }
 }
@@ -1600,8 +1778,11 @@ fn align_line(
 #[cfg(test)]
 mod tests {
     // `gpui::*`의 `test` 매크로와 겹치지 않도록 하나씩 가져온다.
-    use super::{Align, INK, break_segment, column_widths, slice_runs};
-    use gpui_kit::gpui::{TextRun, font, px};
+    use super::{
+        Align, INK, OBJECT, break_segment, column_widths, slice_runs, split_at_objects,
+        with_objects,
+    };
+    use gpui_kit::gpui::{TextRun, font, px, size};
 
     /// 글자마다 폭 10인 가짜 측정.
     fn breaks(text: &str, width: f32, indent: f32, align: Align) -> Vec<Vec<(f32, String)>> {
@@ -1620,6 +1801,58 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// 글자마다 폭 10, 그림 하나(폭 40, 높이 30)를 둔 줄들: (조각들, 그림 x들, 행 높이).
+    fn object_breaks(text: &str, width: f32) -> Vec<(Vec<(f32, String)>, Vec<f32>, f32)> {
+        let positions: Vec<usize> = text
+            .char_indices()
+            .map(|(ix, _)| ix)
+            .chain([text.len()])
+            .collect();
+        let raw = |ix: usize| px(positions.iter().position(|&p| p == ix).unwrap() as f32 * 10.);
+        let objects: Vec<_> = text
+            .match_indices(OBJECT)
+            .enumerate()
+            .map(|(ix, (at, _))| (at, ix, size(px(40.), px(30.))))
+            .collect();
+        let x = with_objects(raw, &objects);
+        break_segment(text, &x, px(width), px(0.), Align::Left)
+            .into_iter()
+            .map(|line| {
+                let line = split_at_objects(line, &objects, &x, px(20.));
+                (
+                    line.fragments
+                        .into_iter()
+                        .map(|(x, range)| (f32::from(x), text[range].to_string()))
+                        .collect(),
+                    line.objects.iter().map(|(x, _)| f32::from(*x)).collect(),
+                    f32::from(line.height),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn inline_objects_take_their_width_and_row_height() {
+        let text = format!("ab {OBJECT} cd");
+        assert_eq!(
+            object_breaks(&text, 200.),
+            vec![(
+                vec![(0., "ab ".to_string()), (70., " cd".to_string())],
+                vec![30.],
+                30.
+            )]
+        );
+        // 그림은 쪼개지 않는 한 덩어리로 다음 줄로 넘어간다. 그림이 없는 줄은 글자 행 높이다.
+        assert_eq!(
+            object_breaks(&text, 50.),
+            vec![
+                (vec![(0., "ab".to_string())], vec![], 20.),
+                (vec![], vec![0.], 30.),
+                (vec![(0., "cd".to_string())], vec![], 20.),
+            ]
+        );
     }
 
     #[test]

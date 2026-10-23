@@ -558,16 +558,11 @@ async fn run(request: &ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Re
                             match critique(&model, prompt, drawing.png.clone()).await {
                                 Ok(review) => {
                                     let score = review::score(&review);
-                                    let summary = match score {
-                                        Some(n) => format!(
-                                            "{} · {shown} · {n}/10",
-                                            t!("assistant.tool.reviewed")
-                                        ),
-                                        None => {
-                                            format!("{} · {shown}", t!("assistant.tool.reviewed"))
-                                        }
+                                    let event = ChatEvent::Review {
+                                        file: shown.clone(),
+                                        score,
                                     };
-                                    if tx.unbounded_send(ChatEvent::Tool(summary)).is_err() {
+                                    if tx.unbounded_send(event).is_err() {
                                         return Ok(());
                                     }
                                     text.push_str(&review::report(&review, score));

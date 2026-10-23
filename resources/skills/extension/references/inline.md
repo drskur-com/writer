@@ -23,7 +23,7 @@ return {
 
 ## Small pictures: `draw` inline
 
-An extension with `draw` (and no `value`) appears inline as its canvas, scaled to the line height (times `scale`): design it for a small square or a wide strip (for example `size = { 20, 20 }` or `{ 60, 16 }`), with shapes that read at text size. Regions and `click` work inline too (`interactive.md`); a click's `args` are written back into the call. Inline pictures are not exported yet: the book preview and exports leave them out.
+An extension with `draw` (and no `value`) appears inline as its canvas, scaled to the line height (times `scale`): design it for a small square or a wide strip (for example `size = { 20, 20 }` or `{ 60, 16 }`), with shapes that read at text size. Regions and `click` work inline too (`interactive.md`); a click's `args` are written back into the call. The book preview and exports (PDF, ePub, DOCX) show the first frame (`t = 0`, light theme) in the line at the same height, so the picture must read without animation or hover.
 
 ## Testing
 

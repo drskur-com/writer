@@ -74,7 +74,7 @@ fn relative(root: &Path, path: &Path) -> String {
         .into_owned()
 }
 
-/// 원고의 확장 블록을 모두 그린다(같은 이름·인자는 한 번).
+/// 원고의 확장 블록과 문단 안 확장 그림을 모두 그린다(같은 이름·인자는 한 번).
 fn drawings(root: &Path, chunks: &[Chunk]) -> Drawings {
     fn walk(root: &Path, blocks: &[Block], out: &mut Drawings) {
         for block in blocks {
@@ -101,6 +101,13 @@ fn drawings(root: &Path, chunks: &[Chunk]) -> Drawings {
     let mut out = Drawings::new();
     for chunk in chunks {
         walk(root, &chunk.blocks, &mut out);
+        // 문단 안의 확장 그림(ADR-0036).
+        crate::markdown::for_each_rich(&chunk.blocks, &mut |rich| {
+            for object in rich.iter().filter_map(|inline| inline.object.as_ref()) {
+                out.entry((object.name.clone(), object.args.clone()))
+                    .or_insert_with(|| crate::extension::still(root, &object.name, &object.args));
+            }
+        });
     }
     out
 }

@@ -639,7 +639,6 @@ impl Render for WriterApp {
             .on_action(cx.listener(Self::on_insert_footnote))
             .on_action(cx.listener(Self::on_insert_table))
             .on_action(cx.listener(Self::on_insert_extension))
-            .on_action(cx.listener(Self::on_edit_extension_block))
             .on_action(cx.listener(Self::on_insert_special_char))
             .on_action(cx.listener(Self::on_toggle_line_group))
             .on_action(cx.listener(Self::on_open_library))

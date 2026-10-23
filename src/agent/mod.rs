@@ -15,6 +15,7 @@ pub use bedrock::{BedrockModel, ChatRequest, DEFAULT_MODEL, available_models, st
 pub use diff::{DiffLine, LineKind};
 pub use history::{History, Summary, now_millis};
 pub use prompt::{Sheet, system_prompt};
+pub use review::PASS_SCORE;
 pub use tools::Workspace;
 
 use std::collections::HashSet;
@@ -46,6 +47,8 @@ pub struct Turn {
 pub enum Activity {
     /// 도구를 불렀다. 화면에 보일 한 줄.
     Tool(String),
+    /// 확장 그림을 따로 검토했다(ADR-0030): 확장 파일(라이브러리 기준)과 점수(1~10, 없으면 검토자가 매기지 않음).
+    Review { file: String, score: Option<u8> },
     /// 파일을 바꾸려 했다(승인 카드).
     Change(ChangeCard),
     /// 처음 보는 사이트의 웹 페이지를 읽으려 했다(허락 카드).
@@ -110,6 +113,8 @@ pub enum ChatEvent {
     Text(String),
     /// 도구를 불렀다. 화면에 보일 한 줄.
     Tool(String),
+    /// 확장 그림 검토 결과([`Activity::Review`]).
+    Review { file: String, score: Option<u8> },
     /// 파일을 바꾸려 한다. 사용자가 답할 때까지 도구가 기다린다.
     Approve(Approval),
     /// 처음 보는 사이트를 읽으려 한다. 사용자가 답할 때까지 도구가 기다린다.
@@ -243,6 +248,10 @@ impl Conversation {
             }
             ChatEvent::Tool(summary) => {
                 self.push_activity(Activity::Tool(summary));
+                None
+            }
+            ChatEvent::Review { file, score } => {
+                self.push_activity(Activity::Review { file, score });
                 None
             }
             ChatEvent::Approve(Approval { card, reply }) => {

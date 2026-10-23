@@ -27,6 +27,16 @@ pub struct Inline {
     /// 각주 참조면 그 번호. 글자(`text`)는 위 첨자 숫자이고, 다른 조각과 합치지 않는다.
     /// 미리보기·PDF는 글자를 그대로 그리고, ePub·DOCX는 번호로 각주 링크·참조를 만든다.
     pub footnote: Option<usize>,
+    /// 인라인 확장 그림(ADR-0036)이면 그 확장. 글자(`text`)는 비어 있고, 다른 조각과 합치지 않는다.
+    /// 미리보기·PDF는 줄 안에 그림 자리를 두고, ePub·DOCX는 인라인 이미지를 넣는다.
+    pub object: Option<InlineObject>,
+}
+
+/// 문단 안의 확장 그림: 확장 이름과 인자(예약 인자 포함). 그림은 내보내는 쪽이 그린다.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct InlineObject {
+    pub name: String,
+    pub args: Vec<(String, String)>,
 }
 
 /// 문단 하나의 글자.
@@ -38,6 +48,7 @@ pub fn plain(text: impl Into<String>) -> Rich {
         text: text.into(),
         marks: Marks::default(),
         footnote: None,
+        object: None,
     }]
 }
 
@@ -116,6 +127,36 @@ pub enum Block {
     Table(Table),
     /// 시트 끝에 모은 각주(번호, 내용).
     Footnotes(Vec<(usize, Vec<Block>)>),
+}
+
+/// 블록들(안쪽 인용·목록·표·각주 포함)의 글자마다 `f`를 부른다(읽기만).
+pub fn for_each_rich(blocks: &[Block], f: &mut impl FnMut(&Rich)) {
+    for block in blocks {
+        match block {
+            Block::Heading { text, .. } | Block::Paragraph(text) | Block::Lines(text) => f(text),
+            Block::Quote(inner) => for_each_rich(inner, f),
+            Block::List { items, .. } => {
+                for item in items {
+                    for_each_rich(&item.blocks, f);
+                }
+            }
+            Block::Table(table) => {
+                for cell in table.rows.iter().flatten() {
+                    f(cell);
+                }
+            }
+            Block::Footnotes(notes) => {
+                for (_, inner) in notes {
+                    for_each_rich(inner, f);
+                }
+            }
+            Block::BlankLines(_)
+            | Block::Code(_)
+            | Block::Extension { .. }
+            | Block::Image(_)
+            | Block::Rule => {}
+        }
+    }
 }
 
 /// 블록들(안쪽 인용·목록·표·각주 포함)의 글자마다 `f`를 부른다.
@@ -542,13 +583,14 @@ impl Walk<'_> {
                 return;
             }
             match out.last_mut() {
-                Some(last) if last.marks == marks && last.footnote.is_none() => {
+                Some(last) if last.marks == marks && last.footnote.is_none() && last.object.is_none() => {
                     last.text.push_str(text)
                 }
                 _ => out.push(Inline {
                     text: text.to_string(),
                     marks,
                     footnote: None,
+                    object: None,
                 }),
             }
         };
@@ -594,6 +636,7 @@ impl Walk<'_> {
                     text: superscript(number),
                     marks,
                     footnote: Some(number),
+                    object: None,
                 });
             }
             // `<br>`은 강제 줄바꿈이다(제목에 두 줄을 넣을 때 쓴다). 다른 HTML은 버린다.
@@ -658,6 +701,7 @@ mod tests {
             text: text.into(),
             marks,
             footnote: None,
+            object: None,
         }
     }
 
@@ -898,6 +942,7 @@ mod tests {
             text: text.into(),
             marks: Marks::default(),
             footnote: Some(number),
+            object: None,
         };
         assert_eq!(
             blocks[0],

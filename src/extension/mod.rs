@@ -365,29 +365,45 @@ pub fn inline_text(name: &str, args: &[(String, String)]) -> String {
     text
 }
 
-/// 책 미리보기·내보내기의 인라인 확장(ADR-0036): 원고 글자의 `{{…}}`를 그 확장의 글(`value`)로 바꾼다.
-/// 내보내기에서 빼는 것(`export:`·확장의 `export`)과 글이 아닌 그림은 지운다. 확장을 읽지 못하거나 실패하면
-/// 원문 그대로 둔다(무엇이 잘못됐는지 보이게). 코드 글자 안은 건드리지 않는다.
+/// 책 미리보기·내보내기의 인라인 확장(ADR-0036): 원고 글자의 `{{…}}`를 그 확장의 글(`value`)로, 글이 없는
+/// 그림 확장은 그림 조각(`Inline::object`)으로 바꾼다. 내보내기에서 빼는 것(`export:`·확장의 `export`)은 지운다.
+/// 확장을 읽지 못하거나 실패하면 원문 그대로 둔다(무엇이 잘못됐는지 보이게). 코드 글자 안은 건드리지 않는다.
 pub fn resolve_inline(blocks: &mut [crate::markdown::Block], root: &Path, sheet: &str) {
+    use crate::markdown::{Inline, InlineObject};
+    /// 호출 하나가 바뀌는 것.
+    enum Resolved {
+        Text(String),
+        Object(InlineObject),
+    }
     let mut loaded: std::collections::HashMap<String, Option<Extension>> =
         std::collections::HashMap::new();
     crate::markdown::for_each_rich_mut(blocks, &mut |rich| {
-        for inline in rich.iter_mut() {
+        if !rich.iter().any(|inline| inline.text.contains("{{")) {
+            return;
+        }
+        let mut out: Vec<Inline> = Vec::with_capacity(rich.len());
+        for inline in rich.drain(..) {
             if inline.marks.code || inline.footnote.is_some() || !inline.text.contains("{{") {
+                out.push(inline);
                 continue;
             }
             let calls = inline_calls(&inline.text);
             if calls.is_empty() {
+                out.push(inline);
                 continue;
             }
+            let piece = |text: String| Inline {
+                text,
+                ..inline.clone()
+            };
             let mut text = String::with_capacity(inline.text.len());
             let mut at = 0;
             for call in calls {
                 text.push_str(&inline.text[at..call.range.start]);
                 let source = &inline.text[call.range.clone()];
                 let chosen = export_arg(&call.args);
-                let replacement = if chosen == Some(false) {
-                    Some(String::new())
+                let resolved = if chosen == Some(false) {
+                    Some(Resolved::Text(String::new()))
                 } else {
                     let extension = loaded
                         .entry(call.name.clone())
@@ -395,22 +411,44 @@ pub fn resolve_inline(blocks: &mut [crate::markdown::Block], root: &Path, sheet:
                     match extension {
                         None => None,
                         Some(extension) if !chosen.unwrap_or(extension.export) => {
-                            Some(String::new())
+                            Some(Resolved::Text(String::new()))
                         }
                         Some(extension) if extension.values => extension
                             .value(&without_reserved(&call.args), sheet)
                             .ok()
-                            .flatten(),
-                        // 인라인 그림은 아직 내보내지 않는다.
-                        Some(_) => Some(String::new()),
+                            .flatten()
+                            .map(Resolved::Text),
+                        Some(extension) if extension.draws => {
+                            Some(Resolved::Object(InlineObject {
+                                name: call.name.clone(),
+                                args: call.args.clone(),
+                            }))
+                        }
+                        Some(_) => Some(Resolved::Text(String::new())),
                     }
                 };
-                text.push_str(replacement.as_deref().unwrap_or(source));
+                match resolved {
+                    Some(Resolved::Text(value)) => text.push_str(&value),
+                    Some(Resolved::Object(object)) => {
+                        if !text.is_empty() {
+                            out.push(piece(std::mem::take(&mut text)));
+                        }
+                        out.push(Inline {
+                            text: String::new(),
+                            object: Some(object),
+                            ..inline.clone()
+                        });
+                    }
+                    None => text.push_str(source),
+                }
                 at = call.range.end;
             }
             text.push_str(&inline.text[at..]);
-            inline.text = text;
+            if !text.is_empty() {
+                out.push(piece(text));
+            }
         }
+        *rich = out;
     });
 }
 
@@ -878,6 +916,7 @@ impl Extension {
             clicks: self.clicks,
             values: self.values,
             plays: self.plays,
+            export: self.export,
             commands: self.commands.clone(),
         }
     }
@@ -1915,6 +1954,16 @@ return {
         };
         assert_eq!(text(&blocks[0]), "hi 책");
         assert_eq!(text(&blocks[1]), "앞 hi a.md  {{missing}} {{greet}} 끝");
+        // 그림 확장은 그 자리의 그림 조각이 된다.
+        let crate::markdown::Block::Paragraph(rich) = &blocks[1] else {
+            panic!("paragraph");
+        };
+        let objects: Vec<&str> = rich
+            .iter()
+            .filter_map(|inline| inline.object.as_ref())
+            .map(|object| object.name.as_str())
+            .collect();
+        assert_eq!(objects, ["dot"]);
         std::fs::remove_dir_all(&root).ok();
     }
 
