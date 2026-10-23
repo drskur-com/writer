@@ -17,6 +17,7 @@
 mod boolean;
 pub mod canvas;
 pub mod package;
+pub mod sound;
 pub(crate) mod path;
 pub mod raster;
 mod scene;
@@ -60,7 +61,7 @@ const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 /// 이만큼 기다릴 수 있다. 확장의 최상위 코드는 표를 돌려주기만 하면 되므로 넉넉하다.
 const LOAD_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// 반복 주기(`period`)의 최대 길이. 이보다 길면 프레임을 캐시하지 않는다.
+/// 반복 주기(`period`)의 최대 길이.
 const MAX_PERIOD: f32 = 10.0;
 
 /// 한 프레임을 그리는 데 쓸 수 있는 시간.
@@ -711,12 +712,6 @@ pub struct Ui {
     pub pressed: Option<String>,
 }
 
-impl Ui {
-    pub fn is_empty(&self) -> bool {
-        self.hover.is_none() && self.pressed.is_none()
-    }
-}
-
 /// 한 프레임의 그림: 모양과 누를 수 있는 영역.
 pub type Drawing = (Vec<Shape>, Vec<Region>);
 
@@ -849,12 +844,14 @@ pub struct Extension {
     g: Table,
     recorder: Rc<RefCell<canvas::Recorder>>,
     deadline: Rc<Cell<Instant>>,
+    /// `sound`가 재생할 묶음(플레이 창에서만 채운다, ADR-0040).
+    sound: sound::Slot,
     /// 캔버스 크기(논리 단위). 블록 인자로 정하는 확장(`size = function(args)`)이면 `None`이고
     /// [`Self::size_for`]로 묻는다.
     pub size: Option<(f32, f32)>,
     size_fn: Option<Function>,
     pub animated: bool,
-    /// 애니메이션이 되풀이되는 주기(초). 있으면 한 주기의 프레임을 캐시해 다시 그리지 않는다.
+    /// 애니메이션이 되풀이되는 주기(초). 있으면 `t`가 그 주기를 되풀이한다.
     pub period: Option<f32>,
     pub draws: bool,
     /// 영역을 누르면 부르는 `click(id, args)`가 있는지.
@@ -941,6 +938,12 @@ impl Extension {
         Self::load_package(name, &read_source(root, name)?)
     }
 
+    /// 플레이 창에서 `sound`가 소리 묶음 `group`으로 재생하게 한다(ADR-0040).
+    pub fn enable_sound(&self, group: u64) -> Result<(), String> {
+        self.sound.set(Some(group));
+        Ok(())
+    }
+
     /// 앱이 알아야 할 것(작업 스레드에서 UI 스레드로 넘긴다).
     pub fn info(&self) -> Info {
         Info {
@@ -986,6 +989,8 @@ impl Extension {
         lua.sandbox(true).map_err(message)?;
         // sandbox가 그 전 전역 표를 읽기 전용으로 얼리므로(`g.theme`을 그릴 때마다 바꾼다) 그 뒤에 넣는다.
         lua.globals().raw_set("g", g.clone()).map_err(message)?;
+        // 소리는 플레이 창에서만 난다([`Extension::enable_sound`]). 그 밖에서는 부르면 알린다.
+        let sound = sound::install(&lua).map_err(message)?;
         let deadline = Rc::new(Cell::new(Instant::now() + LOAD_TIMEOUT));
         let check = deadline.clone();
         lua.set_interrupt(move |_| {
@@ -1093,6 +1098,7 @@ impl Extension {
         }
         Ok(Self {
             lua,
+            sound,
             module,
             g,
             recorder,
@@ -2289,6 +2295,7 @@ return {
             // 플레이는 몇 초 동안 입력과 함께 돌려 본다.
             if extension.plays {
                 let size = extension.play_size(&meta.example).unwrap();
+                extension.enable_sound(sound::new_group()).unwrap();
                 extension.play_load(&meta.example).unwrap();
                 for (frame, key) in ["left", "right", "space", "", "", "left"]
                     .iter()

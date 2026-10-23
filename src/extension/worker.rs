@@ -307,6 +307,8 @@ struct PlayFrame {
 pub struct PlayWorker {
     /// 캔버스 크기.
     pub size: (f32, f32),
+    /// 이 창의 소리 묶음(ADR-0040). 버리면 멈춘다.
+    sound: u64,
     frames: Sender<PlayFrame>,
     replies: Receiver<Result<Vec<super::Shape>, String>>,
 }
@@ -323,6 +325,7 @@ impl PlayWorker {
         let (reply_tx, reply_rx) = channel::<Result<Vec<super::Shape>, String>>();
         let (ready_tx, ready_rx) = channel::<Result<(f32, f32), String>>();
         let thread_name = name.to_string();
+        let sound = super::sound::new_group();
         std::thread::Builder::new()
             .name(format!("play-{name}"))
             .spawn(move || {
@@ -331,6 +334,7 @@ impl PlayWorker {
                         return Err(format!("{thread_name} has no play table"));
                     }
                     let size = extension.play_size(&args)?;
+                    extension.enable_sound(sound)?;
                     extension.play_load(&args)?;
                     Ok((extension, size))
                 });
@@ -380,9 +384,19 @@ impl PlayWorker {
             .map_err(|_| format!("{name}.lua: took too long to start"))??;
         Ok(Self {
             size,
+            sound,
             frames: frame_tx,
             replies: reply_rx,
         })
+    }
+
+    /// 창이 비활성이면 소리도 멈추고, 돌아오면 잇는다.
+    pub fn set_sound_paused(&self, paused: bool) {
+        super::sound::send(if paused {
+            super::sound::Command::Pause(self.sound)
+        } else {
+            super::sound::Command::Resume(self.sound)
+        });
     }
 
     /// 다음 프레임을 요청한다. 답은 [`Self::take`]로 가져간다.
@@ -393,6 +407,15 @@ impl PlayWorker {
     /// 온 프레임이 있으면 가장 새 것을 가져간다.
     pub fn take(&self) -> Option<Result<Vec<super::Shape>, String>> {
         self.replies.try_iter().last()
+    }
+}
+
+impl Drop for PlayWorker {
+    fn drop(&mut self) {
+        super::sound::send(super::sound::Command::Stop {
+            group: self.sound,
+            id: None,
+        });
     }
 }
 

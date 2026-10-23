@@ -8,7 +8,8 @@
 //! `draw`는 확장의 작업 스레드에서 돈다([`extension::Worker`]). 그릴 때는 요청만 보내고 마지막으로 받은
 //! 결과를 그리므로, 느린 확장은 그 블록만 늦게 바뀌고 편집은 막히지 않는다([`Player`]).
 //! - 애니메이션은 초당 [`FPS`]번만 다시 그리고, 창이 비활성이거나 움직임 줄이기 설정이면 멈춘다.
-//! - `period`가 있는 애니메이션은 한 주기의 프레임을 캐시해, 한 바퀴 돈 뒤에는 Lua를 부르지 않는다.
+//! - `period`가 있는 애니메이션은 `t`가 한 주기를 되풀이한다. 프레임은 보관하지 않고 매번 그린다(`draw`는 프레임당
+//!   0.1ms 안팎이다). 같은 모양의 삼각형은 삼각형 캐시가 다시 쓴다.
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::input::{EditorState, InlineToken, InlineTokenContext};
@@ -69,8 +70,6 @@ struct PlayerState {
     pending: Option<(u64, Ui)>,
     /// 마지막으로 받은 프레임 번호·마우스 상태와 결과.
     shown: Option<((u64, Ui), Drawn)>,
-    /// `period`가 있는 애니메이션의 한 주기 프레임(프레임 번호 → 그림). 마우스 상태가 없는 프레임만 둔다.
-    frames: HashMap<u64, Shown>,
 }
 
 /// 받은 그림: 모양과 누를 수 있는 영역.
@@ -184,11 +183,6 @@ impl Player {
             && let Some(pending) = state.pending.take()
         {
             let result = result.map(|(shapes, regions)| (Rc::new(shapes), Rc::new(regions)));
-            if let (Some(_), Ok(drawn)) = (worker.info.period, &result)
-                && pending.1.is_empty()
-            {
-                state.frames.insert(pending.0, drawn.clone());
-            }
             state.shown = Some((pending, result));
         }
         // 이번에 보일 프레임.
@@ -200,16 +194,11 @@ impl Player {
                 frame %= ((period * FPS).round() as u64).max(1);
             }
         }
+        // 프레임마다 작업 스레드에 다시 그리게 한다(`draw`는 프레임당 0.1ms 안팎이라 보관하지 않는다).
+        // 같은 모양은 삼각형 캐시가 다시 쓴다.
         let ui = self.ui.borrow().clone();
         let key = (frame, ui);
-        let cached = key
-            .1
-            .is_empty()
-            .then(|| state.frames.get(&frame).cloned())
-            .flatten();
-        if let Some(drawn) = cached {
-            state.shown = Some((key, Ok(drawn)));
-        } else if state.pending.is_none()
+        if state.pending.is_none()
             && state.shown.as_ref().is_none_or(|(shown, _)| *shown != key)
         {
             worker.request(

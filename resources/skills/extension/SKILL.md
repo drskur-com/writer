@@ -13,7 +13,7 @@ An extension is one Lua (Luau) file, `Extensions/<name>.lua`, that returns a tab
 | Interactive drawing (hover, buttons, clicking to change the block) | `draw(g, t, args, ui)`, `g.region`, `click(id, args)` | `references/draw.md`, then `references/interactive.md` |
 | Buttons that change other blocks or run app actions (insert text, run a command, open a sheet) | `click` returning `actions` | also `references/actions.md` |
 | Command in the Extensions menu | `commands` | `references/commands.md` |
-| Game or anything with running state, keyboard, or dragging, in its own window | `play = { load, update, draw, keypressed, … }` | `references/draw.md`, then `references/play.md` |
+| Game or anything with running state, keyboard, dragging, or sound, in its own window | `play = { load, update, draw, keypressed, … }` | `references/draw.md`, then `references/play.md` |
 | Inline text or a small picture inside a paragraph (`{{today}}`) | `value(args, ctx)`, or `draw` inline | `references/inline.md` |
 | Large extension split into several files (a game with levels, shared helpers) | `Extensions/<name>/init.lua` and `require` | also `references/modules.md` |
 

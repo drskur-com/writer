@@ -53,9 +53,13 @@ impl PlayView {
             .and_then(|source| PlayWorker::spawn(name, source, args));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        // 창으로 돌아오면 다시 돈다(비활성인 동안은 프레임을 요청하지 않는다).
+        // 창으로 돌아오면 다시 돈다(비활성인 동안은 프레임을 요청하지 않고 소리도 멈춘다).
         let activation = cx.observe_window_activation(window, |this, window, cx| {
-            if window.is_window_active() {
+            let active = window.is_window_active();
+            if let Ok(worker) = &this.worker {
+                worker.set_sound_paused(!active);
+            }
+            if active {
                 this.last = Instant::now();
                 cx.notify();
             }

@@ -1,6 +1,6 @@
 # dodge — a small game (`play`)
 
-Move with ←/→ and dodge the falling blocks; the score counts the seconds survived. Space restarts. The block shows a title card with the app's ▶ button. Block:
+Move with ←/→ and dodge the falling blocks; the score counts the seconds survived. Space restarts. A falling tone plays when you are hit, and a short chime on restart. The block shows a title card with the app's ▶ button. Block:
 
 ````
 ```ext dodge
@@ -49,7 +49,10 @@ return {
     keypressed = function(key)
       if key == "left" then left = true end
       if key == "right" then right = true end
-      if key == "space" and over then reset() end
+      if key == "space" and over then
+        reset()
+        sound.play{ notes = { "C5", "E5", "G5" }, length = 0.06, instrument = "triangle" }
+      end
     end,
     keyreleased = function(key)
       if key == "left" then left = false end
@@ -70,7 +73,10 @@ return {
         box.y = box.y + (90 + score * 6) * speed * dt
         local hitX = math.abs(box.x - x) < (box.size + PLAYER_W) / 2
         local hitY = box.y + box.size / 2 > H - 20 - PLAYER_H and box.y - box.size / 2 < H - 20
-        if hitX and hitY then over = true end
+        if hitX and hitY then
+          over = true
+          sound.play{ notes = { "E4", "C4", "G3" }, length = 0.12, instrument = "square", volume = 0.4 }
+        end
         if box.y > H + 20 then table.remove(boxes, i) end
       end
     end,
