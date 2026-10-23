@@ -59,10 +59,7 @@ impl TodoIndex {
         for key in &removed {
             index.files.remove(key);
         }
-        let changed: Vec<String> = seen
-            .iter()
-            .filter_map(|path| index.reread(path))
-            .collect();
+        let changed: Vec<String> = seen.iter().filter_map(|path| index.reread(path)).collect();
         index.write_cache(&changed, &removed);
         index
     }
@@ -302,7 +299,11 @@ mod tests {
     fn works_without_a_cache() {
         let root = temp_dir("todo-nocache");
         initialize(&root).unwrap();
-        std::fs::write(root.join("Notes").join("Inbox").join("a.md"), "- [ ] 하나\n").unwrap();
+        std::fs::write(
+            root.join("Notes").join("Inbox").join("a.md"),
+            "- [ ] 하나\n",
+        )
+        .unwrap();
         assert_eq!(titles(&TodoIndex::load(&root, None)), ["하나"]);
         std::fs::remove_dir_all(&root).ok();
     }

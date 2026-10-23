@@ -133,7 +133,14 @@ mod tests {
         for url in ["https://a.b", "http://a", "mailto:a@b.c", "obsidian://open"] {
             assert!(has_scheme(url), "{url}");
         }
-        for url in ["../a.md", "a.md", "/Users/a.md", "C:\\a.md", "file:///a.md", "#제목"] {
+        for url in [
+            "../a.md",
+            "a.md",
+            "/Users/a.md",
+            "C:\\a.md",
+            "file:///a.md",
+            "#제목",
+        ] {
             assert!(!has_scheme(url), "{url}");
         }
     }

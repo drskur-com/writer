@@ -58,7 +58,10 @@ const ID_SIGNIFIER: char = '🆔';
 
 /// 원문의 할 일을 나온 순서로 읽는다.
 pub fn todos(text: &str) -> Vec<Todo> {
-    let lines: Vec<&str> = text.split('\n').map(|line| line.trim_end_matches('\r')).collect();
+    let lines: Vec<&str> = text
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r'))
+        .collect();
     let skipped = skipped_lines(&lines);
     let mut out = Vec::new();
     let mut row = 0;
