@@ -11,6 +11,7 @@ An extension is one Lua (Luau) file, `Extensions/<name>.lua`, that returns a tab
 |---|---|---|
 | Drawing in a sheet (picture, chart, animation, 3D) | `draw(g, t, args)` | `references/draw.md` (3D: also `references/draw-3d.md`) |
 | Interactive drawing (hover, buttons, clicking to change the block) | `draw(g, t, args, ui)`, `g.region`, `click(id, args)` | `references/draw.md`, then `references/interactive.md` |
+| Buttons that change other blocks or run app actions (insert text, run a command, open a sheet) | `click` returning `actions` | also `references/actions.md` |
 | Command in the Extensions menu | `commands` | `references/commands.md` |
 
 Read only the references for the kinds you are writing; this file has what they all share. Paths are relative to this skill's folder.
@@ -67,6 +68,7 @@ example:
 | `description` | One line saying what it draws or does. **Write it in the user's language** (it is shown to the user), unlike code and comments. |
 | `args` | Indented `key: description` lines, one per block argument, with its default. Also in the user's language. Leave out for command-only extensions. |
 | `example` | Indented `key: value` lines: the starting values in the Insert dialog, where the user can change them and watch the preview before inserting the block. Pick values that show the drawing well. |
+| `actions` | One line listing the actions `click` may return, for example `actions: set, editor.insert` (`references/actions.md`). |
 
 The header must be the first thing in the file (blank lines before it are fine). Values are single lines.
 
@@ -81,10 +83,11 @@ other: value
 
 - `` ~~~ `` fences and longer fences work too. A fence without its closing line is not a block yet.
 - Each body line `key: value` becomes `args.key`. A value that reads as a number becomes a number, `true`/`false` become booleans, and anything else stays a string (spaces at the ends removed). Lines without `:` are ignored.
-- `scale`, `align`, and `export` are reserved for the app. They work for every extension and are not passed to `draw` or `size`, so never use them as argument names or implement them yourself:
+- `scale`, `align`, `export`, and `id` are reserved for the app. They work for every extension and are not passed to `draw` or `size`, so never use them as argument names or implement them yourself:
   - `scale: 1.5` shows the whole canvas 1.5 times larger (0.1–4; still shrunk to the page width).
   - `align: left`, `center` (default), or `right` places the canvas within the text width, in the editor and in exports.
   - `export: false` leaves the block out of the book preview and PDF, EPUB, and DOCX exports; `export: true` keeps it even if the extension's default is `false`.
+  - `id: chart` names the block so buttons in other blocks can change it (`references/actions.md`).
 - The block is ordinary Markdown: other apps show it as a code block.
 
 ## The sandbox

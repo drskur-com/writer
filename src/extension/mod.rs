@@ -97,8 +97,11 @@ pub const ALIGN_ARG: &str = "align";
 /// 앱이 읽는 블록 인자: 책 미리보기·내보내기(PDF·ePub·DOCX)에 넣을지(`true`·`false`). 없으면 확장의 `export`를 따른다.
 pub const EXPORT_ARG: &str = "export";
 
+/// 앱이 읽는 블록 인자: 블록의 이름. 다른 블록의 `click`이 `set` 동작으로 이 블록의 인자를 바꿀 때 찾는다(ADR-0035).
+pub const ID_ARG: &str = "id";
+
 /// 앱이 읽고 확장에는 넘기지 않는 블록 인자.
-pub const RESERVED_ARGS: &[&str] = &[SCALE_ARG, ALIGN_ARG, EXPORT_ARG];
+pub const RESERVED_ARGS: &[&str] = &[SCALE_ARG, ALIGN_ARG, EXPORT_ARG, ID_ARG];
 
 impl Block {
     /// 블록의 배율(`scale:`). 숫자가 아니면 1이다.
@@ -118,6 +121,11 @@ fn last_arg<'a>(args: &'a [(String, String)], key: &str) -> Option<&'a str> {
         .rev()
         .find(|(name, _)| name == key)
         .map(|(_, value)| value.trim())
+}
+
+/// 블록의 이름(`id:`). 없거나 비었으면 `None`.
+pub fn id_of(args: &[(String, String)]) -> Option<&str> {
+    last_arg(args, ID_ARG).filter(|id| !id.is_empty())
 }
 
 /// 인자의 정렬(`align:`). 없거나 모르는 값이면 가운데다.
@@ -374,6 +382,8 @@ pub struct Meta {
     pub args: Vec<(String, String)>,
     /// 미리보기와 블록 넣기에 쓰는 인자 값.
     pub example: Vec<(String, String)>,
+    /// `click`이 돌려줄 수 있는 동작(`actions: set, command` 한 줄, ADR-0035).
+    pub actions: Vec<String>,
 }
 
 const META_OPEN: &str = "--[[---";
@@ -409,6 +419,14 @@ pub fn parse_meta(name: &str, source: &str) -> Option<Meta> {
         section = None;
         match key {
             "description" => meta.description = value.to_string(),
+            "actions" => {
+                meta.actions = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(ToString::to_string)
+                    .collect();
+            }
             "args" => section = Some(&mut meta.args),
             "example" => section = Some(&mut meta.example),
             _ => {}
@@ -461,6 +479,112 @@ impl Ui {
 /// 한 프레임의 그림: 모양과 누를 수 있는 영역.
 pub type Drawing = (Vec<Shape>, Vec<Region>);
 
+/// `click`이 앱에 맡기는 동작(ADR-0035). 확장은 앱을 직접 만지지 않고, 앱이 받은 동작을 실행한다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// 같은 시트에서 `id:`가 `block`인 블록들의 인자를 바꾼다.
+    Set {
+        block: String,
+        args: Vec<(String, String)>,
+    },
+    /// 다른 확장의 메뉴 명령을 지금 선택 영역에 실행한다.
+    Command {
+        extension: String,
+        command: CommandRef,
+    },
+    /// 커서 자리에 글을 넣는다.
+    Insert(String),
+    /// 선택 영역을 글로 바꾼다(선택이 없으면 커서 자리에 넣는다).
+    ReplaceSelection(String),
+    /// 라이브러리의 시트를 연다(라이브러리 루트 기준 경로).
+    Open(String),
+    /// 앱 메뉴 동작([`MENU_ACTIONS`]).
+    Menu(String),
+}
+
+/// 명령을 가리키는 번호(0부터) 또는 제목.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandRef {
+    Index(usize),
+    Title(String),
+}
+
+/// `menu` 동작으로 부를 수 있는 앱 메뉴.
+pub const MENU_ACTIONS: &[&str] = &["preview", "compile"];
+
+/// 동작 이름(앞머리 `actions:`에 적는 이름).
+pub const ACTION_NAMES: &[&str] = &[
+    "set",
+    "command",
+    "editor.insert",
+    "editor.replaceSelection",
+    "open",
+    "menu",
+];
+
+/// 한 번 누를 때 돌려줄 수 있는 동작 수.
+const MAX_ACTIONS: usize = 16;
+
+impl Action {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Action::Set { .. } => "set",
+            Action::Command { .. } => "command",
+            Action::Insert(_) => "editor.insert",
+            Action::ReplaceSelection(_) => "editor.replaceSelection",
+            Action::Open(_) => "open",
+            Action::Menu(_) => "menu",
+        }
+    }
+
+    /// 원고를 바꾸거나 다른 확장을 부르는 동작. 확장마다 처음 쓸 때 사용자에게 허락받는다. 자기 시트 블록의 인자를
+    /// 바꾸는 `set`은 되돌리기로 돌아오는 블록 안의 일이라 묻지 않는다.
+    pub fn needs_consent(&self) -> bool {
+        matches!(
+            self,
+            Action::Command { .. } | Action::Insert(_) | Action::ReplaceSelection(_)
+        )
+    }
+
+    /// 보고·허락 창에 보일 한 줄(모델이 읽는 영어).
+    pub fn describe(&self) -> String {
+        let pairs = |args: &[(String, String)]| {
+            args.iter()
+                .map(|(key, value)| format!("{key}: {value}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match self {
+            Action::Set { block, args } => format!("set block {block} ({})", pairs(args)),
+            Action::Command {
+                extension,
+                command: CommandRef::Index(ix),
+            } => format!("command {} of {extension}", ix + 1),
+            Action::Command {
+                extension,
+                command: CommandRef::Title(title),
+            } => format!("command \"{title}\" of {extension}"),
+            Action::Insert(text) => format!("editor.insert {text:?}"),
+            Action::ReplaceSelection(text) => format!("editor.replaceSelection {text:?}"),
+            Action::Open(sheet) => format!("open {sheet}"),
+            Action::Menu(menu) => format!("menu {menu}"),
+        }
+    }
+}
+
+/// 누른 결과: 자기 블록의 인자 변경과 앱에 맡기는 동작.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Clicked {
+    pub args: Vec<(String, String)>,
+    pub actions: Vec<Action>,
+}
+
+impl Clicked {
+    pub fn is_empty(&self) -> bool {
+        self.args.is_empty() && self.actions.is_empty()
+    }
+}
+
 /// 명령에 넘기는 정보.
 #[derive(Clone, Debug, Default)]
 pub struct CommandContext {
@@ -491,6 +615,8 @@ pub struct Extension {
     pub clicks: bool,
     /// 책 미리보기·내보내기에 넣는지(반환 표의 `export`, 기본 `true`). 블록의 `export:`가 이긴다.
     pub export: bool,
+    /// 앞머리 `actions:`에 적은 동작. `click`은 이 동작만 돌려줄 수 있다.
+    pub actions: Vec<String>,
     /// 명령 제목(순서대로).
     pub commands: Vec<String>,
 }
@@ -679,6 +805,9 @@ impl Extension {
             draws,
             clicks,
             export,
+            actions: parse_meta(name, source)
+                .map(|meta| meta.actions)
+                .unwrap_or_default(),
             commands,
         })
     }
@@ -737,60 +866,80 @@ impl Extension {
         ))
     }
 
-    /// 영역 `id`를 눌렀다. `click(id, args)`가 돌려준 인자 변경(`key`, 블록에 쓸 값)을 돌려준다.
-    pub fn click(
-        &self,
-        id: &str,
-        args: &[(String, String)],
-    ) -> Result<Vec<(String, String)>, String> {
+    /// 영역 `id`를 눌렀다. `click(id, args)`가 돌려준 것: 인자 표(자기 블록의 인자 변경), 또는
+    /// `{ args = …, actions = { … } }`(동작은 앞머리 `actions:`에 적은 것만).
+    pub fn click(&self, id: &str, args: &[(String, String)]) -> Result<Clicked, String> {
         if !self.clicks {
-            return Ok(Vec::new());
+            return Ok(Clicked::default());
         }
         let click: Function = self.module.get("click").map_err(message)?;
         let call = || -> mlua::Result<Value> {
             self.deadline.set(Instant::now() + DRAW_TIMEOUT);
             click.call((id, self.args_table(args)?))
         };
-        let changes = match call().map_err(message)? {
-            Value::Nil => return Ok(Vec::new()),
-            Value::Table(changes) => changes,
+        let result = match call().map_err(message)? {
+            Value::Nil => return Ok(Clicked::default()),
+            Value::Table(result) => result,
             other => {
                 return Err(format!(
-                    "click must return a table of argument values or nil, got {}",
+                    "click must return a table (argument values, or {{ args = ..., actions = ... }}) or nil, got {}",
                     other.type_name()
                 ));
             }
         };
-        let mut out = Vec::new();
-        for pair in changes.pairs::<Value, Value>() {
-            let (key, value) = pair.map_err(message)?;
-            let Value::String(key) = key else {
-                return Err("click: argument names must be strings".into());
-            };
-            let key = key.to_string_lossy();
-            if key.trim().is_empty() || key.contains([':', '\n']) || key.trim() != key {
-                return Err(format!("click: invalid argument name \"{key}\""));
-            }
-            let value = match value {
-                Value::String(text) => text.to_string_lossy(),
-                Value::Boolean(flag) => flag.to_string(),
-                Value::Integer(n) => n.to_string(),
-                Value::Number(n) if n.fract() == 0.0 && n.abs() < 1e15 => format!("{}", n as i64),
-                Value::Number(n) => n.to_string(),
-                other => {
-                    return Err(format!(
-                        "click: the value of {key} must be a string, number, or boolean, got {}",
-                        other.type_name()
-                    ));
-                }
-            };
-            if value.contains('\n') {
-                return Err(format!("click: the value of {key} must be one line"));
-            }
-            out.push((key, value.trim().to_string()));
+        let field = |key: &str| result.raw_get::<Value>(key).unwrap_or(Value::Nil);
+        let (own, actions) = (field("args"), field("actions"));
+        if own.is_nil() && actions.is_nil() {
+            return Ok(Clicked {
+                args: arg_changes(&result)?,
+                actions: Vec::new(),
+            });
         }
-        out.sort();
-        Ok(out)
+        let args = match own {
+            Value::Nil => Vec::new(),
+            Value::Table(own) => arg_changes(&own)?,
+            other => {
+                return Err(format!(
+                    "click: args must be a table, got {}",
+                    other.type_name()
+                ));
+            }
+        };
+        let actions = match actions {
+            Value::Nil => Vec::new(),
+            Value::Table(list) => {
+                let mut out = Vec::new();
+                for entry in list.sequence_values::<Value>() {
+                    let entry = entry.map_err(message)?;
+                    let Value::Table(entry) = entry else {
+                        return Err("click: each action must be a table like { \"set\", block = ..., args = ... }".into());
+                    };
+                    let action = parse_action(&entry)?;
+                    if !self
+                        .actions
+                        .iter()
+                        .any(|declared| declared == action.name())
+                    {
+                        return Err(format!(
+                            "click: the action \"{}\" is not declared; list it on the header's actions: line",
+                            action.name()
+                        ));
+                    }
+                    out.push(action);
+                }
+                if out.len() > MAX_ACTIONS {
+                    return Err(format!("click: at most {MAX_ACTIONS} actions per click"));
+                }
+                out
+            }
+            other => {
+                return Err(format!(
+                    "click: actions must be a list, got {}",
+                    other.type_name()
+                ));
+            }
+        };
+        Ok(Clicked { args, actions })
     }
 
     /// 블록 인자 `args`일 때의 캔버스 크기.
@@ -848,6 +997,104 @@ impl Extension {
             table.raw_set(key.as_str(), value)?;
         }
         Ok(table)
+    }
+}
+
+/// `click`이 돌려준 인자 표 `{ key = value }`를 블록에 쓸 (키, 값)으로. 값은 한 줄 글이다.
+fn arg_changes(changes: &Table) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for pair in changes.pairs::<Value, Value>() {
+        let (key, value) = pair.map_err(message)?;
+        let Value::String(key) = key else {
+            return Err("click: argument names must be strings".into());
+        };
+        let key = key.to_string_lossy();
+        if key.trim().is_empty() || key.contains([':', '\n']) || key.trim() != key {
+            return Err(format!("click: invalid argument name \"{key}\""));
+        }
+        let value = match value {
+            Value::String(text) => text.to_string_lossy(),
+            Value::Boolean(flag) => flag.to_string(),
+            Value::Integer(n) => n.to_string(),
+            Value::Number(n) if n.fract() == 0.0 && n.abs() < 1e15 => format!("{}", n as i64),
+            Value::Number(n) => n.to_string(),
+            other => {
+                return Err(format!(
+                    "click: the value of {key} must be a string, number, or boolean, got {}",
+                    other.type_name()
+                ));
+            }
+        };
+        if value.contains('\n') {
+            return Err(format!("click: the value of {key} must be one line"));
+        }
+        out.push((key, value.trim().to_string()));
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// 동작 하나(`{ "set", block = …, args = … }` 꼴).
+fn parse_action(entry: &Table) -> Result<Action, String> {
+    let name: String = entry
+        .raw_get::<Option<String>>(1)
+        .ok()
+        .flatten()
+        .ok_or("click: an action needs its name first, like { \"set\", block = \"chart\", args = { ... } }")?;
+    let text = |key: &str| -> Result<String, String> {
+        match entry.raw_get::<Value>(key).unwrap_or(Value::Nil) {
+            Value::String(text) => Ok(text.to_string_lossy()),
+            Value::Integer(n) => Ok(n.to_string()),
+            Value::Number(n) => Ok(n.to_string()),
+            _ => Err(format!("click: the {name} action needs {key} (a string)")),
+        }
+    };
+    match name.as_str() {
+        "set" => {
+            let block = text("block")?;
+            let Value::Table(args) = entry.raw_get::<Value>("args").unwrap_or(Value::Nil) else {
+                return Err("click: the set action needs args (a table)".into());
+            };
+            Ok(Action::Set {
+                block,
+                args: arg_changes(&args)?,
+            })
+        }
+        "command" => {
+            let extension = text("extension")?;
+            if !valid_name(&extension) {
+                return Err(format!("click: invalid extension name \"{extension}\""));
+            }
+            let command = match (
+                entry.raw_get::<Value>("index").unwrap_or(Value::Nil),
+                entry.raw_get::<Value>("title").unwrap_or(Value::Nil),
+            ) {
+                (Value::Integer(n), _) if n >= 1 => CommandRef::Index(n as usize - 1),
+                (Value::Number(n), _) if n >= 1.0 && n.fract() == 0.0 => {
+                    CommandRef::Index(n as usize - 1)
+                }
+                (_, Value::String(title)) => CommandRef::Title(title.to_string_lossy()),
+                _ => return Err("click: the command action needs index (from 1) or title".into()),
+            };
+            Ok(Action::Command { extension, command })
+        }
+        "editor.insert" => Ok(Action::Insert(text("text")?)),
+        "editor.replaceSelection" => Ok(Action::ReplaceSelection(text("text")?)),
+        "open" => Ok(Action::Open(text("sheet")?)),
+        "menu" => {
+            let menu = text("action")?;
+            if !MENU_ACTIONS.contains(&menu.as_str()) {
+                return Err(format!(
+                    "click: unknown menu action \"{menu}\" (available: {})",
+                    MENU_ACTIONS.join(", ")
+                ));
+            }
+            Ok(Action::Menu(menu))
+        }
+        other => Err(format!(
+            "click: unknown action \"{other}\" (available: {})",
+            ACTION_NAMES.join(", ")
+        )),
     }
 }
 
@@ -990,6 +1237,7 @@ mod tests {
                     ("label".into(), "글".into())
                 ],
                 example: vec![("speed".into(), "1.5".into())],
+                actions: Vec::new(),
             })
         );
         // 앞머리가 맨 위에 없거나 닫히지 않으면 없는 것이다.
@@ -1364,6 +1612,73 @@ return {
     }
 
     #[test]
+    fn click_returns_declared_actions() {
+        let source = |actions: &str, body: &str| {
+            format!(
+                "--[[---\ndescription: 버튼\nactions: {actions}\n---]]\n\
+                 return {{ draw = function(g) g.region('b', 0, 0, 10, 10) end, \
+                 click = function(id, args) return {body} end }}"
+            )
+        };
+        let extension = Extension::load(
+            "buttons",
+            &source(
+                "set, editor.insert, command",
+                "{ args = { page = 2 }, actions = { { 'set', block = 'chart', args = { selected = 3 } }, \
+                 { 'editor.insert', text = '안녕' }, { 'command', extension = 'text-tools', index = 2 } } }",
+            ),
+        )
+        .unwrap();
+        let clicked = extension.click("b", &[]).unwrap();
+        assert_eq!(clicked.args, [("page".to_string(), "2".to_string())]);
+        assert_eq!(
+            clicked.actions,
+            [
+                Action::Set {
+                    block: "chart".into(),
+                    args: vec![("selected".into(), "3".into())]
+                },
+                Action::Insert("안녕".into()),
+                Action::Command {
+                    extension: "text-tools".into(),
+                    command: CommandRef::Index(1)
+                },
+            ]
+        );
+        assert!(!clicked.actions[0].needs_consent() && clicked.actions[1].needs_consent());
+        // 앞머리에 없는 동작, 모르는 동작, 잘못된 메뉴는 오류다.
+        let undeclared = Extension::load(
+            "x",
+            &source("set", "{ actions = { { 'open', sheet = 'a.md' } } }"),
+        )
+        .unwrap();
+        assert!(
+            undeclared
+                .click("b", &[])
+                .unwrap_err()
+                .contains("not declared")
+        );
+        let unknown =
+            Extension::load("x", &source("set", "{ actions = { { 'delete' } } }")).unwrap();
+        assert!(
+            unknown
+                .click("b", &[])
+                .unwrap_err()
+                .contains("unknown action")
+        );
+        let menu = Extension::load(
+            "x",
+            &source("menu", "{ actions = { { 'menu', action = 'quit' } } }"),
+        )
+        .unwrap();
+        assert!(
+            menu.click("b", &[])
+                .unwrap_err()
+                .contains("unknown menu action")
+        );
+    }
+
+    #[test]
     fn click_changes_block_args() {
         let body = ["  mode: a", "count: 1", "note: x: y"];
         assert_eq!(
@@ -1419,6 +1734,7 @@ return {
             include_str!("../../resources/skills/extension/references/examples/seedling.md"),
             include_str!("../../resources/skills/extension/references/examples/route.md"),
             include_str!("../../resources/skills/extension/references/examples/pick-chart.md"),
+            include_str!("../../resources/skills/extension/references/examples/chart-remote.md"),
         ]
         .concat();
         let sources: Vec<&str> = doc
@@ -1426,7 +1742,7 @@ return {
             .skip(1)
             .filter_map(|rest| rest.split("\n```").next())
             .collect();
-        assert_eq!(sources.len(), 8);
+        assert_eq!(sources.len(), 9);
         let theme = Theme::default();
         let args = [
             ("values".to_string(), "12, 30, 21, 8".to_string()),
@@ -1454,7 +1770,7 @@ return {
                     .unwrap();
                 assert!(!regions.is_empty());
                 for region in &regions {
-                    let changes = extension.click(&region.id, &meta.example).unwrap();
+                    let changes = extension.click(&region.id, &meta.example).unwrap().args;
                     for (key, _) in &changes {
                         assert!(meta.args.iter().any(|(arg, _)| arg == key), "{key}");
                     }

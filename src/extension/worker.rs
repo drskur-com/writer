@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
-use super::{Drawing, Extension, Theme, Ui};
+use super::{Clicked, Drawing, Extension, Theme, Ui};
 
 /// UI 스레드가 읽기를 기다리는 최대 시간. Lua 쪽 제한([`super::LOAD_TIMEOUT`])보다 조금 길다(스레드를 띄우고
 /// 파일을 해석하는 시간).
@@ -54,8 +54,8 @@ enum Request {
 /// 크기 답(요청 번호, 크기).
 type SizeReply = (u64, Result<(f32, f32), String>);
 
-/// 누른 답(요청 번호, 인자 변경).
-type ClickReply = (u64, Result<Vec<(String, String)>, String>);
+/// 누른 답(요청 번호, 결과).
+type ClickReply = (u64, Result<Clicked, String>);
 
 /// 크기는 블록 인자마다 한 번 묻는다.
 type SizeCache = HashMap<Vec<(String, String)>, Result<(f32, f32), String>>;
@@ -162,14 +162,10 @@ impl Worker {
             .ok();
     }
 
-    /// 영역 `region`을 누른 결과(블록 인자 변경). 작업 스레드의 답을 기다린다(누름은 드물고 짧다).
-    pub fn click(
-        &self,
-        region: &str,
-        args: &[(String, String)],
-    ) -> Result<Vec<(String, String)>, String> {
+    /// 영역 `region`을 누른 결과(블록 인자 변경과 동작). 작업 스레드의 답을 기다린다(누름은 드물고 짧다).
+    pub fn click(&self, region: &str, args: &[(String, String)]) -> Result<Clicked, String> {
         if !self.info.clicks {
-            return Ok(Vec::new());
+            return Ok(Clicked::default());
         }
         let id = self.next_size.replace(self.next_size.get() + 1);
         self.requests
@@ -286,7 +282,9 @@ mod tests {
         worker.request(2, 0.0, &[], Theme::default(), hover);
         assert_ne!(worker.wait(2).unwrap().0, plain);
         assert_eq!(
-            worker.click("b", &[("on".into(), "true".into())]),
+            worker
+                .click("b", &[("on".into(), "true".into())])
+                .map(|clicked| clicked.args),
             Ok(vec![
                 ("n".into(), "1".into()),
                 ("on".into(), "false".into())

@@ -35,6 +35,8 @@ Because the state lives in the block's text, it is saved with the sheet, undo re
 
 Describe arguments that clicks change in the header like any other argument, with their default.
 
+`click` can also return actions for the app: change another block, insert text, run a command, open a sheet (`actions.md`).
+
 ## Testing
 
 - Call `run_extension` once without `hover`/`click`: the report lists the regions it declared with their rectangles. Check that each one covers what it should and is big enough.

@@ -271,8 +271,9 @@ struct EditorBlock {
     player: Rc<Player>,
 }
 
-/// 누르기(`click`)가 돌려준 인자 변경을 쓰는 곳. 에디터 블록은 블록 본문에, 편집 대화상자는 인자 칸에 쓴다.
-pub(super) type OnChanges = Rc<dyn Fn(&[(String, String)], &mut Window, &mut App)>;
+/// 누르기(`click`)가 돌려준 것을 받는 곳. 에디터 블록은 블록 본문에 쓰고 동작을 앱에 맡기고, 편집 대화상자는
+/// 인자 칸에 쓴다(동작은 하지 않는다).
+pub(super) type OnChanges = Rc<dyn Fn(&extension::Clicked, &mut Window, &mut App)>;
 
 /// 열린 시트의 확장 블록 목록. 줄 스타일·줄 블록의 측정·그리기에서 함께 쓴다.
 pub(super) struct ExtensionBlocks {
@@ -428,11 +429,42 @@ impl ExtensionBlocks {
             canvas.into_any_element()
         } else {
             let (editor, rows) = (editor.clone(), block.block.rows.clone());
-            let on_changes: OnChanges = Rc::new(move |changes, window, cx| {
-                let rows = rows.clone();
-                editor
-                    .update(cx, |state, cx| write_args(state, rows, changes, window, cx))
-                    .ok();
+            let (actions_app, name) = (app.clone(), block.block.name.clone());
+            let on_changes: OnChanges = Rc::new(move |clicked, window, cx| {
+                // 자기 블록과 `set`이 가리키는 블록의 인자는 한 번의 편집으로 쓴다(되돌리기 한 번).
+                let sets: Vec<(String, Vec<(String, String)>)> = clicked
+                    .actions
+                    .iter()
+                    .filter_map(|action| match action {
+                        extension::Action::Set { block, args } => {
+                            Some((block.clone(), args.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if !clicked.args.is_empty() || !sets.is_empty() {
+                    let rows = rows.clone();
+                    editor
+                        .update(cx, |state, cx| {
+                            write_block_args(state, rows, &clicked.args, &sets, window, cx);
+                        })
+                        .ok();
+                }
+                let rest: Vec<extension::Action> = clicked
+                    .actions
+                    .iter()
+                    .filter(|action| !matches!(action, extension::Action::Set { .. }))
+                    .cloned()
+                    .collect();
+                if !rest.is_empty() {
+                    let (app, name) = (actions_app.clone(), name.clone());
+                    window.defer(cx, move |window, cx| {
+                        app.update(cx, |app, cx| {
+                            app.run_extension_actions(&name, rest, window, cx);
+                        })
+                        .ok();
+                    });
+                }
             });
             interactive(
                 canvas,
@@ -553,7 +585,7 @@ pub(super) fn interactive(
                 return;
             };
             match worker.click(&region, &args) {
-                Ok(changes) if !changes.is_empty() => on_changes(&changes, window, cx),
+                Ok(clicked) if !clicked.is_empty() => on_changes(&clicked, window, cx),
                 Ok(_) => {}
                 Err(err) => {
                     *player.click_error.borrow_mut() = Some((loaded.clone(), err));
@@ -578,29 +610,76 @@ pub(super) fn block_range(text: &str, rows: &Range<usize>) -> Option<Range<usize
     (start <= end).then_some(start..end)
 }
 
-/// 블록(`rows`, 펜스 포함) 본문에 인자 변경을 쓴다. 되돌리기 한 번으로 돌아가고, 커서는 그대로 둔다.
-fn write_args(
+/// 블록(`rows`, 펜스 포함)의 인자 변경 `own`과, `id:`가 `sets`의 이름인 블록들의 인자 변경을 본문에 쓴다(ADR-0035).
+/// 바뀐 블록들을 덮는 범위 하나를 바꾸는 편집이라 되돌리기 한 번으로 돌아가고, 커서는 그대로 둔다.
+fn write_block_args(
     state: &mut EditorState,
     rows: Range<usize>,
-    changes: &[(String, String)],
+    own: &[(String, String)],
+    sets: &[(String, Vec<(String, String)>)],
     window: &mut Window,
     cx: &mut Context<EditorState>,
 ) {
-    let text = state.value();
-    let starts = line_starts(&text);
-    // 본문: 여는 줄 다음 줄부터 닫는 줄 앞까지.
-    let (Some(&start), Some(&end)) = (starts.get(rows.start + 1), starts.get(rows.end - 1)) else {
+    let text = state.value().to_string();
+    let Some((span, replacement)) = block_args_edit(&text, &rows, own, sets) else {
         return;
     };
-    if start > end {
-        return;
+    state.replace_range_keeping_selections(span, &replacement, window, cx);
+}
+
+/// [`write_block_args`]의 편집: 바꿀 범위와 새 글. 바뀌는 것이 없으면 `None`.
+fn block_args_edit(
+    text: &str,
+    rows: &Range<usize>,
+    own: &[(String, String)],
+    sets: &[(String, Vec<(String, String)>)],
+) -> Option<(Range<usize>, String)> {
+    let starts = line_starts(text);
+    // (본문 범위, 새 본문)을 블록 순서대로.
+    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+    for block in extension::blocks(text) {
+        let mut changes: Vec<(String, String)> = Vec::new();
+        if block.rows == *rows {
+            changes.extend_from_slice(own);
+        }
+        if let Some(id) = extension::id_of(&block.args) {
+            for (target, args) in sets {
+                if target == id {
+                    changes.extend_from_slice(args);
+                }
+            }
+        }
+        if changes.is_empty() {
+            continue;
+        }
+        // 본문: 여는 줄 다음 줄부터 닫는 줄 앞까지.
+        let (Some(&start), Some(&end)) = (
+            starts.get(block.rows.start + 1),
+            starts.get(block.rows.end - 1),
+        ) else {
+            continue;
+        };
+        if start > end {
+            continue;
+        }
+        let body: Vec<&str> = text[start..end].lines().collect();
+        let mut new_body = extension::set_args(&body, &changes).join("\n");
+        new_body.push('\n');
+        if new_body != text[start..end] {
+            edits.push((start..end, new_body));
+        }
     }
-    let body: Vec<&str> = text[start..end].lines().collect();
-    let mut new_body = extension::set_args(&body, changes).join("\n");
-    new_body.push('\n');
-    if new_body != text[start..end] {
-        state.replace_range_keeping_selections(start..end, &new_body, window, cx);
+    let first = edits.first()?.0.start;
+    let last = edits.last()?.0.end;
+    let mut replacement = String::new();
+    let mut at = first;
+    for (range, body) in &edits {
+        replacement.push_str(&text[at..range.start]);
+        replacement.push_str(body);
+        at = range.end;
     }
+    replacement.push_str(&text[at..last]);
+    Some((first..last, replacement))
 }
 
 /// 모양을 `width` × `height`에 맞춰 그리는 캔버스. `canvas_size`는 배율을 곱하기 전 크기다(모양의
@@ -681,7 +760,7 @@ fn error_box(name: &str, err: &str, size: Size<Pixels>, pal: Palette) -> AnyElem
 
 #[cfg(test)]
 mod tests {
-    use super::{block_range, line_starts};
+    use super::{block_args_edit, block_range, line_starts};
     use crate::extension;
 
     #[test]
@@ -695,5 +774,35 @@ mod tests {
         let block = &extension::blocks(text)[0];
         assert_eq!(block_range(text, &block.rows), Some(0..text.len()));
         assert_eq!(line_starts("a\nbc\n"), [0, 2, 5]);
+    }
+
+    #[test]
+    fn writes_own_and_named_blocks_in_one_edit() {
+        let text = "```ext buttons\n```\n글\n```ext chart\nid: c\nselected: 1\n```\n```ext chart\nid: other\n```";
+        let own = 0..2;
+        let pair = |key: &str, value: &str| (key.to_string(), value.to_string());
+        let (span, replacement) = block_args_edit(
+            text,
+            &own,
+            &[pair("page", "2")],
+            &[("c".into(), vec![pair("selected", "3")])],
+        )
+        .unwrap();
+        let mut result = text.to_string();
+        result.replace_range(span, &replacement);
+        assert_eq!(
+            result,
+            "```ext buttons\npage: 2\n```\n글\n```ext chart\nid: c\nselected: 3\n```\n```ext chart\nid: other\n```"
+        );
+        // 이름이 없는 블록을 가리키면 바꾸지 않는다.
+        assert!(
+            block_args_edit(
+                text,
+                &(9..10),
+                &[],
+                &[("none".into(), vec![pair("a", "1")])]
+            )
+            .is_none()
+        );
     }
 }

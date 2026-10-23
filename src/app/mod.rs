@@ -14,6 +14,7 @@ mod editor_layout;
 mod editor_link;
 mod editor_table;
 mod editor_task;
+mod extension_actions;
 mod extension_commands;
 mod extension_painter;
 mod file_view;

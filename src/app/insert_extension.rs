@@ -548,7 +548,9 @@ impl Render for ExtensionPicker {
         let picker = cx.entity().downgrade();
         let on_changes: OnChanges = Rc::new(move |changes, window, cx| {
             picker
-                .update(cx, |picker, cx| picker.apply_changes(changes, window, cx))
+                .update(cx, |picker, cx| {
+                    picker.apply_changes(&changes.args, window, cx)
+                })
                 .ok();
         });
         let preview = render_preview(

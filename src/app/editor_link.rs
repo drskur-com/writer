@@ -82,7 +82,12 @@ impl WriterApp {
     }
 
     /// 라이브러리의 시트를 연다. 다른 프로젝트·메모의 시트면 그 화면과 그룹으로 옮겨 간다.
-    fn open_linked_sheet(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_linked_sheet(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let project = self.library.as_ref().and_then(|lib| lib.project_of(&path));
         match &project {
             Some(project) if self.open_project.as_ref() != Some(project) => {

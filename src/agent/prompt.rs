@@ -244,6 +244,7 @@ mod tests {
                 ("label".into(), "글".into()),
             ],
             example: Vec::new(),
+            actions: Vec::new(),
         }];
         let prompt = system_prompt(None, true, &[], &extensions);
         assert!(prompt.contains(

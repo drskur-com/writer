@@ -650,22 +650,38 @@ impl Workspace {
         // 누르면 돌려준 인자로 바꿔 그린다(에디터가 블록 본문에 쓰는 것과 같다).
         let mut clicked = String::new();
         if let Some(region) = arguments.get("click").and_then(Value::as_str) {
-            let changes = extension.click(region, &args)?;
+            let result = extension.click(region, &args)?;
             clicked = if !extension.clicks {
                 " The extension has no click function, so clicking changes nothing.".to_string()
-            } else if changes.is_empty() {
+            } else if result.is_empty() {
                 format!(" click(\"{region}\") returned nothing to change.")
             } else {
-                let set: Vec<String> = changes
-                    .iter()
-                    .map(|(key, value)| format!("{key}: {value}"))
-                    .collect();
-                format!(
-                    " click(\"{region}\") set {}; drawn with the changed arguments.",
-                    set.join(", ")
-                )
+                let mut parts = Vec::new();
+                if !result.args.is_empty() {
+                    let set: Vec<String> = result
+                        .args
+                        .iter()
+                        .map(|(key, value)| format!("{key}: {value}"))
+                        .collect();
+                    parts.push(format!(
+                        "set {}; drawn with the changed arguments",
+                        set.join(", ")
+                    ));
+                }
+                if !result.actions.is_empty() {
+                    let actions: Vec<String> = result
+                        .actions
+                        .iter()
+                        .map(|action| action.describe())
+                        .collect();
+                    parts.push(format!(
+                        "returned actions (not run here; the app runs them in the editor): {}",
+                        actions.join("; ")
+                    ));
+                }
+                format!(" click(\"{region}\") {}.", parts.join("; it "))
             };
-            for (key, value) in changes {
+            for (key, value) in result.args {
                 match args.iter_mut().rev().find(|(name, _)| *name == key) {
                     Some(arg) => arg.1 = value,
                     None => args.push((key, value)),
