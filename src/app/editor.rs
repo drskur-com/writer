@@ -624,16 +624,24 @@ impl WriterApp {
             .library
             .as_ref()
             .map_or_else(|| path.clone(), |lib| lib.root.clone());
+        let sheet = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
         let extensions = Rc::new(ExtensionBlocks::new(
             &text,
             crate::extension::Host::new(root),
+            sheet,
         ));
+        let (inline_find, inline_render) = (extensions.clone(), extensions.clone());
         let (style_extensions, measure_extensions, render_extensions) =
             (extensions.clone(), extensions.clone(), extensions.clone());
         // 마지막 줄 아래 빈 공간(scroll_beyond_last_line)은 코드 에디터 모드에만 있어서
         // EditorState를 쓰고 코드용 기능(줄 번호·들여쓰기 안내선·괄호 자동 닫기·접기)은 끈다.
         // 빈 공간이 없으면 문서 끝에서 커서 여백을 맞추려 끝 너머로 스크롤했다가 되돌아오며 출렁인다.
         let image_app = cx.entity().downgrade();
+        let inline_app = image_app.clone();
         let link_app = cx.entity().downgrade();
         let image_sheet = path.clone();
         let state = cx.new(|cx| {
@@ -750,6 +758,16 @@ impl WriterApp {
                         .child(page_break_mark(size(block.size.width, mark), cx))
                         .into_any_element()
                 },
+                cx,
+            );
+            // 문단 안의 `{{이름 인자}}`는 인라인 확장으로 보인다(ADR-0036).
+            let inline_editor = cx.entity().downgrade();
+            state.set_inline_objects(
+                move |_, line| inline_find.inline_tokens(line),
+                move |token, window, cx| {
+                    inline_render.render_inline(token, &inline_editor, &inline_app, window, cx)
+                },
+                None,
                 cx,
             );
             // 할 일 항목의 기호 자리에 체크 상자를 그린다(ADR-0023).
@@ -912,9 +930,11 @@ impl WriterApp {
         }
         // 확장 파일이 바뀌었으면(모델이 고쳤으면) 캔버스를 다시 재고 그린다.
         if editor.extensions.files_changed() {
-            editor
-                .state
-                .update(cx, |state, cx| state.refresh_line_blocks(cx));
+            editor.extensions.forget_values();
+            editor.state.update(cx, |state, cx| {
+                state.refresh_line_blocks(cx);
+                state.refresh_inline_objects(cx);
+            });
         }
         if !editor.path.is_file() {
             self.editor = None;

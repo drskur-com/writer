@@ -54,6 +54,7 @@ const BUILTIN: &[Builtin] = &[
         "references/commands.md",
         "references/interactive.md",
         "references/actions.md",
+        "references/inline.md",
         "references/examples/archer.md",
         "references/examples/bar-chart.md",
         "references/examples/chart-remote.md",
@@ -62,6 +63,7 @@ const BUILTIN: &[Builtin] = &[
         "references/examples/route.md",
         "references/examples/seedling.md",
         "references/examples/text-tools.md",
+        "references/examples/today.md",
         "references/examples/turntable.md"
     ),
 ];

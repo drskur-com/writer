@@ -249,11 +249,70 @@ impl InlineTokenStore {
     }
 }
 
+/// Shift derived spans (Writer patch: `EditorState::set_inline_objects`) over an edit: drop the ones
+/// it touches and move the ones after it. The provider derives them again before the next layout.
+fn shift_derived(spans: &mut Vec<InlineTokenSpan>, range: &Range<usize>, new_len: usize) {
+    let shift = new_len as isize - range.len() as isize;
+    spans.retain_mut(|span| {
+        if span.range.start < range.end && range.start < span.range.end {
+            return false;
+        }
+        if span.range.start >= range.end {
+            *span = span.shifted(shift);
+        }
+        true
+    });
+}
+
 impl<M: InputModeKind> InputBaseState<M> {
     pub(super) fn token_spans(&self) -> &[InlineTokenSpan] {
         self.inline_tokens
             .as_ref()
-            .map_or(&[], |store| &store.spans)
+            .map_or(&self.derived_tokens, |store| &store.spans)
+    }
+    /// Derive the inline objects from the text again if it changed since the last time (Writer
+    /// patch). Ranges that split a character, overlap, span lines, or touch an IME composition
+    /// are skipped.
+    pub(crate) fn refresh_derived_tokens(&mut self) {
+        use super::rope_ext::RopeExt as _;
+        let Some(provider) = self.inline_object_ranges.clone() else {
+            if !self.derived_tokens.is_empty() {
+                self.derived_tokens.clear();
+            }
+            return;
+        };
+        if self.derived_revision == Some(self.document_revision) {
+            return;
+        }
+        self.derived_revision = Some(self.document_revision);
+        let mut spans = Vec::new();
+        for row in 0..self.text.lines_len() {
+            let line_start = self.text.line_start_offset(row);
+            let line: String = self.text.slice_line(row).into();
+            let mut end = 0;
+            for (range, token) in provider(row, &line) {
+                let valid = range.start >= end
+                    && range.start < range.end
+                    && range.end <= line.len()
+                    && line.is_char_boundary(range.start)
+                    && line.is_char_boundary(range.end)
+                    && token.validate().is_ok();
+                if !valid {
+                    continue;
+                }
+                let range = line_start + range.start..line_start + range.end;
+                if self
+                    .ime_marked_range
+                    .as_ref()
+                    .is_some_and(|marked| marked.start < range.end && range.start < marked.end)
+                {
+                    continue;
+                }
+                end = range.end - line_start;
+                spans.push(InlineTokenSpan { range, token });
+            }
+        }
+        self.derived_tokens = spans;
     }
     pub(super) fn token_boundary(&self, offset: usize, bias: sum_tree::Bias) -> usize {
         let spans = self.token_spans();
@@ -285,6 +344,9 @@ impl<M: InputModeKind> InputBaseState<M> {
         range: &Range<usize>,
         new_len: usize,
     ) -> Option<Box<TokenDelta>> {
+        if self.inline_tokens.is_none() && !self.derived_tokens.is_empty() {
+            shift_derived(&mut self.derived_tokens, range, new_len);
+        }
         if self.replaying_history {
             return None;
         }

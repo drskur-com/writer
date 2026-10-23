@@ -66,6 +66,14 @@ pub(super) struct BookSource {
 pub(super) type Drawings =
     HashMap<(String, Vec<(String, String)>), Result<Option<crate::extension::Still>, String>>;
 
+/// 라이브러리 루트 기준 경로(인라인 확장의 `ctx.sheet`).
+fn relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// 원고의 확장 블록을 모두 그린다(같은 이름·인자는 한 번).
 fn drawings(root: &Path, chunks: &[Chunk]) -> Drawings {
     fn walk(root: &Path, blocks: &[Block], out: &mut Drawings) {
@@ -131,6 +139,8 @@ fn load_source(project_dir: &Path) -> io::Result<BookSource> {
         .map(|sheet| {
             // 못 읽는 시트는 비운 채로 둔다(나머지 원고는 보인다).
             let text = library::read_sheet(&sheet.path).unwrap_or_default();
+            let mut blocks = markdown::manuscript_blocks(&text, preserve_line_breaks);
+            crate::extension::resolve_inline(&mut blocks, root, &relative(root, &sheet.path));
             Chunk {
                 dir: sheet
                     .path
@@ -138,7 +148,7 @@ fn load_source(project_dir: &Path) -> io::Result<BookSource> {
                     .map(Path::to_path_buf)
                     .unwrap_or_default(),
                 glued: sheet.glued,
-                blocks: markdown::manuscript_blocks(&text, preserve_line_breaks),
+                blocks,
             }
         })
         .collect::<Vec<_>>();
@@ -166,14 +176,18 @@ fn load_selection(root: &Path, selected: &[PathBuf]) -> io::Result<BookSource> {
     let chunks = project
         .sheets
         .into_iter()
-        .map(|sheet| Chunk {
-            dir: sheet
-                .path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_default(),
-            glued: sheet.glued,
-            blocks: markdown::manuscript_blocks(&sheet.content, preserve_line_breaks),
+        .map(|sheet| {
+            let mut blocks = markdown::manuscript_blocks(&sheet.content, preserve_line_breaks);
+            crate::extension::resolve_inline(&mut blocks, root, &relative(root, &sheet.path));
+            Chunk {
+                dir: sheet
+                    .path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default(),
+                glued: sheet.glued,
+                blocks,
+            }
         })
         .collect::<Vec<_>>();
     Ok(BookSource {

@@ -27,6 +27,8 @@ pub struct Info {
     pub draws: bool,
     /// 영역을 누르면 `click`을 부른다.
     pub clicks: bool,
+    /// 인라인 확장으로 글을 보인다(`value`).
+    pub values: bool,
     pub commands: Vec<String>,
 }
 
@@ -44,6 +46,12 @@ enum Request {
         region: String,
         args: Vec<(String, String)>,
     },
+    /// `value(args, ctx)`를 묻는다.
+    Value {
+        id: u64,
+        args: Vec<(String, String)>,
+        sheet: String,
+    },
     /// `size(args)`를 묻는다.
     Size {
         id: u64,
@@ -56,6 +64,9 @@ type SizeReply = (u64, Result<(f32, f32), String>);
 
 /// 누른 답(요청 번호, 결과).
 type ClickReply = (u64, Result<Clicked, String>);
+
+/// 글 답(요청 번호, 글).
+type ValueReply = (u64, Result<Option<String>, String>);
 
 /// 크기는 블록 인자마다 한 번 묻는다.
 type SizeCache = HashMap<Vec<(String, String)>, Result<(f32, f32), String>>;
@@ -72,6 +83,7 @@ pub struct Worker {
     replies: Receiver<Reply>,
     sizes: Receiver<SizeReply>,
     clicks: Receiver<ClickReply>,
+    values: Receiver<ValueReply>,
     /// 받았지만 아직 가져가지 않은 결과(블록 번호별 최신 것).
     inbox: RefCell<HashMap<u64, Result<Drawing, String>>>,
     size_cache: RefCell<SizeCache>,
@@ -94,6 +106,7 @@ impl Worker {
         let (reply_tx, reply_rx) = channel::<Reply>();
         let (size_tx, size_rx) = channel::<SizeReply>();
         let (click_tx, click_rx) = channel::<ClickReply>();
+        let (value_tx, value_rx) = channel::<ValueReply>();
         let (info_tx, info_rx) = channel::<Result<Info, String>>();
         let thread_name = name.to_string();
         std::thread::Builder::new()
@@ -124,6 +137,9 @@ impl Worker {
                         Request::Click { id, region, args } => {
                             click_tx.send((id, extension.click(&region, &args))).is_ok()
                         }
+                        Request::Value { id, args, sheet } => {
+                            value_tx.send((id, extension.value(&args, &sheet))).is_ok()
+                        }
                         Request::Size { id, args } => {
                             size_tx.send((id, extension.size_for(&args))).is_ok()
                         }
@@ -143,6 +159,7 @@ impl Worker {
             replies: reply_rx,
             sizes: size_rx,
             clicks: click_rx,
+            values: value_rx,
             inbox: RefCell::default(),
             size_cache: RefCell::default(),
             next_size: std::cell::Cell::new(1),
@@ -182,6 +199,30 @@ impl Worker {
                 Ok((reply, changes)) if reply == id => return changes,
                 Ok(_) => continue,
                 Err(_) => return Err("click took too long".into()),
+            }
+        }
+    }
+
+    /// 인라인 확장의 글(`value(args, ctx)`). 작업 스레드의 답을 기다린다. `value`가 없으면 `None`.
+    pub fn value(&self, args: &[(String, String)], sheet: &str) -> Result<Option<String>, String> {
+        if !self.info.values {
+            return Ok(None);
+        }
+        let id = self.next_size.replace(self.next_size.get() + 1);
+        self.requests
+            .send(Request::Value {
+                id,
+                args: args.to_vec(),
+                sheet: sheet.to_string(),
+            })
+            .ok();
+        let deadline = std::time::Instant::now() + LOAD_WAIT;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.values.recv_timeout(left) {
+                Ok((reply, value)) if reply == id => return value,
+                Ok(_) => continue,
+                Err(_) => return Err("value took too long".into()),
             }
         }
     }

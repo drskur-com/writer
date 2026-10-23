@@ -11,7 +11,7 @@
 //! - `period`가 있는 애니메이션은 한 주기의 프레임을 캐시해, 한 바퀴 돈 뒤에는 Lua를 부르지 않는다.
 
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::input::EditorState;
+use gpui_kit::component::input::{EditorState, InlineToken, InlineTokenContext};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::cell::{Cell, RefCell};
@@ -275,26 +275,277 @@ struct EditorBlock {
 /// 인자 칸에 쓴다(동작은 하지 않는다).
 pub(super) type OnChanges = Rc<dyn Fn(&extension::Clicked, &mut Window, &mut App)>;
 
-/// 열린 시트의 확장 블록 목록. 줄 스타일·줄 블록의 측정·그리기에서 함께 쓴다.
+/// 인라인 확장 글을 다시 묻기까지의 시간(`{{today}}`처럼 시간에 따라 바뀌는 글).
+const VALUE_TTL: Duration = Duration::from_secs(60);
+
+/// 인라인 확장 글 캐시: (이름, 인자) → 물은 때와 글.
+type ValueCache =
+    HashMap<(String, Vec<(String, String)>), (Instant, Result<Option<String>, String>)>;
+
+/// 열린 시트의 확장 블록과 인라인 확장(ADR-0036). 줄 스타일·줄 블록·인라인 객체의 측정·그리기에서 함께 쓴다.
 pub(super) struct ExtensionBlocks {
     host: Host,
+    /// 시트 경로(라이브러리 루트 기준). 인라인 확장의 `ctx.sheet`.
+    sheet: String,
     /// 확장 폴더의 파일과 수정 시각(마지막으로 본 것).
     files: RefCell<Vec<(String, Option<std::time::SystemTime>)>>,
     /// 줄 순서대로.
     blocks: RefCell<Vec<Rc<EditorBlock>>>,
+    /// 인라인 그림의 그리기 상태(원문별). 같은 원문은 같은 그림이다.
+    inline_players: RefCell<HashMap<String, Rc<Player>>>,
+    values: RefCell<ValueCache>,
     ticker: Ticker,
 }
 
 impl ExtensionBlocks {
-    pub(super) fn new(text: &str, host: Host) -> Self {
+    pub(super) fn new(text: &str, host: Host, sheet: String) -> Self {
         let blocks = Self {
             files: RefCell::new(extension::scan(host.root())),
             host,
+            sheet,
             blocks: RefCell::default(),
+            inline_players: RefCell::default(),
+            values: RefCell::default(),
             ticker: Ticker::default(),
         };
         blocks.sync(text);
         blocks
+    }
+
+    /// 줄의 인라인 확장과 그 토큰(에디터의 인라인 객체). 토큰의 원문은 `{{…}}`, 보이는 글(`label`)은 글을
+    /// 보이는 확장이면 그 글, 그림이면 이름이다(글 폭이 바뀌면 다시 잰다).
+    pub(super) fn inline_tokens(&self, line: &str) -> Vec<(Range<usize>, InlineToken)> {
+        extension::inline_calls(line)
+            .into_iter()
+            .map(|call| {
+                let label = self.inline_label(&call);
+                let token =
+                    InlineToken::new(call.name.clone(), line[call.range.clone()].to_string())
+                        .with_label(label);
+                (call.range, token)
+            })
+            .collect()
+    }
+
+    /// 인라인 확장이 보일 글. 글을 보이는 확장이 아니면 이름, 실패하면 이름 앞에 ⚠.
+    fn inline_label(&self, call: &extension::InlineCall) -> String {
+        let loaded = self.host.get(&call.name);
+        let label = match &*loaded {
+            Ok(worker) if worker.info.values => match self.value(worker, call) {
+                Ok(Some(value)) if !value.trim().is_empty() => value,
+                Ok(_) => "·".to_string(),
+                Err(_) => format!("⚠ {}", call.name),
+            },
+            Ok(_) => call.name.clone(),
+            Err(_) => format!("⚠ {}", call.name),
+        };
+        // 토큰 글에는 제어 문자를 쓸 수 없다.
+        label
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect()
+    }
+
+    /// `value(args, ctx)`의 글. [`VALUE_TTL`] 동안은 다시 묻지 않는다.
+    fn value(
+        &self,
+        worker: &extension::Worker,
+        call: &extension::InlineCall,
+    ) -> Result<Option<String>, String> {
+        let args = extension::without_reserved(&call.args);
+        let key = (call.name.clone(), args.clone());
+        if let Some((at, value)) = self.values.borrow().get(&key)
+            && at.elapsed() < VALUE_TTL
+        {
+            return value.clone();
+        }
+        let value = worker.value(&args, &self.sheet);
+        self.values
+            .borrow_mut()
+            .insert(key, (Instant::now(), value.clone()));
+        value
+    }
+
+    /// 인라인 확장 하나를 그린다: 글은 칩, 그림은 줄 높이에 맞춘 캔버스(영역이 있으면 누를 수 있다). 두 번 누르거나
+    /// ⌘와 누르면 `app`의 편집 대화상자를 연다. 그냥 누르면 에디터가 객체를 고른다.
+    pub(super) fn render_inline(
+        &self,
+        token: &InlineTokenContext,
+        editor: &WeakEntity<EditorState>,
+        app: &WeakEntity<super::WriterApp>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let pal = Palette::from_theme(cx.theme());
+        let source = token.token().text().to_string();
+        let range = token.range();
+        let height = token.line_height();
+        let call = extension::inline_calls(&source).into_iter().next();
+        let loaded = call.as_ref().map(|call| self.host.get(&call.name));
+        let chip = |label: SharedString, color: Hsla| {
+            div()
+                .px_1()
+                .rounded(px(3.))
+                .bg(pal.tint)
+                .text_color(color)
+                .whitespace_nowrap()
+                .child(label)
+                .into_any_element()
+        };
+        let body = match (&call, loaded.as_deref()) {
+            (Some(call), Some(Ok(worker))) if worker.info.draws && !worker.info.values => {
+                let args = extension::without_reserved(&call.args);
+                match worker.size(&args) {
+                    Ok(canvas_size) => {
+                        let loaded = loaded.clone().unwrap_or_else(|| self.host.get(&call.name));
+                        self.inline_canvas(
+                            &source,
+                            call,
+                            args,
+                            canvas_size,
+                            height,
+                            loaded,
+                            editor,
+                            app,
+                            window,
+                            cx,
+                        )
+                    }
+                    Err(_) => chip(format!("⚠ {}", call.name).into(), pal.danger),
+                }
+            }
+            (Some(_), Some(Ok(_))) => chip(token.token().label().clone(), pal.foreground),
+            _ => chip(token.token().label().clone(), pal.danger),
+        };
+        let (app, opened) = (app.clone(), source.clone());
+        div()
+            .h(height)
+            .flex()
+            .items_center()
+            .rounded(px(3.))
+            .when(token.is_selected(), |this| this.bg(pal.active))
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                if event.click_count >= 2 || event.modifiers.secondary() {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    let (app, range, source) = (app.clone(), range.clone(), opened.clone());
+                    window.defer(cx, move |window, cx| {
+                        app.update(cx, |app, cx| {
+                            app.edit_inline_extension(range, &source, window, cx);
+                        })
+                        .ok();
+                    });
+                }
+            })
+            .child(body)
+            .into_any_element()
+    }
+
+    /// 인라인 그림: 캔버스를 줄 높이에 맞춰 줄인다. 영역을 누르면 `click`이 돌려준 인자를 그 원문에 쓰고
+    /// (`set` 동작은 블록에), 나머지 동작은 `app`에 맡긴다.
+    #[allow(clippy::too_many_arguments)]
+    fn inline_canvas(
+        &self,
+        source: &str,
+        call: &extension::InlineCall,
+        args: Vec<(String, String)>,
+        canvas_size: (f32, f32),
+        height: Pixels,
+        loaded: Rc<Loaded>,
+        editor: &WeakEntity<EditorState>,
+        app: &WeakEntity<super::WriterApp>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let pal = Palette::from_theme(cx.theme());
+        let player = self
+            .inline_players
+            .borrow_mut()
+            .entry(source.to_string())
+            .or_insert_with(|| Rc::new(Player::new()))
+            .clone();
+        let shapes = match player.frame(&loaded, &args, theme(pal), &self.ticker, window, cx) {
+            Frame::Shapes(shapes) => Some(shapes),
+            Frame::Pending => None,
+            Frame::Error(_) => {
+                return div()
+                    .px_1()
+                    .text_color(pal.danger)
+                    .child(format!("⚠ {}", call.name))
+                    .into_any_element();
+            }
+        };
+        let scale = f32::from(height) / canvas_size.1.max(1.);
+        let width = px(canvas_size.0 * scale);
+        let canvas = div().w(width).h(height).child(shapes_canvas(
+            shapes,
+            player.cache(),
+            Some(player.bounds()),
+            canvas_size,
+            width,
+            height,
+        ));
+        if !player.has_regions() {
+            return canvas.into_any_element();
+        }
+        let (editor, app, original, name) = (
+            editor.clone(),
+            app.clone(),
+            source.to_string(),
+            call.name.clone(),
+        );
+        let all_args = call.args.clone();
+        let on_changes: OnChanges = Rc::new(move |clicked, window, cx| {
+            let sets: Vec<(String, Vec<(String, String)>)> = clicked
+                .actions
+                .iter()
+                .filter_map(|action| match action {
+                    extension::Action::Set { block, args } => Some((block.clone(), args.clone())),
+                    _ => None,
+                })
+                .collect();
+            let own = clicked.args.clone();
+            let (original, name, all_args) = (original.clone(), name.clone(), all_args.clone());
+            editor
+                .update(cx, |state, cx| {
+                    if !own.is_empty() {
+                        write_inline_args(state, &original, &name, &all_args, &own, window, cx);
+                    }
+                    if !sets.is_empty() {
+                        write_block_args(state, 0..0, &[], &sets, window, cx);
+                    }
+                })
+                .ok();
+            let rest: Vec<extension::Action> = clicked
+                .actions
+                .iter()
+                .filter(|action| !matches!(action, extension::Action::Set { .. }))
+                .cloned()
+                .collect();
+            if !rest.is_empty() {
+                let (app, name) = (app.clone(), name.clone());
+                window.defer(cx, move |window, cx| {
+                    app.update(cx, |app, cx| {
+                        app.run_extension_actions(&name, rest, window, cx)
+                    })
+                    .ok();
+                });
+            }
+        });
+        interactive(
+            canvas,
+            SharedString::from(format!("inline-extension-{source}")).into(),
+            player,
+            loaded,
+            args,
+            canvas_size.0,
+            on_changes,
+        )
+    }
+
+    /// 확장 파일이 바뀌었으면 인라인 글 캐시를 비운다(다음에 다시 묻는다).
+    pub(super) fn forget_values(&self) {
+        self.values.borrow_mut().clear();
     }
 
     /// 본문에 맞춰 블록을 다시 찾는다. 바뀐 블록이 닿았던 줄과 닿는 줄을 돌려준다(다시 배치할 줄).
@@ -625,6 +876,32 @@ fn write_block_args(
         return;
     };
     state.replace_range_keeping_selections(span, &replacement, window, cx);
+}
+
+/// 시트에서 원문이 `original`인 인라인 확장들의 인자를 바꾼다(ADR-0036). 커서는 그대로 둔다.
+fn write_inline_args(
+    state: &mut EditorState,
+    original: &str,
+    name: &str,
+    args: &[(String, String)],
+    changes: &[(String, String)],
+    window: &mut Window,
+    cx: &mut Context<EditorState>,
+) {
+    let mut args = args.to_vec();
+    for (key, value) in changes {
+        match args.iter_mut().rev().find(|(arg, _)| arg == key) {
+            Some(arg) => arg.1 = value.clone(),
+            None => args.push((key.clone(), value.clone())),
+        }
+    }
+    let replacement = extension::inline_text(name, &args);
+    let text = state.value().to_string();
+    // 같은 원문이 여럿이면 모두 같은 그림이므로 함께 바꾼다. 뒤에서부터 바꿔 앞 범위가 밀리지 않게 한다.
+    let starts: Vec<usize> = text.match_indices(original).map(|(at, _)| at).collect();
+    for at in starts.into_iter().rev() {
+        state.replace_range_keeping_selections(at..at + original.len(), &replacement, window, cx);
+    }
 }
 
 /// [`write_block_args`]의 편집: 바꿀 범위와 새 글. 바뀌는 것이 없으면 `None`.

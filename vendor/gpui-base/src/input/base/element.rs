@@ -344,7 +344,7 @@ use super::MASK_CHAR;
 // Writer patches (see `docs/patches/`).
 #[path = "element_writer.rs"]
 mod writer;
-use writer::{Placed, place_rows};
+use writer::{Placed, object_row, place_object_rows, place_rows};
 
 /// Convert a byte offset in the original text to a byte offset in the masked display string.
 ///
@@ -1551,7 +1551,11 @@ impl<M: InputModeKind> TextElement<M> {
             InteractiveElement as _, StatefulInteractiveElement as _, prelude::FluentBuilder as _,
         };
         let presentation = self.state.read(cx).token_presentation.clone();
-        let child = presentation.render(token, window, cx);
+        // Derived inline objects (Writer patch) have their own renderer.
+        let child = match self.state.read(cx).inline_object_render.clone() {
+            Some(render) => render(token, window, cx),
+            None => presentation.render(token, window, cx),
+        };
         // Preserve interaction state only for the same token occurrence and
         // hover eligibility. Replacements and re-enabling start fresh.
         let start = token.range().start;
@@ -2034,7 +2038,13 @@ impl<M: InputModeKind> TextElement<M> {
             let end = state.text.line_end_offset(row);
             let spans = state.token_spans();
             let first = spans.partition_point(|s| s.range().end <= start);
-            for span in spans[first..].iter().take_while(|s| s.range().start < end) {
+            // A collapsed line (Writer `LineStyle::collapsed`) shows no text, so no objects.
+            let hidden = layout.lines[ix].is_hidden();
+            for span in spans[first..]
+                .iter()
+                .take_while(|s| s.range().start < end)
+                .filter(|_| !hidden)
+            {
                 if let Some(position) =
                     layout.lines[ix].position_for_index(span.range().start - start, layout, false)
                 {
@@ -2093,9 +2103,12 @@ impl<M: InputModeKind> TextElement<M> {
         window: &mut Window,
     ) -> Vec<LineLayout> {
         let is_single_line = state.is_single_line();
-        if state.tokens_visible() {
+        // The editor lays out object rows with its line styles below (Writer patch).
+        if state.tokens_visible() && !M::CODE_EDITOR {
             return Self::layout_token_lines(state, last_layout, font_size, runs, window);
         }
+        let objects = (M::CODE_EDITOR && state.tokens_visible())
+            .then(|| (state.token_spans(), state.token_layout_cache.as_deref()));
 
         if is_single_line {
             let text: SharedString = display_text.to_string().into();
@@ -2154,9 +2167,13 @@ impl<M: InputModeKind> TextElement<M> {
 
             let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
             let mut wrapped_runs: SmallVec<[Vec<TextRun>; 1]> = SmallVec::with_capacity(1);
+            // Rows with inline objects (Writer patch), by row index. Their `wrapped_lines`
+            // entry is a placeholder.
+            let mut object_rows: Vec<(usize, crate::input::display_map::InputLine)> = Vec::new();
             let mut line_has_background = false;
             let line_style = line_item.style;
             let line_font_size = font_size * line_style.text_scale;
+            let line_start = state.text.line_start_offset(buffer_line);
 
             for range in &line_item.wrapped_lines {
                 let line_runs = runs_for_range(runs, run_offset, &range);
@@ -2173,6 +2190,19 @@ impl<M: InputModeKind> TextElement<M> {
                 let sub_line: SharedString = line_text[range.clone()].to_string().into();
                 let line_runs =
                     align_runs_to_char_boundaries(&sub_line, &line_runs).unwrap_or(line_runs);
+                if let Some((spans, Some(cache))) = objects
+                    && let Some(row) = object_row(
+                        &sub_line,
+                        line_start + range.start,
+                        spans,
+                        cache,
+                        &line_runs,
+                        line_font_size,
+                        window,
+                    )
+                {
+                    object_rows.push((wrapped_lines.len(), row));
+                }
                 let shaped_line = window
                     .text_system()
                     .shape_line(sub_line, line_font_size, &line_runs, None);
@@ -2189,20 +2219,36 @@ impl<M: InputModeKind> TextElement<M> {
                     .nth(line_item.indent as usize)
                     .map(|(ix, _)| ix)
                     .unwrap_or(line_text.len());
-                wrapped_lines[0].x_for_index(indent_byte_len)
+                match object_rows.first() {
+                    Some((0, row)) => row.x_for_index(indent_byte_len),
+                    _ => wrapped_lines[0].x_for_index(indent_byte_len),
+                }
             } else {
                 px(0.)
             };
 
-            let placed = place_rows(
-                wrapped_lines,
-                &wrapped_runs,
-                &line_style,
-                wrap_indent,
-                last_layout.wrap_width,
-                line_font_size,
-                window,
-            );
+            let placed = if object_rows.is_empty() {
+                place_rows(
+                    wrapped_lines,
+                    &wrapped_runs,
+                    &line_style,
+                    wrap_indent,
+                    last_layout.wrap_width,
+                    line_font_size,
+                    window,
+                )
+            } else {
+                place_object_rows(
+                    wrapped_lines,
+                    object_rows,
+                    &wrapped_runs,
+                    &line_style,
+                    wrap_indent,
+                    last_layout.wrap_width,
+                    line_font_size,
+                    window,
+                )
+            };
             let line_layout = match placed {
                 Placed::Plain(wrapped_lines) => LineLayout::new().lines(wrapped_lines),
                 Placed::Rows(rows, offsets) => {
@@ -2725,6 +2771,9 @@ impl<M: InputModeKind> Element for TextElement<M> {
             .update(cx, |state, cx| state.sync_revealed_lines(cx));
 
         let line_height = window.line_height();
+        // Inline objects are derived from the text (Writer patch); find them for this revision.
+        self.state
+            .update(cx, |state, _| state.refresh_derived_tokens());
         let token_elements = self.measure_tokens(
             (bounds.size.width - line_number_width - RIGHT_MARGIN).max(px(1.)),
             line_height,

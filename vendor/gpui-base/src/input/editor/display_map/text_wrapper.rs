@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    App, Font, LineFragment, Pixels, Point, ShapedLine, Size, TextAlign, Window, point, px, size,
+    App, Font, Pixels, Point, ShapedLine, Size, TextAlign, Window, point, px, size,
 };
 use ropey::Rope;
 use smallvec::SmallVec;
@@ -34,13 +34,51 @@ pub enum WrappingIndent {
 
 /// Choose Unicode line-break opportunities using the same shaped widths as
 /// painting. Oversized words fall back to complete graphemes, never UTF-8 bytes.
+#[cfg(test)]
 fn measured_wrap_boundaries(
     text: &str,
     width: Pixels,
     wrapping_indent: WrappingIndent,
     first_indent: Pixels,
-    mut measure: impl FnMut(&str) -> Pixels,
+    measure: impl FnMut(&str) -> Pixels,
 ) -> Vec<gpui::Boundary> {
+    measured_wrap_boundaries_with(text, width, wrapping_indent, first_indent, &[], measure)
+}
+
+/// [`measured_wrap_boundaries`] with inline objects (Writer patch): `objects` are byte ranges of
+/// `text`, in order, that measure as their given width and never break inside.
+fn measured_wrap_boundaries_with(
+    text: &str,
+    width: Pixels,
+    wrapping_indent: WrappingIndent,
+    first_indent: Pixels,
+    objects: &[(Range<usize>, Pixels)],
+    mut text_width: impl FnMut(&str) -> Pixels,
+) -> Vec<gpui::Boundary> {
+    let inside = |ix: usize| {
+        objects
+            .iter()
+            .any(|(range, _)| range.start < ix && ix < range.end)
+    };
+    // Text widths between objects, plus the objects' own widths.
+    let mut measure_range = |start: usize, end: usize| -> Pixels {
+        let mut total = px(0.);
+        let mut at = start;
+        for (range, object) in objects {
+            if range.end <= start || range.start >= end {
+                continue;
+            }
+            if at < range.start {
+                total += text_width(&text[at..range.start]);
+            }
+            total += *object;
+            at = range.end;
+        }
+        if at < end {
+            total += text_width(&text[at..end]);
+        }
+        total
+    };
     let indent = if wrapping_indent == WrappingIndent::Same {
         text.chars()
             .take_while(|&c| c == ' ')
@@ -49,10 +87,11 @@ fn measured_wrap_boundaries(
     } else {
         0
     };
-    let indent_width = measure(&text[..indent]);
+    let indent_width = measure_range(0, indent);
     let ends: Vec<usize> = text
         .grapheme_indices(true)
         .map(|(ix, grapheme)| ix + grapheme.len())
+        .filter(|&ix| !inside(ix))
         .collect();
     let opportunities: Vec<usize> = unicode_linebreak::linebreaks(text)
         .map(|(ix, _)| ix)
@@ -72,7 +111,7 @@ fn measured_wrap_boundaries(
         let remaining = ends.len() - first;
         let mut low = 0;
         let mut high = 1;
-        while measure(&text[start..ends[first + high - 1]]) <= available {
+        while measure_range(start, ends[first + high - 1]) <= available {
             low = high;
             if high == remaining {
                 break;
@@ -81,7 +120,7 @@ fn measured_wrap_boundaries(
         }
         while low + 1 < high {
             let mid = (low + high) / 2;
-            if measure(&text[start..ends[first + mid - 1]]) <= available {
+            if measure_range(start, ends[first + mid - 1]) <= available {
                 low = mid;
             } else {
                 high = mid;
@@ -391,9 +430,6 @@ impl TextWrapper {
         new_text: &Rope,
         cx: &mut App,
     ) {
-        let mut line_wrapper = cx
-            .text_system()
-            .line_wrapper(self.font.clone(), self.font_size);
         let metrics = self.inline_metrics.clone();
         let text_system = gpui::WindowTextSystem::new(cx.text_system().clone());
         let font = self.font.clone();
@@ -405,59 +441,45 @@ impl TextWrapper {
                              text_scale: f32,
                              first_indent: Pixels| {
                 let font_size = font_size * text_scale;
-                let mut fragments = Vec::new();
-                let mut offset = 0;
+                // Inline objects wholly in this line, as line-local ranges (Writer patch).
                 let first = metrics.partition_point(|(r, _)| r.end <= line_start);
-                for (range, width) in &metrics[first..] {
-                    if range.start >= line_start + line_str.len() {
-                        break;
-                    }
-                    if range.start < line_start || range.end > line_start + line_str.len() {
-                        continue;
-                    }
-                    let range = range.start - line_start..range.end - line_start;
-                    if !line_str.is_char_boundary(range.start)
-                        || !line_str.is_char_boundary(range.end)
-                    {
-                        continue;
-                    }
-                    if offset < range.start {
-                        fragments.push(LineFragment::text(&line_str[offset..range.start]));
-                    }
-                    fragments.push(LineFragment::element(*width, range.len()));
-                    offset = range.end;
-                }
-                if fragments.is_empty() {
-                    return measured_wrap_boundaries(
-                        line_str,
-                        wrap_width,
-                        wrapping_indent,
-                        first_indent,
-                        |text| {
-                            text_system
-                                .layout_line(
-                                    text,
-                                    font_size,
-                                    &[gpui::TextRun {
-                                        len: text.len(),
-                                        font: font.clone(),
-                                        color: gpui::black(),
-                                        background_color: None,
-                                        underline: None,
-                                        strikethrough: None,
-                                    }],
-                                    None,
-                                )
-                                .width
-                        },
-                    );
-                }
-                if offset < line_str.len() {
-                    fragments.push(LineFragment::text(&line_str[offset..]));
-                }
-                line_wrapper
-                    .wrap_line(&fragments, wrap_width, gpui::IndentAdjustment::SameIndent)
-                    .collect()
+                let objects: Vec<(Range<usize>, Pixels)> = metrics[first..]
+                    .iter()
+                    .take_while(|(range, _)| range.start < line_start + line_str.len())
+                    .filter(|(range, _)| {
+                        range.start >= line_start && range.end <= line_start + line_str.len()
+                    })
+                    .map(|(range, width)| {
+                        (range.start - line_start..range.end - line_start, *width)
+                    })
+                    .filter(|(range, _)| {
+                        line_str.is_char_boundary(range.start) && line_str.is_char_boundary(range.end)
+                    })
+                    .collect();
+                measured_wrap_boundaries_with(
+                    line_str,
+                    wrap_width,
+                    wrapping_indent,
+                    first_indent,
+                    &objects,
+                    |text| {
+                        text_system
+                            .layout_line(
+                                text,
+                                font_size,
+                                &[gpui::TextRun {
+                                    len: text.len(),
+                                    font: font.clone(),
+                                    color: gpui::black(),
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                }],
+                                None,
+                            )
+                            .width
+                    },
+                )
         };
         let rows = self._update(changed_text, range, new_text, &mut wrap_line);
 
@@ -1342,6 +1364,30 @@ mod tests {
             assert_eq!(cursor.row, usize::from(value.ends_with('s')));
             previous = text;
         }
+    }
+
+    #[test]
+    fn measured_wrap_keeps_inline_objects_whole() {
+        // One unit per grapheme; the object `{{x}}` (bytes 3..8) measures 4 units.
+        let wrap = |width, first_indent| {
+            measured_wrap_boundaries_with(
+                "ab {{x}} cd",
+                px(width),
+                WrappingIndent::None,
+                px(first_indent),
+                &[(3..8, px(4.))],
+                |s| px(s.graphemes(true).count() as f32),
+            )
+            .into_iter()
+            .map(|b| b.ix)
+            .collect::<Vec<_>>()
+        };
+        // "ab " (3) + object (4) + " " (1) = 8 fits; "cd" moves down.
+        assert_eq!(wrap(8., 0.), vec![9]);
+        // Too narrow for the object after "ab ": it moves to the next row whole.
+        assert_eq!(wrap(5., 0.), vec![3, 9]);
+        // The first-line indent narrows only the first row.
+        assert_eq!(wrap(8., 2.), vec![3]);
     }
 
     #[test]

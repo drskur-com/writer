@@ -95,7 +95,7 @@ pub use display_map::{
     LineStyle, LineStyleFn, WrappingIndent,
 };
 pub use editor::{
-    Editor, EditorState, LineBlockContext, LineBlockRenderer, LineOverlayContext,
+    Editor, EditorState, InlineObjectRanges, LineBlockContext, LineBlockRenderer, LineOverlayContext,
     LineOverlayRanges, LineOverlayRenderer, SecondaryClickHandler,
 };
 pub use highlighting::{

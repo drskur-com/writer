@@ -82,6 +82,43 @@ impl InputBaseState<EditorMode> {
         cx.notify();
     }
 
+    /// Show parts of lines as atomic inline objects drawn by `render`, e.g. the computed value of a
+    /// `{{today}}` call or a small canvas. `ranges` gets each buffer row and its line without the
+    /// trailing `\n` and returns the object ranges and their tokens; it runs again over the
+    /// document after every edit (before the next layout), so it should be cheap.
+    ///
+    /// The text stays in the document and is what copy and save see; an object only changes how
+    /// its range is shown and edited. The caret steps over it, a deletion removes it whole, and
+    /// the row is laid out and wrapped with the measured width of `render`'s element. Nothing
+    /// enters the undo history. A click selects the object and then calls `on_click`; a renderer
+    /// that handles its own mouse input should stop it from propagating. `render` should draw its
+    /// own selected look from [`crate::input::InlineTokenContext::is_selected`].
+    pub fn set_inline_objects(
+        &mut self,
+        ranges: impl Fn(usize, &str) -> Vec<(std::ops::Range<usize>, crate::input::InlineToken)>
+        + 'static,
+        render: impl Fn(&crate::input::InlineTokenContext, &mut Window, &mut App) -> gpui::AnyElement
+        + 'static,
+        on_click: Option<
+            std::rc::Rc<dyn Fn(&crate::input::InlineTokenClickEvent, &mut Window, &mut App)>,
+        >,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.inline_object_ranges = Some(std::rc::Rc::new(ranges));
+        self.inline_object_render = Some(std::rc::Rc::new(render));
+        self.inline_object_click = on_click;
+        self.derived_revision = None;
+        cx.notify();
+    }
+
+    /// Derive the inline objects again on the next layout, e.g. after what `render` shows changed
+    /// without an edit (see [`Self::set_inline_objects`]).
+    pub fn refresh_inline_objects(&mut self, cx: &mut gpui::Context<Self>) {
+        self.derived_revision = None;
+        self.token_layout_cache = None;
+        cx.notify();
+    }
+
     /// Remove every line overlay (see [`Self::set_line_overlays`]).
     pub fn clear_line_overlays(&mut self, cx: &mut gpui::Context<Self>) {
         self.line_overlays = None;
@@ -182,6 +219,11 @@ pub type LineOverlayRanges = std::rc::Rc<dyn Fn(usize, &str) -> Vec<std::ops::Ra
 /// Draws an overlay on part of a line (see [`EditorState::set_line_overlays`]).
 pub type LineOverlayRenderer =
     std::rc::Rc<dyn Fn(&LineOverlayContext, &mut Window, &mut App) -> gpui::AnyElement>;
+
+/// Finds the inline objects of a line (see [`EditorState::set_inline_objects`]): byte ranges within
+/// the line, in order and not overlapping, each with the token describing it.
+pub type InlineObjectRanges =
+    std::rc::Rc<dyn Fn(usize, &str) -> Vec<(std::ops::Range<usize>, crate::input::InlineToken)>>;
 
 /// Handles a ⌘/Ctrl-click (see [`EditorState::set_secondary_click`]).
 pub type SecondaryClickHandler = std::rc::Rc<dyn Fn(&str, usize, &mut Window, &mut App) -> bool>;

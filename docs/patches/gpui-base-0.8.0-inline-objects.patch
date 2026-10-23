@@ -1,0 +1,755 @@
+diff --git a/vendor/gpui-base/src/input/base/element.rs b/vendor/gpui-base/src/input/base/element.rs
+index 5c4e980..bd267a6 100644
+--- a/vendor/gpui-base/src/input/base/element.rs
++++ b/vendor/gpui-base/src/input/base/element.rs
+@@ -344,7 +344,7 @@ use super::MASK_CHAR;
+ // Writer patches (see `docs/patches/`).
+ #[path = "element_writer.rs"]
+ mod writer;
+-use writer::{Placed, place_rows};
++use writer::{Placed, object_row, place_object_rows, place_rows};
+ 
+ /// Convert a byte offset in the original text to a byte offset in the masked display string.
+ ///
+@@ -1551,7 +1551,11 @@ impl<M: InputModeKind> TextElement<M> {
+             InteractiveElement as _, StatefulInteractiveElement as _, prelude::FluentBuilder as _,
+         };
+         let presentation = self.state.read(cx).token_presentation.clone();
+-        let child = presentation.render(token, window, cx);
++        // Derived inline objects (Writer patch) have their own renderer.
++        let child = match self.state.read(cx).inline_object_render.clone() {
++            Some(render) => render(token, window, cx),
++            None => presentation.render(token, window, cx),
++        };
+         // Preserve interaction state only for the same token occurrence and
+         // hover eligibility. Replacements and re-enabling start fresh.
+         let start = token.range().start;
+@@ -2034,7 +2038,13 @@ impl<M: InputModeKind> TextElement<M> {
+             let end = state.text.line_end_offset(row);
+             let spans = state.token_spans();
+             let first = spans.partition_point(|s| s.range().end <= start);
+-            for span in spans[first..].iter().take_while(|s| s.range().start < end) {
++            // A collapsed line (Writer `LineStyle::collapsed`) shows no text, so no objects.
++            let hidden = layout.lines[ix].is_hidden();
++            for span in spans[first..]
++                .iter()
++                .take_while(|s| s.range().start < end)
++                .filter(|_| !hidden)
++            {
+                 if let Some(position) =
+                     layout.lines[ix].position_for_index(span.range().start - start, layout, false)
+                 {
+@@ -2093,9 +2103,12 @@ impl<M: InputModeKind> TextElement<M> {
+         window: &mut Window,
+     ) -> Vec<LineLayout> {
+         let is_single_line = state.is_single_line();
+-        if state.tokens_visible() {
++        // The editor lays out object rows with its line styles below (Writer patch).
++        if state.tokens_visible() && !M::CODE_EDITOR {
+             return Self::layout_token_lines(state, last_layout, font_size, runs, window);
+         }
++        let objects = (M::CODE_EDITOR && state.tokens_visible())
++            .then(|| (state.token_spans(), state.token_layout_cache.as_deref()));
+ 
+         if is_single_line {
+             let text: SharedString = display_text.to_string().into();
+@@ -2154,9 +2167,13 @@ impl<M: InputModeKind> TextElement<M> {
+ 
+             let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
+             let mut wrapped_runs: SmallVec<[Vec<TextRun>; 1]> = SmallVec::with_capacity(1);
++            // Rows with inline objects (Writer patch), by row index. Their `wrapped_lines`
++            // entry is a placeholder.
++            let mut object_rows: Vec<(usize, crate::input::display_map::InputLine)> = Vec::new();
+             let mut line_has_background = false;
+             let line_style = line_item.style;
+             let line_font_size = font_size * line_style.text_scale;
++            let line_start = state.text.line_start_offset(buffer_line);
+ 
+             for range in &line_item.wrapped_lines {
+                 let line_runs = runs_for_range(runs, run_offset, &range);
+@@ -2173,6 +2190,19 @@ impl<M: InputModeKind> TextElement<M> {
+                 let sub_line: SharedString = line_text[range.clone()].to_string().into();
+                 let line_runs =
+                     align_runs_to_char_boundaries(&sub_line, &line_runs).unwrap_or(line_runs);
++                if let Some((spans, Some(cache))) = objects
++                    && let Some(row) = object_row(
++                        &sub_line,
++                        line_start + range.start,
++                        spans,
++                        cache,
++                        &line_runs,
++                        line_font_size,
++                        window,
++                    )
++                {
++                    object_rows.push((wrapped_lines.len(), row));
++                }
+                 let shaped_line = window
+                     .text_system()
+                     .shape_line(sub_line, line_font_size, &line_runs, None);
+@@ -2189,20 +2219,36 @@ impl<M: InputModeKind> TextElement<M> {
+                     .nth(line_item.indent as usize)
+                     .map(|(ix, _)| ix)
+                     .unwrap_or(line_text.len());
+-                wrapped_lines[0].x_for_index(indent_byte_len)
++                match object_rows.first() {
++                    Some((0, row)) => row.x_for_index(indent_byte_len),
++                    _ => wrapped_lines[0].x_for_index(indent_byte_len),
++                }
+             } else {
+                 px(0.)
+             };
+ 
+-            let placed = place_rows(
+-                wrapped_lines,
+-                &wrapped_runs,
+-                &line_style,
+-                wrap_indent,
+-                last_layout.wrap_width,
+-                line_font_size,
+-                window,
+-            );
++            let placed = if object_rows.is_empty() {
++                place_rows(
++                    wrapped_lines,
++                    &wrapped_runs,
++                    &line_style,
++                    wrap_indent,
++                    last_layout.wrap_width,
++                    line_font_size,
++                    window,
++                )
++            } else {
++                place_object_rows(
++                    wrapped_lines,
++                    object_rows,
++                    &wrapped_runs,
++                    &line_style,
++                    wrap_indent,
++                    last_layout.wrap_width,
++                    line_font_size,
++                    window,
++                )
++            };
+             let line_layout = match placed {
+                 Placed::Plain(wrapped_lines) => LineLayout::new().lines(wrapped_lines),
+                 Placed::Rows(rows, offsets) => {
+@@ -2725,6 +2771,9 @@ impl<M: InputModeKind> Element for TextElement<M> {
+             .update(cx, |state, cx| state.sync_revealed_lines(cx));
+ 
+         let line_height = window.line_height();
++        // Inline objects are derived from the text (Writer patch); find them for this revision.
++        self.state
++            .update(cx, |state, _| state.refresh_derived_tokens());
+         let token_elements = self.measure_tokens(
+             (bounds.size.width - line_number_width - RIGHT_MARGIN).max(px(1.)),
+             line_height,
+diff --git a/vendor/gpui-base/src/input/base/element_writer.rs b/vendor/gpui-base/src/input/base/element_writer.rs
+index 41f3e3a..b7387cf 100644
+--- a/vendor/gpui-base/src/input/base/element_writer.rs
++++ b/vendor/gpui-base/src/input/base/element_writer.rs
+@@ -102,10 +102,20 @@ impl<M: InputModeKind> TextElement<M> {
+             let has_text = !line.is_hidden();
+             if has_text && !selected_rows.iter().any(|rows| rows.contains(&row)) {
+                 let text: SharedString = state.text.slice_line(row).to_string().into();
++                let line_start = state.text.line_start_offset(row);
++                let spans = state.token_spans();
+                 for range in ranges(row, &text) {
+                     if range.is_empty() || range.end > text.len() {
+                         continue;
+                     }
++                    // An inline object already replaces that text (`set_inline_objects`).
++                    let absolute = line_start + range.start..line_start + range.end;
++                    if spans.iter().any(|span| {
++                        let span = span.range();
++                        span.start < absolute.end && absolute.start < span.end
++                    }) {
++                        continue;
++                    }
+                     let (Some(start), Some(end)) = (
+                         line.position_for_index(range.start, layout, false),
+                         line.position_for_index(range.end, layout, true),
+@@ -192,6 +202,123 @@ pub(super) fn place_rows(
+     Placed::Rows(placed, offsets)
+ }
+ 
++/// A visual row that holds inline objects (see `EditorState::set_inline_objects`): the text
++/// between objects shaped with the row's runs and font size, and each object an unpainted gap as
++/// wide as its measured element (the element is painted over it). `row_start` is the row's offset
++/// in the document. `None` when no object lies wholly in the row.
++pub(super) fn object_row(
++    text: &SharedString,
++    row_start: usize,
++    spans: &[crate::input::InlineTokenSpan],
++    cache: &super::super::token_presentation::TokenLayoutCache,
++    runs: &[TextRun],
++    font_size: Pixels,
++    window: &mut Window,
++) -> Option<InputLine> {
++    let row_end = row_start + text.len();
++    let first = spans.partition_point(|span| span.range().end <= row_start);
++    let objects: Vec<(Range<usize>, Pixels)> = spans[first..]
++        .iter()
++        .take_while(|span| span.range().start < row_end)
++        .filter(|span| span.range().start >= row_start && span.range().end <= row_end)
++        .map(|span| {
++            let range = span.range();
++            let width = cache.widths.get(span.token()).copied().unwrap_or_default();
++            (range.start - row_start..range.end - row_start, width)
++        })
++        .collect();
++    if objects.is_empty() {
++        return None;
++    }
++    let shape = |range: Range<usize>, x: Pixels, window: &mut Window| {
++        let piece: SharedString = text[range.clone()].to_string().into();
++        let piece_runs = runs_for_range(runs, 0, &range);
++        let piece_runs = align_runs_to_char_boundaries(&piece, &piece_runs).unwrap_or(piece_runs);
++        let shaped = window
++            .text_system()
++            .shape_line(piece, font_size, &piece_runs, None);
++        InlineFragment {
++            x,
++            width: shaped.width,
++            text: Some(shaped),
++            range,
++        }
++    };
++    let mut fragments = Vec::with_capacity(objects.len() * 2 + 1);
++    let (mut offset, mut x) = (0, px(0.));
++    for (range, width) in objects {
++        if offset < range.start {
++            let fragment = shape(offset..range.start, x, window);
++            x += fragment.width;
++            fragments.push(fragment);
++        }
++        fragments.push(InlineFragment {
++            range: range.clone(),
++            x,
++            width,
++            text: None,
++        });
++        x += width;
++        offset = range.end;
++    }
++    if offset < text.len() {
++        fragments.push(shape(offset..text.len(), x, window));
++    }
++    Some(InputLine::inline(text.clone(), fragments))
++}
++
++/// [`place_rows`] for a line with object rows (see [`object_row`]): `object_rows` replace the
++/// shaped rows at their indexes. Object rows are indented and aligned like the others but not
++/// justified (an object cannot stretch).
++#[allow(clippy::too_many_arguments)]
++pub(super) fn place_object_rows(
++    rows: SmallVec<[ShapedLine; 1]>,
++    object_rows: Vec<(usize, InputLine)>,
++    runs: &[Vec<TextRun>],
++    style: &crate::input::LineStyle,
++    wrap_indent: Pixels,
++    wrap_width: Option<Pixels>,
++    font_size: Pixels,
++    window: &mut Window,
++) -> Placed {
++    use crate::input::LineAlign;
++    let last = rows.len().saturating_sub(1);
++    let mut object_rows = object_rows.into_iter().peekable();
++    let mut placed = SmallVec::with_capacity(rows.len());
++    let mut offsets = SmallVec::with_capacity(rows.len());
++    for (ix, (row, row_runs)) in rows.into_iter().zip(runs).enumerate() {
++        let object = object_rows
++            .next_if(|(at, _)| *at == ix)
++            .map(|(_, line)| line);
++        let indent = if ix == 0 {
++            style.first_indent
++        } else {
++            wrap_indent
++        };
++        let text_len = row.text.trim_end().len();
++        let width = match &object {
++            Some(line) => line.x_for_index(text_len),
++            None => row.x_for_index(text_len),
++        };
++        let free = wrap_width.map_or(px(0.), |wrap| (wrap - indent - width).max(px(0.)));
++        let offset = match style.align {
++            LineAlign::Center => indent + free / 2.,
++            LineAlign::End => indent + free,
++            LineAlign::Start | LineAlign::Justify => indent,
++        };
++        offsets.push(offset);
++        let line = match object {
++            Some(line) => line,
++            None => (style.align == LineAlign::Justify && ix < last && free > px(0.))
++                .then(|| justify_row(&row, row_runs, free, font_size, window))
++                .flatten()
++                .unwrap_or_else(|| InputLine::from(row)),
++        };
++        placed.push(line);
++    }
++    Placed::Rows(placed, offsets)
++}
++
+ /// Stretch a row by `free`, spread over its runs of spaces, or between its graphemes when it has
+ /// no spaces (e.g. CJK text). Words are shaped on their own and painted at their widened
+ /// positions; a run of spaces becomes an unpainted gap as wide as the spaces plus its share. So
+diff --git a/vendor/gpui-base/src/input/base/inline_tokens.rs b/vendor/gpui-base/src/input/base/inline_tokens.rs
+index a3d3f71..c7c383c 100644
+--- a/vendor/gpui-base/src/input/base/inline_tokens.rs
++++ b/vendor/gpui-base/src/input/base/inline_tokens.rs
+@@ -249,11 +249,70 @@ impl InlineTokenStore {
+     }
+ }
+ 
++/// Shift derived spans (Writer patch: `EditorState::set_inline_objects`) over an edit: drop the ones
++/// it touches and move the ones after it. The provider derives them again before the next layout.
++fn shift_derived(spans: &mut Vec<InlineTokenSpan>, range: &Range<usize>, new_len: usize) {
++    let shift = new_len as isize - range.len() as isize;
++    spans.retain_mut(|span| {
++        if span.range.start < range.end && range.start < span.range.end {
++            return false;
++        }
++        if span.range.start >= range.end {
++            *span = span.shifted(shift);
++        }
++        true
++    });
++}
++
+ impl<M: InputModeKind> InputBaseState<M> {
+     pub(super) fn token_spans(&self) -> &[InlineTokenSpan] {
+         self.inline_tokens
+             .as_ref()
+-            .map_or(&[], |store| &store.spans)
++            .map_or(&self.derived_tokens, |store| &store.spans)
++    }
++    /// Derive the inline objects from the text again if it changed since the last time (Writer
++    /// patch). Ranges that split a character, overlap, span lines, or touch an IME composition
++    /// are skipped.
++    pub(crate) fn refresh_derived_tokens(&mut self) {
++        use super::rope_ext::RopeExt as _;
++        let Some(provider) = self.inline_object_ranges.clone() else {
++            if !self.derived_tokens.is_empty() {
++                self.derived_tokens.clear();
++            }
++            return;
++        };
++        if self.derived_revision == Some(self.document_revision) {
++            return;
++        }
++        self.derived_revision = Some(self.document_revision);
++        let mut spans = Vec::new();
++        for row in 0..self.text.lines_len() {
++            let line_start = self.text.line_start_offset(row);
++            let line: String = self.text.slice_line(row).into();
++            let mut end = 0;
++            for (range, token) in provider(row, &line) {
++                let valid = range.start >= end
++                    && range.start < range.end
++                    && range.end <= line.len()
++                    && line.is_char_boundary(range.start)
++                    && line.is_char_boundary(range.end)
++                    && token.validate().is_ok();
++                if !valid {
++                    continue;
++                }
++                let range = line_start + range.start..line_start + range.end;
++                if self
++                    .ime_marked_range
++                    .as_ref()
++                    .is_some_and(|marked| marked.start < range.end && range.start < marked.end)
++                {
++                    continue;
++                }
++                end = range.end - line_start;
++                spans.push(InlineTokenSpan { range, token });
++            }
++        }
++        self.derived_tokens = spans;
+     }
+     pub(super) fn token_boundary(&self, offset: usize, bias: sum_tree::Bias) -> usize {
+         let spans = self.token_spans();
+@@ -285,6 +344,9 @@ impl<M: InputModeKind> InputBaseState<M> {
+         range: &Range<usize>,
+         new_len: usize,
+     ) -> Option<Box<TokenDelta>> {
++        if self.inline_tokens.is_none() && !self.derived_tokens.is_empty() {
++            shift_derived(&mut self.derived_tokens, range, new_len);
++        }
+         if self.replaying_history {
+             return None;
+         }
+diff --git a/vendor/gpui-base/src/input/base/state.rs b/vendor/gpui-base/src/input/base/state.rs
+index a718a04..46cedcc 100644
+--- a/vendor/gpui-base/src/input/base/state.rs
++++ b/vendor/gpui-base/src/input/base/state.rs
+@@ -428,6 +428,17 @@ pub struct InputBaseState<M: InputModeKind> {
+     revealed_rows: Option<(u64, Vec<std::ops::Range<usize>>)>,
+     pub(super) undo_manager: UndoManager,
+     pub(super) inline_tokens: Option<Box<super::inline_tokens::InlineTokenStore>>,
++    /// Finds the inline objects of a line (Writer patch, see
++    /// [`crate::input::EditorState::set_inline_objects`]). The spans it finds are derived from the
++    /// text, never stored in the document or its history.
++    pub(crate) inline_object_ranges: Option<crate::input::InlineObjectRanges>,
++    /// Draws those objects. Kept apart from `token_presentation`, which the styled view installs
++    /// again on every render.
++    pub(crate) inline_object_render: Option<super::InlineTokenRenderer>,
++    pub(crate) inline_object_click: Option<super::InlineTokenClickListener>,
++    /// The spans `inline_object_ranges` found, and the document revision they were found for.
++    pub(super) derived_tokens: Vec<super::InlineTokenSpan>,
++    pub(super) derived_revision: Option<u64>,
+     pub(super) pending_token: Option<super::InlineToken>,
+     pub(super) replaying_history: bool,
+     pub(super) validated_token_edit: bool,
+@@ -898,6 +909,11 @@ impl<M: InputModeKind> InputBaseState<M> {
+             secondary_click: None,
+             revealed_rows: None,
+             inline_tokens: None,
++            inline_object_ranges: None,
++            inline_object_render: None,
++            inline_object_click: None,
++            derived_tokens: Vec::new(),
++            derived_revision: None,
+             pending_token: None,
+             replaying_history: false,
+             validated_token_edit: false,
+diff --git a/vendor/gpui-base/src/input/base/token_presentation.rs b/vendor/gpui-base/src/input/base/token_presentation.rs
+index 43b4b99..657cba4 100644
+--- a/vendor/gpui-base/src/input/base/token_presentation.rs
++++ b/vendor/gpui-base/src/input/base/token_presentation.rs
+@@ -248,8 +248,12 @@ impl<M: InputModeKind> InputBaseState<M> {
+             .iter()
+             .find(|span| span.range().start == start)?
+             .clone();
++        let listener = match &self.inline_object_click {
++            Some(listener) => listener.clone(),
++            None => self.token_presentation.listener.clone()?,
++        };
+         Some((
+-            self.token_presentation.listener.clone()?,
++            listener,
+             InlineTokenClickEvent {
+                 span,
+                 bounds,
+diff --git a/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs b/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
+index 653b178..b91fc2f 100644
+--- a/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
++++ b/vendor/gpui-base/src/input/editor/display_map/text_wrapper.rs
+@@ -5,7 +5,7 @@ use std::ops::Range;
+ use std::rc::Rc;
+ 
+ use gpui::{
+-    App, Font, LineFragment, Pixels, Point, ShapedLine, Size, TextAlign, Window, point, px, size,
++    App, Font, Pixels, Point, ShapedLine, Size, TextAlign, Window, point, px, size,
+ };
+ use ropey::Rope;
+ use smallvec::SmallVec;
+@@ -34,13 +34,51 @@ pub enum WrappingIndent {
+ 
+ /// Choose Unicode line-break opportunities using the same shaped widths as
+ /// painting. Oversized words fall back to complete graphemes, never UTF-8 bytes.
++#[cfg(test)]
+ fn measured_wrap_boundaries(
+     text: &str,
+     width: Pixels,
+     wrapping_indent: WrappingIndent,
+     first_indent: Pixels,
+-    mut measure: impl FnMut(&str) -> Pixels,
++    measure: impl FnMut(&str) -> Pixels,
+ ) -> Vec<gpui::Boundary> {
++    measured_wrap_boundaries_with(text, width, wrapping_indent, first_indent, &[], measure)
++}
++
++/// [`measured_wrap_boundaries`] with inline objects (Writer patch): `objects` are byte ranges of
++/// `text`, in order, that measure as their given width and never break inside.
++fn measured_wrap_boundaries_with(
++    text: &str,
++    width: Pixels,
++    wrapping_indent: WrappingIndent,
++    first_indent: Pixels,
++    objects: &[(Range<usize>, Pixels)],
++    mut text_width: impl FnMut(&str) -> Pixels,
++) -> Vec<gpui::Boundary> {
++    let inside = |ix: usize| {
++        objects
++            .iter()
++            .any(|(range, _)| range.start < ix && ix < range.end)
++    };
++    // Text widths between objects, plus the objects' own widths.
++    let mut measure_range = |start: usize, end: usize| -> Pixels {
++        let mut total = px(0.);
++        let mut at = start;
++        for (range, object) in objects {
++            if range.end <= start || range.start >= end {
++                continue;
++            }
++            if at < range.start {
++                total += text_width(&text[at..range.start]);
++            }
++            total += *object;
++            at = range.end;
++        }
++        if at < end {
++            total += text_width(&text[at..end]);
++        }
++        total
++    };
+     let indent = if wrapping_indent == WrappingIndent::Same {
+         text.chars()
+             .take_while(|&c| c == ' ')
+@@ -49,10 +87,11 @@ fn measured_wrap_boundaries(
+     } else {
+         0
+     };
+-    let indent_width = measure(&text[..indent]);
++    let indent_width = measure_range(0, indent);
+     let ends: Vec<usize> = text
+         .grapheme_indices(true)
+         .map(|(ix, grapheme)| ix + grapheme.len())
++        .filter(|&ix| !inside(ix))
+         .collect();
+     let opportunities: Vec<usize> = unicode_linebreak::linebreaks(text)
+         .map(|(ix, _)| ix)
+@@ -72,7 +111,7 @@ fn measured_wrap_boundaries(
+         let remaining = ends.len() - first;
+         let mut low = 0;
+         let mut high = 1;
+-        while measure(&text[start..ends[first + high - 1]]) <= available {
++        while measure_range(start, ends[first + high - 1]) <= available {
+             low = high;
+             if high == remaining {
+                 break;
+@@ -81,7 +120,7 @@ fn measured_wrap_boundaries(
+         }
+         while low + 1 < high {
+             let mid = (low + high) / 2;
+-            if measure(&text[start..ends[first + mid - 1]]) <= available {
++            if measure_range(start, ends[first + mid - 1]) <= available {
+                 low = mid;
+             } else {
+                 high = mid;
+@@ -391,9 +430,6 @@ impl TextWrapper {
+         new_text: &Rope,
+         cx: &mut App,
+     ) {
+-        let mut line_wrapper = cx
+-            .text_system()
+-            .line_wrapper(self.font.clone(), self.font_size);
+         let metrics = self.inline_metrics.clone();
+         let text_system = gpui::WindowTextSystem::new(cx.text_system().clone());
+         let font = self.font.clone();
+@@ -405,59 +441,45 @@ impl TextWrapper {
+                              text_scale: f32,
+                              first_indent: Pixels| {
+                 let font_size = font_size * text_scale;
+-                let mut fragments = Vec::new();
+-                let mut offset = 0;
++                // Inline objects wholly in this line, as line-local ranges (Writer patch).
+                 let first = metrics.partition_point(|(r, _)| r.end <= line_start);
+-                for (range, width) in &metrics[first..] {
+-                    if range.start >= line_start + line_str.len() {
+-                        break;
+-                    }
+-                    if range.start < line_start || range.end > line_start + line_str.len() {
+-                        continue;
+-                    }
+-                    let range = range.start - line_start..range.end - line_start;
+-                    if !line_str.is_char_boundary(range.start)
+-                        || !line_str.is_char_boundary(range.end)
+-                    {
+-                        continue;
+-                    }
+-                    if offset < range.start {
+-                        fragments.push(LineFragment::text(&line_str[offset..range.start]));
+-                    }
+-                    fragments.push(LineFragment::element(*width, range.len()));
+-                    offset = range.end;
+-                }
+-                if fragments.is_empty() {
+-                    return measured_wrap_boundaries(
+-                        line_str,
+-                        wrap_width,
+-                        wrapping_indent,
+-                        first_indent,
+-                        |text| {
+-                            text_system
+-                                .layout_line(
+-                                    text,
+-                                    font_size,
+-                                    &[gpui::TextRun {
+-                                        len: text.len(),
+-                                        font: font.clone(),
+-                                        color: gpui::black(),
+-                                        background_color: None,
+-                                        underline: None,
+-                                        strikethrough: None,
+-                                    }],
+-                                    None,
+-                                )
+-                                .width
+-                        },
+-                    );
+-                }
+-                if offset < line_str.len() {
+-                    fragments.push(LineFragment::text(&line_str[offset..]));
+-                }
+-                line_wrapper
+-                    .wrap_line(&fragments, wrap_width, gpui::IndentAdjustment::SameIndent)
+-                    .collect()
++                let objects: Vec<(Range<usize>, Pixels)> = metrics[first..]
++                    .iter()
++                    .take_while(|(range, _)| range.start < line_start + line_str.len())
++                    .filter(|(range, _)| {
++                        range.start >= line_start && range.end <= line_start + line_str.len()
++                    })
++                    .map(|(range, width)| {
++                        (range.start - line_start..range.end - line_start, *width)
++                    })
++                    .filter(|(range, _)| {
++                        line_str.is_char_boundary(range.start) && line_str.is_char_boundary(range.end)
++                    })
++                    .collect();
++                measured_wrap_boundaries_with(
++                    line_str,
++                    wrap_width,
++                    wrapping_indent,
++                    first_indent,
++                    &objects,
++                    |text| {
++                        text_system
++                            .layout_line(
++                                text,
++                                font_size,
++                                &[gpui::TextRun {
++                                    len: text.len(),
++                                    font: font.clone(),
++                                    color: gpui::black(),
++                                    background_color: None,
++                                    underline: None,
++                                    strikethrough: None,
++                                }],
++                                None,
++                            )
++                            .width
++                    },
++                )
+         };
+         let rows = self._update(changed_text, range, new_text, &mut wrap_line);
+ 
+@@ -1344,6 +1366,30 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn measured_wrap_keeps_inline_objects_whole() {
++        // One unit per grapheme; the object `{{x}}` (bytes 3..8) measures 4 units.
++        let wrap = |width, first_indent| {
++            measured_wrap_boundaries_with(
++                "ab {{x}} cd",
++                px(width),
++                WrappingIndent::None,
++                px(first_indent),
++                &[(3..8, px(4.))],
++                |s| px(s.graphemes(true).count() as f32),
++            )
++            .into_iter()
++            .map(|b| b.ix)
++            .collect::<Vec<_>>()
++        };
++        // "ab " (3) + object (4) + " " (1) = 8 fits; "cd" moves down.
++        assert_eq!(wrap(8., 0.), vec![9]);
++        // Too narrow for the object after "ab ": it moves to the next row whole.
++        assert_eq!(wrap(5., 0.), vec![3, 9]);
++        // The first-line indent narrows only the first row.
++        assert_eq!(wrap(8., 2.), vec![3]);
++    }
++
+     #[test]
+     fn measured_wrap_preserves_words_graphemes_and_indentation() {
+         let wrap = |text: &str, width, indent| {
+diff --git a/vendor/gpui-base/src/input/editor/mod.rs b/vendor/gpui-base/src/input/editor/mod.rs
+index 47ec2f6..494ed84 100644
+--- a/vendor/gpui-base/src/input/editor/mod.rs
++++ b/vendor/gpui-base/src/input/editor/mod.rs
+@@ -5,7 +5,8 @@ use super::{EditorMode, InputBaseState, InputModeKind};
+ // Writer patches (see `docs/patches/`).
+ mod writer;
+ pub use writer::{
+-    LineBlockContext, LineBlockRenderer, LineOverlayContext, LineOverlayRanges, LineOverlayRenderer,
++    InlineObjectRanges, LineBlockContext, LineBlockRenderer, LineOverlayContext, LineOverlayRanges,
++    LineOverlayRenderer,
+     SecondaryClickHandler,
+ };
+ 
+diff --git a/vendor/gpui-base/src/input/editor/writer.rs b/vendor/gpui-base/src/input/editor/writer.rs
+index d009471..8b47517 100644
+--- a/vendor/gpui-base/src/input/editor/writer.rs
++++ b/vendor/gpui-base/src/input/editor/writer.rs
+@@ -82,6 +82,43 @@ impl InputBaseState<EditorMode> {
+         cx.notify();
+     }
+ 
++    /// Show parts of lines as atomic inline objects drawn by `render`, e.g. the computed value of a
++    /// `{{today}}` call or a small canvas. `ranges` gets each buffer row and its line without the
++    /// trailing `\n` and returns the object ranges and their tokens; it runs again over the
++    /// document after every edit (before the next layout), so it should be cheap.
++    ///
++    /// The text stays in the document and is what copy and save see; an object only changes how
++    /// its range is shown and edited. The caret steps over it, a deletion removes it whole, and
++    /// the row is laid out and wrapped with the measured width of `render`'s element. Nothing
++    /// enters the undo history. A click selects the object and then calls `on_click`; a renderer
++    /// that handles its own mouse input should stop it from propagating. `render` should draw its
++    /// own selected look from [`crate::input::InlineTokenContext::is_selected`].
++    pub fn set_inline_objects(
++        &mut self,
++        ranges: impl Fn(usize, &str) -> Vec<(std::ops::Range<usize>, crate::input::InlineToken)>
++        + 'static,
++        render: impl Fn(&crate::input::InlineTokenContext, &mut Window, &mut App) -> gpui::AnyElement
++        + 'static,
++        on_click: Option<
++            std::rc::Rc<dyn Fn(&crate::input::InlineTokenClickEvent, &mut Window, &mut App)>,
++        >,
++        cx: &mut gpui::Context<Self>,
++    ) {
++        self.inline_object_ranges = Some(std::rc::Rc::new(ranges));
++        self.inline_object_render = Some(std::rc::Rc::new(render));
++        self.inline_object_click = on_click;
++        self.derived_revision = None;
++        cx.notify();
++    }
++
++    /// Derive the inline objects again on the next layout, e.g. after what `render` shows changed
++    /// without an edit (see [`Self::set_inline_objects`]).
++    pub fn refresh_inline_objects(&mut self, cx: &mut gpui::Context<Self>) {
++        self.derived_revision = None;
++        self.token_layout_cache = None;
++        cx.notify();
++    }
++
+     /// Remove every line overlay (see [`Self::set_line_overlays`]).
+     pub fn clear_line_overlays(&mut self, cx: &mut gpui::Context<Self>) {
+         self.line_overlays = None;
+@@ -183,5 +220,10 @@ pub type LineOverlayRanges = std::rc::Rc<dyn Fn(usize, &str) -> Vec<std::ops::Ra
+ pub type LineOverlayRenderer =
+     std::rc::Rc<dyn Fn(&LineOverlayContext, &mut Window, &mut App) -> gpui::AnyElement>;
+ 
++/// Finds the inline objects of a line (see [`EditorState::set_inline_objects`]): byte ranges within
++/// the line, in order and not overlapping, each with the token describing it.
++pub type InlineObjectRanges =
++    std::rc::Rc<dyn Fn(usize, &str) -> Vec<(std::ops::Range<usize>, crate::input::InlineToken)>>;
++
+ /// Handles a ⌘/Ctrl-click (see [`EditorState::set_secondary_click`]).
+ pub type SecondaryClickHandler = std::rc::Rc<dyn Fn(&str, usize, &mut Window, &mut App) -> bool>;
+diff --git a/vendor/gpui-base/src/input/mod.rs b/vendor/gpui-base/src/input/mod.rs
+index 598d05a..16d3b08 100644
+--- a/vendor/gpui-base/src/input/mod.rs
++++ b/vendor/gpui-base/src/input/mod.rs
+@@ -95,7 +95,7 @@ pub use display_map::{
+     LineStyle, LineStyleFn, WrappingIndent,
+ };
+ pub use editor::{
+-    Editor, EditorState, LineBlockContext, LineBlockRenderer, LineOverlayContext,
++    Editor, EditorState, InlineObjectRanges, LineBlockContext, LineBlockRenderer, LineOverlayContext,
+     LineOverlayRanges, LineOverlayRenderer, SecondaryClickHandler,
+ };
+ pub use highlighting::{

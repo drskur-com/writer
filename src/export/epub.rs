@@ -722,13 +722,18 @@ pub fn build<W: Write + Seek>(project: &ExportProject, writer: &mut W) -> Result
     // 4. 시트 원고를 순회하며 섹션 구성
     for sheet in &project.sheets {
         let sheet_dir = sheet.path.parent().unwrap_or(&project.dir);
-        let blocks = crate::markdown::manuscript_blocks(
+        let mut blocks = crate::markdown::manuscript_blocks(
             &sheet.content,
             project
                 .styles
                 .resolve(StyleTarget::Body)
                 .preserve_line_breaks,
         );
+        let relative = sheet
+            .path
+            .strip_prefix(&project.root)
+            .unwrap_or(&sheet.path);
+        crate::extension::resolve_inline(&mut blocks, &project.root, &relative.to_string_lossy());
 
         // 앞 시트와 접합되지 않은 새 시트라면 이전 섹션을 마감하여 새 파일에서 시작
         if !sheet.glued {

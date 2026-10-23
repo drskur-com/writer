@@ -105,7 +105,12 @@ pub fn build<W: Write + Seek>(
         .preserve_line_breaks;
     for sheet in &project.sheets {
         let dir = sheet.path.parent().unwrap_or(&project.dir).to_path_buf();
-        let blocks = crate::markdown::manuscript_blocks(&sheet.content, preserve);
+        let mut blocks = crate::markdown::manuscript_blocks(&sheet.content, preserve);
+        let relative = sheet
+            .path
+            .strip_prefix(&project.root)
+            .unwrap_or(&sheet.path);
+        crate::extension::resolve_inline(&mut blocks, &project.root, &relative.to_string_lossy());
         if !sheet.glued {
             doc.pending_break = true;
         }

@@ -237,6 +237,183 @@ pub fn fence_name(info: &str) -> Option<&str> {
         .filter(|name| valid_name(name))
 }
 
+/// 문단 안의 인라인 확장 하나(`{{name key=value}}`, ADR-0036). `range`는 줄 안의 바이트 범위다(`{{`·`}}` 포함).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlineCall {
+    pub range: Range<usize>,
+    pub name: String,
+    pub args: Vec<(String, String)>,
+}
+
+/// 줄의 인라인 확장. `` ` ``로 감싼 코드 안은 글자다. 이름이 글자로 시작하는 확장 이름 꼴이 아니면 확장이 아니다
+/// (`{{ }}`를 쓰는 다른 글이 그대로 남는다).
+pub fn inline_calls(line: &str) -> Vec<InlineCall> {
+    let mut found = Vec::new();
+    if !line.contains("{{") {
+        return found;
+    }
+    // 인라인 코드(같은 길이의 백틱 사이) 범위.
+    let mut code: Vec<Range<usize>> = Vec::new();
+    let bytes = line.as_bytes();
+    let mut ix = 0;
+    while ix < bytes.len() {
+        if bytes[ix] != b'`' {
+            ix += 1;
+            continue;
+        }
+        let run = bytes[ix..].iter().take_while(|&&b| b == b'`').count();
+        let open = ix;
+        let mut close = None;
+        let mut jx = ix + run;
+        while jx < bytes.len() {
+            if bytes[jx] == b'`' {
+                let other = bytes[jx..].iter().take_while(|&&b| b == b'`').count();
+                if other == run {
+                    close = Some(jx + other);
+                    break;
+                }
+                jx += other;
+            } else {
+                jx += 1;
+            }
+        }
+        match close {
+            Some(end) => {
+                code.push(open..end);
+                ix = end;
+            }
+            None => ix += run,
+        }
+    }
+    let mut at = 0;
+    while let Some(start) = line[at..].find("{{").map(|found| at + found) {
+        let Some(end) = line[start + 2..]
+            .find("}}")
+            .map(|found| start + 2 + found + 2)
+        else {
+            break;
+        };
+        at = end;
+        if code.iter().any(|code| code.start < end && start < code.end) {
+            continue;
+        }
+        let inner = line[start + 2..end - 2].trim();
+        let mut words = split_words(inner).into_iter();
+        // 숫자로 시작하는 이름은 확장으로 보지 않는다(`{{ 3 }}` 같은 글이 남게).
+        let Some(name) = words
+            .next()
+            .filter(|name| valid_name(name) && name.starts_with(char::is_alphabetic))
+        else {
+            continue;
+        };
+        let args = words
+            .filter_map(|word| {
+                let (key, value) = word.split_once('=')?;
+                let key = key.trim();
+                (!key.is_empty()).then(|| (key.to_string(), value.to_string()))
+            })
+            .collect();
+        found.push(InlineCall {
+            range: start..end,
+            name,
+            args,
+        });
+    }
+    found
+}
+
+/// 빈칸으로 나눈 낱말. `"…"` 안의 빈칸은 나누지 않고, 따옴표는 뺀다(`\"`는 따옴표 글자).
+fn split_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if quoted && chars.peek() == Some(&'"') => {
+                word.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            c => word.push(c),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// 인라인 확장의 원문 `{{name key=value}}`. 빈칸·따옴표·`}`가 있는 값은 따옴표로 감싼다.
+pub fn inline_text(name: &str, args: &[(String, String)]) -> String {
+    let mut text = format!("{{{{{name}");
+    for (key, value) in args {
+        let plain = !value.is_empty()
+            && !value.contains(|c: char| c.is_whitespace() || matches!(c, '"' | '}' | '{'));
+        if plain {
+            text.push_str(&format!(" {key}={value}"));
+        } else {
+            text.push_str(&format!(" {key}=\"{}\"", value.replace('"', "\\\"")));
+        }
+    }
+    text.push_str("}}");
+    text
+}
+
+/// 책 미리보기·내보내기의 인라인 확장(ADR-0036): 원고 글자의 `{{…}}`를 그 확장의 글(`value`)로 바꾼다.
+/// 내보내기에서 빼는 것(`export:`·확장의 `export`)과 글이 아닌 그림은 지운다. 확장을 읽지 못하거나 실패하면
+/// 원문 그대로 둔다(무엇이 잘못됐는지 보이게). 코드 글자 안은 건드리지 않는다.
+pub fn resolve_inline(blocks: &mut [crate::markdown::Block], root: &Path, sheet: &str) {
+    let mut loaded: std::collections::HashMap<String, Option<Extension>> =
+        std::collections::HashMap::new();
+    crate::markdown::for_each_rich_mut(blocks, &mut |rich| {
+        for inline in rich.iter_mut() {
+            if inline.marks.code || inline.footnote.is_some() || !inline.text.contains("{{") {
+                continue;
+            }
+            let calls = inline_calls(&inline.text);
+            if calls.is_empty() {
+                continue;
+            }
+            let mut text = String::with_capacity(inline.text.len());
+            let mut at = 0;
+            for call in calls {
+                text.push_str(&inline.text[at..call.range.start]);
+                let source = &inline.text[call.range.clone()];
+                let chosen = export_arg(&call.args);
+                let replacement = if chosen == Some(false) {
+                    Some(String::new())
+                } else {
+                    let extension = loaded
+                        .entry(call.name.clone())
+                        .or_insert_with(|| Extension::open(root, &call.name).ok());
+                    match extension {
+                        None => None,
+                        Some(extension) if !chosen.unwrap_or(extension.export) => {
+                            Some(String::new())
+                        }
+                        Some(extension) if extension.values => extension
+                            .value(&without_reserved(&call.args), sheet)
+                            .ok()
+                            .flatten(),
+                        // 인라인 그림은 아직 내보내지 않는다.
+                        Some(_) => Some(String::new()),
+                    }
+                };
+                text.push_str(replacement.as_deref().unwrap_or(source));
+                at = call.range.end;
+            }
+            text.push_str(&inline.text[at..]);
+            inline.text = text;
+        }
+    });
+}
+
 /// 블록 본문의 `key: value` 줄.
 pub fn parse_args(lines: &[&str]) -> Vec<(String, String)> {
     lines
@@ -613,6 +790,8 @@ pub struct Extension {
     pub draws: bool,
     /// 영역을 누르면 부르는 `click(id, args)`가 있는지.
     pub clicks: bool,
+    /// 인라인 확장으로 글을 보이는 `value(args, ctx)`가 있는지(ADR-0036).
+    pub values: bool,
     /// 책 미리보기·내보내기에 넣는지(반환 표의 `export`, 기본 `true`). 블록의 `export:`가 이긴다.
     pub export: bool,
     /// 앞머리 `actions:`에 적은 동작. `click`은 이 동작만 돌려줄 수 있다.
@@ -690,6 +869,7 @@ impl Extension {
             period: self.period,
             draws: self.draws,
             clicks: self.clicks,
+            values: self.values,
             commands: self.commands.clone(),
         }
     }
@@ -737,6 +917,16 @@ impl Extension {
             ));
         };
         let draws = matches!(module.get::<Value>("draw"), Ok(Value::Function(_)));
+        let values = match module.get::<Value>("value").map_err(message)? {
+            Value::Nil => false,
+            Value::Function(_) => true,
+            other => {
+                return Err(format!(
+                    "value must be a function(args, ctx), got {}",
+                    other.type_name()
+                ));
+            }
+        };
         let clicks = match module.get::<Value>("click").map_err(message)? {
             Value::Nil => false,
             Value::Function(_) if draws => true,
@@ -749,8 +939,8 @@ impl Extension {
             }
         };
         let commands = command_titles(&module)?;
-        if !draws && commands.is_empty() {
-            return Err("the returned table has neither draw nor commands".into());
+        if !draws && !values && commands.is_empty() {
+            return Err("the returned table has none of draw, value, or commands".into());
         }
         let (size, size_fn) = match module.get::<Value>("size").map_err(message)? {
             Value::Function(size_fn) => (None, Some(size_fn)),
@@ -804,6 +994,7 @@ impl Extension {
             period,
             draws,
             clicks,
+            values,
             export,
             actions: parse_meta(name, source)
                 .map(|meta| meta.actions)
@@ -940,6 +1131,37 @@ impl Extension {
             }
         };
         Ok(Clicked { args, actions })
+    }
+
+    /// 인라인 확장의 글: `value(args, ctx)`가 돌려준 글(숫자는 글로). `value`가 없으면 `None`.
+    /// `ctx`는 `{ sheet = 시트 경로 }`다.
+    pub fn value(&self, args: &[(String, String)], sheet: &str) -> Result<Option<String>, String> {
+        if !self.values {
+            return Ok(None);
+        }
+        let value: Function = self.module.get("value").map_err(message)?;
+        let call = || -> mlua::Result<Value> {
+            let ctx = self.lua.create_table()?;
+            ctx.raw_set("sheet", sheet)?;
+            self.deadline.set(Instant::now() + DRAW_TIMEOUT);
+            value.call((self.args_table(args)?, ctx))
+        };
+        match call().map_err(message)? {
+            Value::Nil => Ok(Some(String::new())),
+            Value::String(text) => Ok(Some(
+                text.to_string_lossy()
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
+            )),
+            Value::Integer(n) => Ok(Some(n.to_string())),
+            Value::Number(n) => Ok(Some(n.to_string())),
+            other => Err(format!(
+                "value must return a string or number, got {}",
+                other.type_name()
+            )),
+        }
     }
 
     /// 블록 인자 `args`일 때의 캔버스 크기.
@@ -1247,7 +1469,7 @@ mod tests {
         );
         assert_eq!(parse_meta("x", "--[[---\ndescription: d\n"), None);
         // 앞머리는 Lua 주석이라 실행에 영향이 없다.
-        assert!(Extension::load("archer", source).is_err_and(|err| err.contains("neither")));
+        assert!(Extension::load("archer", source).is_err_and(|err| err.contains("none of draw")));
         // 넣은 블록은 다시 블록으로 읽힌다.
         let text = block_text("archer", &[("speed".into(), "1.5".into())]);
         assert_eq!(
@@ -1458,7 +1680,7 @@ return {
         let err = Extension::load("x", "return 1").unwrap_err();
         assert!(err.contains("must return a table"), "{err}");
         let err = Extension::load("x", "return {}").unwrap_err();
-        assert!(err.contains("neither draw nor commands"), "{err}");
+        assert!(err.contains("none of draw, value, or commands"), "{err}");
         let err = Extension::load("x", "return { draw = function(g) g.fooBar() end }")
             .unwrap()
             .draw(0.0, &[], &Theme::default())
@@ -1555,6 +1777,78 @@ return {
         )
         .unwrap();
         assert!(bad.size_for(&[]).unwrap_err().contains("between 1 and"));
+    }
+
+    #[test]
+    fn finds_inline_calls_outside_code() {
+        let line = "오늘은 {{today}}, 진행 {{progress value=0.6 label=\"반 넘음\"}} `{{code}}` {{ 3 }} {{bad name}}";
+        let calls = inline_calls(line);
+        let names: Vec<&str> = calls.iter().map(|call| call.name.as_str()).collect();
+        assert_eq!(names, ["today", "progress", "bad"]);
+        assert_eq!(&line[calls[0].range.clone()], "{{today}}");
+        assert_eq!(
+            calls[1].args,
+            [
+                ("value".to_string(), "0.6".to_string()),
+                ("label".to_string(), "반 넘음".to_string())
+            ]
+        );
+        // `name`만 낱말이고 `=`가 없는 낱말은 인자가 아니다.
+        assert!(calls[2].args.is_empty());
+        assert!(inline_calls("{{ 열고 닫지 않음").is_empty());
+        // 원문으로 되돌리면 같은 인자로 읽힌다.
+        let text = inline_text("progress", &calls[1].args);
+        assert_eq!(text, "{{progress value=0.6 label=\"반 넘음\"}}");
+        assert_eq!(inline_calls(&text)[0].args, calls[1].args);
+        let tricky = vec![("q".to_string(), "say \"hi\" }".to_string())];
+        assert_eq!(inline_calls(&inline_text("x", &tricky))[0].args, tricky);
+    }
+
+    #[test]
+    fn exports_inline_values_as_text() {
+        let root = std::env::temp_dir().join(format!("writer-inline-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(EXTENSIONS_DIR)).unwrap();
+        std::fs::write(
+            path(&root, "greet"),
+            "return { value = function(args, ctx) return 'hi ' .. (args.who or ctx.sheet) end }",
+        )
+        .unwrap();
+        std::fs::write(
+            path(&root, "secret"),
+            "return { export = false, value = function() return 'x' end }",
+        )
+        .unwrap();
+        std::fs::write(path(&root, "dot"), "return { draw = function(g) end }").unwrap();
+        let mut blocks = crate::markdown::manuscript_blocks(
+            "# {{greet who=책}}\n\n앞 {{greet}} {{secret}}{{dot}} {{missing}} `{{greet}}` {{greet export=false}}끝\n",
+            false,
+        );
+        resolve_inline(&mut blocks, &root, "a.md");
+        let text = |block: &crate::markdown::Block| match block {
+            crate::markdown::Block::Heading { text, .. }
+            | crate::markdown::Block::Paragraph(text) => crate::markdown::rich_text(text),
+            _ => String::new(),
+        };
+        assert_eq!(text(&blocks[0]), "hi 책");
+        assert_eq!(text(&blocks[1]), "앞 hi a.md  {{missing}} {{greet}} 끝");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn value_returns_one_line() {
+        let extension = Extension::load(
+            "today",
+            "return { value = function(args, ctx) return (args.prefix or '') .. ctx.sheet .. '\\nmore' end }",
+        )
+        .unwrap();
+        assert!(extension.values && !extension.draws);
+        let args = [("prefix".to_string(), "@".to_string())];
+        assert_eq!(
+            extension.value(&args, "a.md").unwrap(),
+            Some("@a.md".into())
+        );
+        let none = Extension::load("d", "return { draw = function() end }").unwrap();
+        assert_eq!(none.value(&[], "a.md").unwrap(), None);
     }
 
     #[test]
@@ -1735,6 +2029,7 @@ return {
             include_str!("../../resources/skills/extension/references/examples/route.md"),
             include_str!("../../resources/skills/extension/references/examples/pick-chart.md"),
             include_str!("../../resources/skills/extension/references/examples/chart-remote.md"),
+            include_str!("../../resources/skills/extension/references/examples/today.md"),
         ]
         .concat();
         let sources: Vec<&str> = doc
@@ -1742,7 +2037,7 @@ return {
             .skip(1)
             .filter_map(|rest| rest.split("\n```").next())
             .collect();
-        assert_eq!(sources.len(), 9);
+        assert_eq!(sources.len(), 10);
         let theme = Theme::default();
         let args = [
             ("values".to_string(), "12, 30, 21, 8".to_string()),
@@ -1762,6 +2057,9 @@ return {
             if extension.draws {
                 assert!(!meta.example.is_empty());
                 extension.draw(0.0, &meta.example, &theme).unwrap();
+            }
+            if extension.values {
+                assert!(extension.value(&meta.example, "a.md").unwrap().is_some());
             }
             // 누를 수 있으면 영역마다 눌러 보고, 돌려준 인자로도 그린다. 바꾸는 인자는 앞머리에 있다.
             if extension.clicks {

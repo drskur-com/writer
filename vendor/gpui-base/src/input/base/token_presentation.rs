@@ -248,8 +248,12 @@ impl<M: InputModeKind> InputBaseState<M> {
             .iter()
             .find(|span| span.range().start == start)?
             .clone();
+        let listener = match &self.inline_object_click {
+            Some(listener) => listener.clone(),
+            None => self.token_presentation.listener.clone()?,
+        };
         Some((
-            self.token_presentation.listener.clone()?,
+            listener,
             InlineTokenClickEvent {
                 span,
                 bounds,

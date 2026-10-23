@@ -428,6 +428,17 @@ pub struct InputBaseState<M: InputModeKind> {
     revealed_rows: Option<(u64, Vec<std::ops::Range<usize>>)>,
     pub(super) undo_manager: UndoManager,
     pub(super) inline_tokens: Option<Box<super::inline_tokens::InlineTokenStore>>,
+    /// Finds the inline objects of a line (Writer patch, see
+    /// [`crate::input::EditorState::set_inline_objects`]). The spans it finds are derived from the
+    /// text, never stored in the document or its history.
+    pub(crate) inline_object_ranges: Option<crate::input::InlineObjectRanges>,
+    /// Draws those objects. Kept apart from `token_presentation`, which the styled view installs
+    /// again on every render.
+    pub(crate) inline_object_render: Option<super::InlineTokenRenderer>,
+    pub(crate) inline_object_click: Option<super::InlineTokenClickListener>,
+    /// The spans `inline_object_ranges` found, and the document revision they were found for.
+    pub(super) derived_tokens: Vec<super::InlineTokenSpan>,
+    pub(super) derived_revision: Option<u64>,
     pub(super) pending_token: Option<super::InlineToken>,
     pub(super) replaying_history: bool,
     pub(super) validated_token_edit: bool,
@@ -898,6 +909,11 @@ impl<M: InputModeKind> InputBaseState<M> {
             secondary_click: None,
             revealed_rows: None,
             inline_tokens: None,
+            inline_object_ranges: None,
+            inline_object_render: None,
+            inline_object_click: None,
+            derived_tokens: Vec::new(),
+            derived_revision: None,
             pending_token: None,
             replaying_history: false,
             validated_token_edit: false,

@@ -118,6 +118,36 @@ pub enum Block {
     Footnotes(Vec<(usize, Vec<Block>)>),
 }
 
+/// 블록들(안쪽 인용·목록·표·각주 포함)의 글자마다 `f`를 부른다.
+pub fn for_each_rich_mut(blocks: &mut [Block], f: &mut impl FnMut(&mut Rich)) {
+    for block in blocks {
+        match block {
+            Block::Heading { text, .. } | Block::Paragraph(text) | Block::Lines(text) => f(text),
+            Block::Quote(inner) => for_each_rich_mut(inner, f),
+            Block::List { items, .. } => {
+                for item in items {
+                    for_each_rich_mut(&mut item.blocks, f);
+                }
+            }
+            Block::Table(table) => {
+                for cell in table.rows.iter_mut().flatten() {
+                    f(cell);
+                }
+            }
+            Block::Footnotes(notes) => {
+                for (_, inner) in notes {
+                    for_each_rich_mut(inner, f);
+                }
+            }
+            Block::BlankLines(_)
+            | Block::Code(_)
+            | Block::Extension { .. }
+            | Block::Image(_)
+            | Block::Rule => {}
+        }
+    }
+}
+
 /// 목록 항목 하나.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListItem {

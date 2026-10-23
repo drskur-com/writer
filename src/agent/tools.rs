@@ -239,7 +239,8 @@ impl Workspace {
                 "Test an extension (Extensions/<name>.lua). Without command, calls draw(g, t, args) and reports \
                  errors, the number of shapes, and the bounds of what was drawn compared with the canvas, and attaches \
                  a picture of the canvas so you can see the drawing. Pass times to see several animation frames in one \
-                 picture. Lists the regions (g.region) it declared. Pass hover to draw with the pointer over a region, \
+                 picture. For an extension with value(args, ctx) (inline {{name ...}} text), also reports the text it returns. \
+                 Lists the regions (g.region) it declared. Pass hover to draw with the pointer over a region, \
                  or click to call click(id, args) on a region and draw with the arguments it returns. With command, \
                  runs that command (1-based index or title) with the given selection and returns its result. Nothing \
                  in the library changes.",
@@ -694,8 +695,20 @@ impl Workspace {
             "Canvas {width} x {height}, animated: {}, commands: {commands}.",
             extension.animated
         );
+        // 인라인 확장의 글(ADR-0036).
+        let value = if extension.values {
+            match extension.value(&args, "Notes/Example.md") {
+                Ok(Some(value)) => format!(
+                    " value(args, ctx) returned {value:?} (shown inline as {{{{{name} ...}}}})."
+                ),
+                Ok(None) => String::new(),
+                Err(err) => format!(" value(args, ctx) failed: {err}"),
+            }
+        } else {
+            String::new()
+        };
         if !extension.draws {
-            return Ok((format!("{header} No draw function."), None));
+            return Ok((format!("{header}{value} No draw function."), None));
         }
         let theme = Theme::default();
         let mut frames = Vec::with_capacity(times.len());
@@ -711,7 +724,7 @@ impl Workspace {
             .iter()
             .map(|(t, shapes)| describe(*t, shapes, width, height))
             .collect();
-        let mut report = format!("{header}{clicked} {}", lines.join(" "));
+        let mut report = format!("{header}{value}{clicked} {}", lines.join(" "));
         report.push_str(&describe_regions(&regions, ui.hover.as_deref()));
         let image = if arguments.get("image").and_then(Value::as_bool) == Some(false) {
             None

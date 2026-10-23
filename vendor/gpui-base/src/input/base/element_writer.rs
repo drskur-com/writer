@@ -102,8 +102,18 @@ impl<M: InputModeKind> TextElement<M> {
             let has_text = !line.is_hidden();
             if has_text && !selected_rows.iter().any(|rows| rows.contains(&row)) {
                 let text: SharedString = state.text.slice_line(row).to_string().into();
+                let line_start = state.text.line_start_offset(row);
+                let spans = state.token_spans();
                 for range in ranges(row, &text) {
                     if range.is_empty() || range.end > text.len() {
+                        continue;
+                    }
+                    // An inline object already replaces that text (`set_inline_objects`).
+                    let absolute = line_start + range.start..line_start + range.end;
+                    if spans.iter().any(|span| {
+                        let span = span.range();
+                        span.start < absolute.end && absolute.start < span.end
+                    }) {
                         continue;
                     }
                     let (Some(start), Some(end)) = (
@@ -188,6 +198,123 @@ pub(super) fn place_rows(
             .then(|| justify_row(&row, row_runs, free, font_size, window))
             .flatten();
         placed.push(justified.unwrap_or_else(|| InputLine::from(row)));
+    }
+    Placed::Rows(placed, offsets)
+}
+
+/// A visual row that holds inline objects (see `EditorState::set_inline_objects`): the text
+/// between objects shaped with the row's runs and font size, and each object an unpainted gap as
+/// wide as its measured element (the element is painted over it). `row_start` is the row's offset
+/// in the document. `None` when no object lies wholly in the row.
+pub(super) fn object_row(
+    text: &SharedString,
+    row_start: usize,
+    spans: &[crate::input::InlineTokenSpan],
+    cache: &super::super::token_presentation::TokenLayoutCache,
+    runs: &[TextRun],
+    font_size: Pixels,
+    window: &mut Window,
+) -> Option<InputLine> {
+    let row_end = row_start + text.len();
+    let first = spans.partition_point(|span| span.range().end <= row_start);
+    let objects: Vec<(Range<usize>, Pixels)> = spans[first..]
+        .iter()
+        .take_while(|span| span.range().start < row_end)
+        .filter(|span| span.range().start >= row_start && span.range().end <= row_end)
+        .map(|span| {
+            let range = span.range();
+            let width = cache.widths.get(span.token()).copied().unwrap_or_default();
+            (range.start - row_start..range.end - row_start, width)
+        })
+        .collect();
+    if objects.is_empty() {
+        return None;
+    }
+    let shape = |range: Range<usize>, x: Pixels, window: &mut Window| {
+        let piece: SharedString = text[range.clone()].to_string().into();
+        let piece_runs = runs_for_range(runs, 0, &range);
+        let piece_runs = align_runs_to_char_boundaries(&piece, &piece_runs).unwrap_or(piece_runs);
+        let shaped = window
+            .text_system()
+            .shape_line(piece, font_size, &piece_runs, None);
+        InlineFragment {
+            x,
+            width: shaped.width,
+            text: Some(shaped),
+            range,
+        }
+    };
+    let mut fragments = Vec::with_capacity(objects.len() * 2 + 1);
+    let (mut offset, mut x) = (0, px(0.));
+    for (range, width) in objects {
+        if offset < range.start {
+            let fragment = shape(offset..range.start, x, window);
+            x += fragment.width;
+            fragments.push(fragment);
+        }
+        fragments.push(InlineFragment {
+            range: range.clone(),
+            x,
+            width,
+            text: None,
+        });
+        x += width;
+        offset = range.end;
+    }
+    if offset < text.len() {
+        fragments.push(shape(offset..text.len(), x, window));
+    }
+    Some(InputLine::inline(text.clone(), fragments))
+}
+
+/// [`place_rows`] for a line with object rows (see [`object_row`]): `object_rows` replace the
+/// shaped rows at their indexes. Object rows are indented and aligned like the others but not
+/// justified (an object cannot stretch).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn place_object_rows(
+    rows: SmallVec<[ShapedLine; 1]>,
+    object_rows: Vec<(usize, InputLine)>,
+    runs: &[Vec<TextRun>],
+    style: &crate::input::LineStyle,
+    wrap_indent: Pixels,
+    wrap_width: Option<Pixels>,
+    font_size: Pixels,
+    window: &mut Window,
+) -> Placed {
+    use crate::input::LineAlign;
+    let last = rows.len().saturating_sub(1);
+    let mut object_rows = object_rows.into_iter().peekable();
+    let mut placed = SmallVec::with_capacity(rows.len());
+    let mut offsets = SmallVec::with_capacity(rows.len());
+    for (ix, (row, row_runs)) in rows.into_iter().zip(runs).enumerate() {
+        let object = object_rows
+            .next_if(|(at, _)| *at == ix)
+            .map(|(_, line)| line);
+        let indent = if ix == 0 {
+            style.first_indent
+        } else {
+            wrap_indent
+        };
+        let text_len = row.text.trim_end().len();
+        let width = match &object {
+            Some(line) => line.x_for_index(text_len),
+            None => row.x_for_index(text_len),
+        };
+        let free = wrap_width.map_or(px(0.), |wrap| (wrap - indent - width).max(px(0.)));
+        let offset = match style.align {
+            LineAlign::Center => indent + free / 2.,
+            LineAlign::End => indent + free,
+            LineAlign::Start | LineAlign::Justify => indent,
+        };
+        offsets.push(offset);
+        let line = match object {
+            Some(line) => line,
+            None => (style.align == LineAlign::Justify && ix < last && free > px(0.))
+                .then(|| justify_row(&row, row_runs, free, font_size, window))
+                .flatten()
+                .unwrap_or_else(|| InputLine::from(row)),
+        };
+        placed.push(line);
     }
     Placed::Rows(placed, offsets)
 }

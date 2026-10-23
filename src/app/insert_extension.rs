@@ -52,6 +52,8 @@ struct EditBlock {
     state: Entity<EditorState>,
     range: Range<usize>,
     original: String,
+    /// 문단 안의 인라인 확장(`{{…}}`, ADR-0036)이면 `true`. 배율·자리는 없다.
+    inline: bool,
 }
 
 /// 그림을 그리는 확장 목록과 고른 것.
@@ -184,18 +186,19 @@ impl ExtensionPicker {
                 extra.push((key.clone(), String::new()));
             }
         }
-        // 배율은 앱이 처리하므로 어느 확장에나 있다.
+        // 배율은 앱이 처리하므로 어느 블록에나 있다(인라인 확장은 줄 높이에 맞춘다).
         let scale = (
             extension::SCALE_ARG.to_string(),
             t!("extensions.scale_arg").to_string(),
         );
+        let inline = self.edit.as_ref().is_some_and(|edit| edit.inline);
         let fields = meta
             .args
             .iter()
             .filter(|(key, _)| !extension::RESERVED_ARGS.contains(&key.as_str()))
             .cloned()
             .chain(extra)
-            .chain(std::iter::once(scale));
+            .chain((!inline).then_some(scale));
         for (key, description) in fields {
             let value = initial(&key);
             self.add_field(key, description, value, window, cx);
@@ -242,6 +245,13 @@ impl ExtensionPicker {
     fn args(&self, cx: &App) -> Vec<(String, String)> {
         if let Some(source) = &self.source {
             let text = source.read(cx).value();
+            if self.is_inline() {
+                return extension::inline_calls(&text)
+                    .into_iter()
+                    .next()
+                    .map(|call| call.args)
+                    .unwrap_or_default();
+            }
             return extension::blocks(&text)
                 .into_iter()
                 .next()
@@ -274,7 +284,15 @@ impl ExtensionPicker {
             return Some(source.read(cx).value().trim_end_matches('\n').to_string());
         }
         let meta = self.selected()?;
-        Some(extension::block_text(&meta.name, &self.args(cx)))
+        Some(if self.is_inline() {
+            extension::inline_text(&meta.name, &self.args(cx))
+        } else {
+            extension::block_text(&meta.name, &self.args(cx))
+        })
+    }
+
+    fn is_inline(&self) -> bool {
+        self.edit.as_ref().is_some_and(|edit| edit.inline)
     }
 
     /// 누르기(`click`)가 돌려준 값을 칸에 쓴다. 칸이 없는 인자는 칸을 더한다.
@@ -322,7 +340,8 @@ impl ExtensionPicker {
             Some(edit) if unchanged => edit.original.clone(),
             _ => self.block_text(cx).unwrap_or_default(),
         };
-        let source = cx.new(|cx| TextareaState::new(window, cx).auto_grow(6, 14));
+        let rows = if self.is_inline() { (2, 4) } else { (6, 14) };
+        let source = cx.new(|cx| TextareaState::new(window, cx).auto_grow(rows.0, rows.1));
         source.update(cx, |source, cx| source.set_value(text, window, cx));
         self._subscriptions
             .push(cx.subscribe(&source, |_, _, event: &InputEvent, cx| {
@@ -476,6 +495,7 @@ impl ExtensionPicker {
                 cx.notify();
             }))
         });
+        let inline = self.is_inline();
         div()
             .flex()
             .flex_wrap()
@@ -483,9 +503,11 @@ impl ExtensionPicker {
             .gap_1()
             .text_xs()
             .text_color(pal.muted)
-            .child(div().w(px(72.)).child(t!("extensions.align")))
-            .children(aligns)
-            .child(div().w(px(16.)))
+            .when(!inline, |this| {
+                this.child(div().w(px(72.)).child(t!("extensions.align")))
+                    .children(aligns)
+                    .child(div().w(px(16.)))
+            })
             .child(div().pr_1().child(t!("extensions.export")))
             .children(exports)
     }
@@ -553,18 +575,38 @@ impl Render for ExtensionPicker {
                 })
                 .ok();
         });
-        let preview = render_preview(
-            &self.host,
-            &self.player,
-            &self.ticker,
-            &meta.name,
-            &args,
-            (PREVIEW_WIDTH, PREVIEW_HEIGHT),
-            Some(on_changes),
-            pal,
-            window,
-            cx,
-        );
+        let value = match &*self.host.get(&meta.name) {
+            Ok(worker) if worker.info.values => {
+                Some(worker.value(&extension::without_reserved(&args), ""))
+            }
+            _ => None,
+        };
+        let preview = match value {
+            // 글을 보이는 확장은 그 글을 크게 보인다.
+            Some(value) => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .map(|this| match value {
+                    Ok(value) => this.text_xl().child(value.unwrap_or_default()),
+                    Err(err) => this.text_xs().text_color(pal.danger).child(err),
+                })
+                .into_any_element(),
+            None => render_preview(
+                &self.host,
+                &self.player,
+                &self.ticker,
+                &meta.name,
+                &args,
+                (PREVIEW_WIDTH, PREVIEW_HEIGHT),
+                Some(on_changes),
+                pal,
+                window,
+                cx,
+            ),
+        };
         // 순서는 상관없이 처음 값과 다른지 본다(칸은 `args` 순서, 처음 값은 적힌 순서다).
         let changed =
             self.source.is_none() && sorted(args.clone()) != sorted(self.baseline.clone());
@@ -770,9 +812,39 @@ impl WriterApp {
             state: target.clone(),
             original: text[range.clone()].to_string(),
             range,
+            inline: false,
         };
         let picker =
             cx.new(|cx| ExtensionPicker::edit(&root, &block.name, block.args, edit, window, cx));
+        self.open_extension_dialog(picker, target, window, cx);
+    }
+
+    /// 인라인 확장(`{{…}}`, 시트의 `range`에 있는 `source`)을 편집 대화상자로 연다.
+    pub(super) fn edit_inline_extension(
+        &mut self,
+        range: Range<usize>,
+        source: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.library.as_ref().map(|lib| lib.root.clone()) else {
+            return;
+        };
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let Some(call) = extension::inline_calls(source).into_iter().next() else {
+            return;
+        };
+        let target = editor.state().clone();
+        let edit = EditBlock {
+            state: target.clone(),
+            range,
+            original: source.to_string(),
+            inline: true,
+        };
+        let picker =
+            cx.new(|cx| ExtensionPicker::edit(&root, &call.name, call.args, edit, window, cx));
         self.open_extension_dialog(picker, target, window, cx);
     }
 

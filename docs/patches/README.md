@@ -16,12 +16,13 @@ vendor와 같아진다.
 | --- | --- |
 | `input/base/element.rs` | `input/base/element_writer.rs`(줄 블록·오버레이 배치, 행 정렬), `input/base/tests/element_writer.rs`(테스트) |
 | `input/base/state.rs` | `input/base/state_writer.rs`(입력·붙여넣기 변환, 접힌 줄 펼치기) |
-| `input/editor/mod.rs` | `input/editor/writer.rs`(공개 API: `set_line_style`·`set_line_blocks`·`set_line_overlays`·`replace_range_keeping_selections`·`set_secondary_click`) |
+| `input/editor/mod.rs` | `input/editor/writer.rs`(공개 API: `set_line_style`·`set_line_blocks`·`set_line_overlays`·`set_inline_objects`·`replace_range_keeping_selections`·`set_secondary_click`) |
 | `input/editor/display_map/display_map.rs` | `…/display_map_writer.rs`(행 높이 기하) |
 | `input/editor/display_map/text_wrapper.rs` | `…/text_wrapper_writer.rs`(`LineStyle` 등 타입, 줄 스타일·블록·펼치기) |
 | `input/editor/display_map/wrap_map.rs` | `…/wrap_map_writer.rs` |
 
-원본 파일 안에 남은 변경: `text_wrapper.rs`의 줄바꿈 클로저(줄별 글자 크기·첫 줄 들여쓰기),
+원본 파일 안에 남은 변경: `text_wrapper.rs`의 줄바꿈 클로저(줄별 글자 크기·첫 줄 들여쓰기, 인라인 객체를 쪼개지 않는
+측정 `measured_wrap_boundaries_with`), `inline_tokens.rs`·`token_presentation.rs`의 파생 객체(문서에 저장하지 않는 토큰),
 `element.rs`의 레이아웃·그리기 연결부, `state.rs`의 필드와 붙여넣기·입력 변환 호출,
 `overscroll.rs`·`scroll_bounce.rs`의 스크롤 보정(ADR 없음, 아래 두 패치).
 
@@ -51,4 +52,5 @@ t=$(mktemp -d); ln -s <원본 gpui-base> $t/a; ln -s "$PWD/vendor/gpui-base" $t/
 | `gpui-base-0.8.0-line-row.patch` | ADR-0016 줄 스타일의 행 번호 |
 | `gpui-base-0.8.0-line-block-row.patch` | ADR-0017 표 격자 |
 | `gpui-base-0.8.0-line-overlay.patch` | ADR-0023 줄 오버레이 |
+| `gpui-base-0.8.0-inline-objects.patch` | ADR-0036 인라인 객체(에디터의 파생 토큰, 객체 행 배치·줄바꿈) |
 | `gpui-base-0.8.0-overscroll-tolerance.patch`, `gpui-base-0.8.0-scroll-reverse.patch` | 스크롤 보정 |

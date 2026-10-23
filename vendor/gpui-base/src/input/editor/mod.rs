@@ -5,7 +5,8 @@ use super::{EditorMode, InputBaseState, InputModeKind};
 // Writer patches (see `docs/patches/`).
 mod writer;
 pub use writer::{
-    LineBlockContext, LineBlockRenderer, LineOverlayContext, LineOverlayRanges, LineOverlayRenderer,
+    InlineObjectRanges, LineBlockContext, LineBlockRenderer, LineOverlayContext, LineOverlayRanges,
+    LineOverlayRenderer,
     SecondaryClickHandler,
 };
 
