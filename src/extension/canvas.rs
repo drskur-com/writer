@@ -23,7 +23,7 @@ pub type Point = [f32; 2];
 /// 정지 그림 한 장에 그릴 수 있는 가장 많은 모양. 끝없이 그리는 실수를 막는다.
 pub const STILL_SHAPE_LIMIT: usize = 20_000;
 
-/// 애니메이션 한 프레임에 그릴 수 있는 가장 많은 모양. 모양을 픽셀로 그리는 일은 UI 스레드에서 하므로
+/// 애니메이션 한 프레임에 그릴 수 있는 가장 많은 모양. 프레임마다 모양을 렌더 스레드로 넘겨 픽셀로 그리므로
 /// 매 프레임의 몫에 상한을 둔다(`extension_painter`).
 pub const ANIMATED_SHAPE_LIMIT: usize = 2_000;
 
