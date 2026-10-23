@@ -1,11 +1,11 @@
 //! 확장의 3차원 장면: `g.newScene()`이 돌려주는 `scene`.
 //!
-//! GPU를 쓰지 않는다. 면과 선을 모아 두었다가 `scene:draw()`에서 카메라로 투영하고, 먼 것부터
-//! 2차원 모양(채운 다각형·선)으로 캔버스에 넣는다(화가 알고리즘). 그래서 모양 목록은 2차원 그대로이고,
-//! 그리는 쪽(에디터, 나중에 PDF·SVG)은 3차원을 몰라도 된다.
+//! GPU를 쓰지 않는다. 면과 선을 모아 두었다가 `scene:draw()`에서 카메라로 투영해 삼각형 묶음
+//! (`Shape::Scene3D`) 하나로 캔버스에 넣고, 그리는 쪽이 깊이 버퍼로 픽셀마다 빛을 주어 그린다
+//! ([`super::raster3d`], ADR-0045).
 //!
-//! 좌표계는 오른손, y가 위다. 면은 바깥에서 볼 때 반시계 방향으로 점을 잇는다. 빛은 면마다 한 번
-//! 계산한다(평면 음영: 주변광 + 램버트).
+//! 좌표계는 오른손, y가 위다. 면은 바깥에서 볼 때 반시계 방향으로 점을 잇는다. 빛은 주변광 + 램버트이고,
+//! 곡면(구·원기둥·원뿔·고리)은 꼭짓점 법선으로 부드럽게 칠한다(`setShading("flat")`이면 면마다 한 색).
 
 use std::cell::RefCell;
 use std::f32::consts::{PI, TAU};
@@ -13,7 +13,8 @@ use std::rc::Rc;
 
 use mlua::{Lua, MultiValue, Table, Value};
 
-use super::canvas::{Args, Color, Mode, Point, Recorder, STILL_SHAPE_LIMIT, polyline};
+use super::canvas::{Args, Color, Mode, Point, Recorder, STILL_SHAPE_LIMIT, Shape};
+use super::raster3d;
 
 type Vec3 = [f32; 3];
 
@@ -44,6 +45,7 @@ pub(super) const FUNCTIONS: &[&str] = &[
     "polygon",
     "mesh",
     "line",
+    "setShading",
     "project",
     "draw",
 ];
@@ -51,8 +53,6 @@ pub(super) const FUNCTIONS: &[&str] = &[
 /// 카메라에서 이보다 가까운 것은 잘라 낸다(원근 투영).
 const NEAR: f32 = 0.01;
 
-/// 채운 면을 바깥으로 넓히는 폭(캔버스 단위). 이웃한 면 사이에 안티에일리어싱 틈이 보이지 않게 한다.
-const SEAM: f32 = 0.35;
 
 /// 3×4 아핀 변환(행 우선): 행마다 `[m0, m1, m2, t]`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -84,6 +84,30 @@ impl Mat {
             }
         }
         Self(out)
+    }
+
+    /// 법선을 옮기는 3×3(역전치에 행렬식의 부호를 곱한 것, 정규화 전).
+    fn normal(&self, [x, y, z]: Vec3) -> Vec3 {
+        let m = &self.0;
+        let (a, b, c, d, e, f, g, h, i) = (m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]);
+        // 여인수 행렬.
+        let cof = [
+            e * i - f * h,
+            -(d * i - f * g),
+            d * h - e * g,
+            -(b * i - c * h),
+            a * i - c * g,
+            -(a * h - b * g),
+            b * f - c * e,
+            -(a * f - c * d),
+            a * e - b * d,
+        ];
+        let n = [
+            cof[0] * x + cof[3] * y + cof[6] * z,
+            cof[1] * x + cof[4] * y + cof[7] * z,
+            cof[2] * x + cof[5] * y + cof[8] * z,
+        ];
+        if self.determinant() < 0.0 { n.map(|v| -v) } else { n }
     }
 
     fn determinant(&self) -> f32 {
@@ -175,6 +199,8 @@ fn facing(mut points: Vec<Vec3>, outward: Vec3) -> Vec<Vec3> {
 enum Item {
     Face {
         points: Vec<Vec3>,
+        /// 꼭짓점 법선(장면 좌표, 정규화). 없으면 면의 법선(평면 음영).
+        normals: Option<Vec<Vec3>>,
         mode: Mode,
         color: Color,
         two_sided: bool,
@@ -203,6 +229,8 @@ struct Scene {
     light: Vec3,
     ambient: f32,
     color: Color,
+    /// 곡면을 꼭짓점 법선으로 부드럽게 칠하는지.
+    smooth: bool,
     transform: Mat,
     stack: Vec<Mat>,
     items: Vec<Item>,
@@ -291,77 +319,76 @@ fn clip_near(points: &[Vec3], near: f32) -> Vec<Vec3> {
     out
 }
 
-/// 2차원 다각형을 사각형 `[x, y, w, h]` 안만 남긴다(Sutherland–Hodgman).
-fn clip_rect(points: Vec<Point>, [x, y, w, h]: [f32; 4]) -> Vec<Point> {
-    let edges: [(usize, f32, bool); 4] = [
-        (0, x, true),
-        (0, x + w, false),
-        (1, y, true),
-        (1, y + h, false),
-    ];
-    let mut points = points;
-    for (axis, bound, keep_above) in edges {
-        let inside = |p: &Point| {
-            if keep_above {
-                p[axis] >= bound
-            } else {
-                p[axis] <= bound
-            }
+/// 카메라 공간 다각형(점마다 법선)을 깊이 `near` 앞쪽만 남긴다. 잘린 점의 법선은 보간한다.
+fn clip_near_with(points: &[(Vec3, Vec3)], near: f32) -> Vec<(Vec3, Vec3)> {
+    if points.iter().all(|(p, _)| p[2] >= near) {
+        return points.to_vec();
+    }
+    let mut out = Vec::new();
+    for (ix, &(a, na)) in points.iter().enumerate() {
+        let (b, nb) = points[(ix + 1) % points.len()];
+        if a[2] >= near {
+            out.push((a, na));
+        }
+        if (a[2] >= near) != (b[2] >= near) {
+            let t = (near - a[2]) / (b[2] - a[2]);
+            let lerp = |u: Vec3, v: Vec3| std::array::from_fn(|i| u[i] + (v[i] - u[i]) * t);
+            out.push((lerp(a, b), lerp(na, nb)));
+        }
+    }
+    out
+}
+
+/// 투영할 때 쓰는 것: 카메라, 장면 좌표 → 캔버스 좌표(2차원 변환까지), 선 굵기(캔버스 단위).
+struct Target<'a> {
+    camera: Camera,
+    to_canvas: &'a dyn Fn(Point) -> Point,
+    line_width: f32,
+}
+
+impl Target<'_> {
+    /// 카메라 공간 점의 꼭짓점.
+    fn vertex(&self, view: Vec3, normal: Vec3) -> raster3d::Vertex {
+        let (w, depth) = match self.camera.projection {
+            Projection::Perspective(_) => (1.0 / view[2], 1.0 / view[2]),
+            Projection::Orthographic(_) => (1.0, -view[2]),
         };
-        let mut out = Vec::with_capacity(points.len() + 2);
-        for (ix, a) in points.iter().enumerate() {
-            let b = points[(ix + 1) % points.len()];
-            if inside(a) {
-                out.push(*a);
-            }
-            if inside(a) != inside(&b) {
-                let t = (bound - a[axis]) / (b[axis] - a[axis]);
-                out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
-            }
-        }
-        points = out;
-        if points.is_empty() {
-            break;
+        raster3d::Vertex {
+            p: (self.to_canvas)(self.camera.screen(view)),
+            w,
+            depth,
+            normal,
         }
     }
-    points
-}
 
-/// 선분을 사각형 안만 남긴다(Liang–Barsky).
-fn clip_segment(a: Point, b: Point, [x, y, w, h]: [f32; 4]) -> Option<(Point, Point)> {
-    let d = [b[0] - a[0], b[1] - a[1]];
-    let (mut t0, mut t1) = (0.0f32, 1.0f32);
-    for (p, q) in [
-        (-d[0], a[0] - x),
-        (d[0], x + w - a[0]),
-        (-d[1], a[1] - y),
-        (d[1], y + h - a[1]),
-    ] {
-        if p == 0.0 {
-            if q < 0.0 {
-                return None;
-            }
-        } else {
-            let r = q / p;
-            if p < 0.0 {
-                t0 = t0.max(r);
-            } else {
-                t1 = t1.min(r);
-            }
+    /// 카메라 공간 선분을 화면에서 굵기만큼의 사각형(삼각형 둘)으로.
+    fn segment(&self, a: Vec3, b: Vec3, color: Color, out: &mut Vec<raster3d::Tri>) {
+        let view = clip_near(&[a, b], self.camera.near());
+        let [a, b] = match view.as_slice() {
+            [a, b] | [a, b, _] => [*a, *b],
+            _ => return,
+        };
+        let (va, vb) = (self.vertex(a, [0.0; 3]), self.vertex(b, [0.0; 3]));
+        let d = [vb.p[0] - va.p[0], vb.p[1] - va.p[1]];
+        let length = (d[0] * d[0] + d[1] * d[1]).sqrt();
+        if length < 1e-6 {
+            return;
+        }
+        let half = self.line_width.max(0.1) / 2.0;
+        let n = [-d[1] / length * half, d[0] / length * half];
+        let shift = |v: raster3d::Vertex, s: f32| raster3d::Vertex {
+            p: [v.p[0] + n[0] * s, v.p[1] + n[1] * s],
+            ..v
+        };
+        let (a0, a1, b0, b1) = (shift(va, 1.0), shift(va, -1.0), shift(vb, 1.0), shift(vb, -1.0));
+        for v in [[a0, b0, b1], [a0, b1, a1]] {
+            out.push(raster3d::Tri {
+                v,
+                color,
+                lit: false,
+            });
         }
     }
-    (t0 <= t1).then(|| {
-        let at = |t: f32| [a[0] + d[0] * t, a[1] + d[1] * t];
-        (at(t0), at(t1))
-    })
-}
-
-/// 투영한 모양 하나(깊이로 줄 세운다).
-struct Projected {
-    depth: f32,
-    mode: Mode,
-    color: Color,
-    path: Vec<super::canvas::Segment>,
 }
 
 impl Scene {
@@ -374,6 +401,7 @@ impl Scene {
             light: normalize([0.4, 1.0, 0.7]).unwrap(),
             ambient: 0.35,
             color,
+            smooth: true,
             transform: Mat::IDENTITY,
             stack: Vec::new(),
             items: Vec::new(),
@@ -390,23 +418,34 @@ impl Scene {
         Ok(())
     }
 
-    /// 지역 좌표의 면을 더한다. 거울 변환(행렬식 < 0)이면 순서를 뒤집어 바깥을 지킨다.
+    /// 지역 좌표의 면을 더한다(꼭짓점 법선이 있으면 함께). 거울 변환(행렬식 < 0)이면 순서를 뒤집어 바깥을 지킨다.
     fn face(
         &mut self,
         args: &Args,
         mode: Mode,
         local: &[Vec3],
+        normals: Option<&[Vec3]>,
         two_sided: bool,
     ) -> mlua::Result<()> {
         let mut points: Vec<Vec3> = local.iter().map(|p| self.transform.apply(*p)).collect();
+        let mut normals: Option<Vec<Vec3>> = normals.filter(|_| self.smooth).map(|normals| {
+            normals
+                .iter()
+                .map(|n| normalize(self.transform.normal(*n)).unwrap_or([0.0, 1.0, 0.0]))
+                .collect()
+        });
         if self.transform.determinant() < 0.0 {
             points.reverse();
+            if let Some(normals) = &mut normals {
+                normals.reverse();
+            }
         }
         let color = self.color;
         self.add(
             args,
             Item::Face {
                 points,
+                normals,
                 mode,
                 color,
                 two_sided,
@@ -414,104 +453,89 @@ impl Scene {
         )
     }
 
-    fn faces(&mut self, args: &Args, mode: Mode, faces: Vec<Vec<Vec3>>) -> mlua::Result<()> {
+    /// 닫힌 입체의 면들. `normal`이 있으면 곡면이라 꼭짓점 법선(지역 좌표)을 그 함수로 구한다.
+    fn solid(
+        &mut self,
+        args: &Args,
+        mode: Mode,
+        faces: Vec<Vec<Vec3>>,
+        normal: Option<&dyn Fn(&[Vec3], Vec3) -> Option<Vec3>>,
+    ) -> mlua::Result<()> {
         for face in faces {
-            self.face(args, mode, &face, false)?;
+            let normals: Option<Vec<Vec3>> = normal.and_then(|normal| {
+                face.iter().map(|p| normal(&face, *p)).collect::<Option<Vec<_>>>()
+            });
+            self.face(args, mode, &face, normals.as_deref(), false)?;
         }
         Ok(())
     }
 
-    fn project(&self, camera: &Camera) -> Vec<Projected> {
+    /// 모은 면과 선을 투영한 삼각형 묶음.
+    fn mesh(&self, target: &Target) -> raster3d::Mesh {
+        let camera = &target.camera;
         let near = camera.near();
-        let mut out = Vec::new();
+        let mut tris = Vec::new();
         for item in &self.items {
             match item {
                 Item::Face {
                     points,
+                    normals,
                     mode,
                     color,
                     two_sided,
                 } => {
-                    let Some(mut normal) = normalize(newell(points)) else {
+                    let Some(face_normal) = normalize(newell(points)) else {
                         continue;
                     };
-                    if *mode == Mode::Fill && !camera.faces(normal, points[0]) {
-                        if !two_sided {
-                            continue;
+                    if *mode == Mode::Line {
+                        let view: Vec<Vec3> = points.iter().map(|p| camera.view(*p)).collect();
+                        for (ix, a) in view.iter().enumerate() {
+                            let b = view[(ix + 1) % view.len()];
+                            target.segment(*a, b, *color, &mut tris);
                         }
-                        normal = normal.map(|c| -c);
+                        continue;
                     }
-                    let view: Vec<Vec3> = points.iter().map(|p| camera.view(*p)).collect();
-                    let view = clip_near(&view, near);
+                    // 뒷면: 닫힌 입체면 버리고, 양면이면 법선을 뒤집어 앞면처럼 칠한다.
+                    let flip = !camera.faces(face_normal, points[0]);
+                    if flip && !two_sided {
+                        continue;
+                    }
+                    let sign = if flip { -1.0 } else { 1.0 };
+                    let with_normals: Vec<(Vec3, Vec3)> = points
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, p)| {
+                            let n = normals
+                                .as_ref()
+                                .and_then(|normals| normals.get(ix).copied())
+                                .unwrap_or(face_normal);
+                            (camera.view(*p), n.map(|v| v * sign))
+                        })
+                        .collect();
+                    let view = clip_near_with(&with_normals, near);
                     if view.len() < 3 {
                         continue;
                     }
-                    let depth = view.iter().map(|p| p[2]).sum::<f32>() / view.len() as f32;
-                    let mut screen: Vec<Point> = view.iter().map(|p| camera.screen(*p)).collect();
-                    let color = match mode {
-                        Mode::Fill => {
-                            let light = self.ambient
-                                + (1.0 - self.ambient) * dot(normal, self.light).max(0.0);
-                            if color[3] >= 1.0 {
-                                let n = screen.len() as f32;
-                                let c = screen
-                                    .iter()
-                                    .fold([0.0, 0.0], |s, p| [s[0] + p[0] / n, s[1] + p[1] / n]);
-                                for p in &mut screen {
-                                    let d = [p[0] - c[0], p[1] - c[1]];
-                                    let length = (d[0] * d[0] + d[1] * d[1]).sqrt();
-                                    if length > 1e-3 {
-                                        p[0] += d[0] / length * SEAM;
-                                        p[1] += d[1] / length * SEAM;
-                                    }
-                                }
-                            }
-                            [
-                                color[0] * light,
-                                color[1] * light,
-                                color[2] * light,
-                                color[3],
-                            ]
-                        }
-                        Mode::Line => *color,
-                    };
-                    let screen = clip_rect(screen, self.viewport);
-                    if screen.len() < 3 {
-                        continue;
+                    let vertices: Vec<raster3d::Vertex> =
+                        view.iter().map(|(p, n)| target.vertex(*p, *n)).collect();
+                    for ix in 1..vertices.len() - 1 {
+                        tris.push(raster3d::Tri {
+                            v: [vertices[0], vertices[ix], vertices[ix + 1]],
+                            color: *color,
+                            lit: true,
+                        });
                     }
-                    out.push(Projected {
-                        depth,
-                        mode: *mode,
-                        color,
-                        path: polyline(&screen, true),
-                    });
                 }
                 Item::Line { points, color } => {
                     for pair in points.windows(2) {
-                        let view = clip_near(&[camera.view(pair[0]), camera.view(pair[1])], near);
-                        // 두 점짜리 "다각형"을 자르면 [앞, 잘린 점] 또는 [잘린 점, 앞]이 남는다.
-                        let [a, b] = match view.as_slice() {
-                            [a, b] | [a, b, _] => [*a, *b],
-                            _ => continue,
-                        };
-                        let Some((sa, sb)) =
-                            clip_segment(camera.screen(a), camera.screen(b), self.viewport)
-                        else {
-                            continue;
-                        };
-                        out.push(Projected {
-                            depth: (a[2] + b[2]) / 2.0,
-                            mode: Mode::Line,
-                            color: *color,
-                            path: polyline(&[sa, sb], false),
-                        });
+                        target.segment(camera.view(pair[0]), camera.view(pair[1]), *color, &mut tris);
                     }
                 }
             }
         }
-        // 먼 것부터 그린다.
-        out.sort_by(|a, b| b.depth.total_cmp(&a.depth));
-        out
+        let [x, y, w, h] = self.viewport;
+        let clip = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]].map(|p| (target.to_canvas)(p));
+        raster3d::Mesh::new(tris, self.light, self.ambient, clip)
     }
 }
 
@@ -603,6 +627,19 @@ fn frustum_faces(bottom: f32, top: f32, height: f32, segments: usize) -> Vec<Vec
         ));
     }
     faces
+}
+
+/// 원기둥·원뿔 옆면의 꼭짓점 법선. 뚜껑(평평한 면)은 `None`이라 평면 음영이다. 꼭대기 점은 면 가운데의 방향을 쓴다.
+fn frustum_normal(bottom: f32, top: f32, height: f32) -> impl Fn(&[Vec3], Vec3) -> Option<Vec3> {
+    move |face, p| {
+        let n = normalize(newell(face))?;
+        if n[1].abs() > 0.99 {
+            return None;
+        }
+        let around = if p[0].hypot(p[2]) > 1e-5 { p } else { centroid(face) };
+        let radial = normalize([around[0], 0.0, around[2]])?;
+        normalize([radial[0] * height, bottom - top, radial[2] * height])
+    }
 }
 
 fn torus_faces(major: f32, minor: f32, segments: usize, sides: usize) -> Vec<Vec<Vec3>> {
@@ -800,28 +837,30 @@ pub(super) fn create(
         } else {
             w
         };
-        scene.faces(&args, mode, box_faces([w / 2.0, h / 2.0, d / 2.0]))?;
+        scene.solid(&args, mode, box_faces([w / 2.0, h / 2.0, d / 2.0]), None)?;
         Ok(MultiValue::new())
     });
     function!("sphere", |scene, args| {
         let mode = args.mode(0)?;
         let radius = positive(&args, 1)?;
         let segments = segments(&args, 2, 16)?;
-        scene.faces(&args, mode, sphere_faces(radius, segments))?;
+        scene.solid(&args, mode, sphere_faces(radius, segments), Some(&|_, p| normalize(p)))?;
         Ok(MultiValue::new())
     });
     function!("cylinder", |scene, args| {
         let mode = args.mode(0)?;
         let (radius, height) = (positive(&args, 1)?, positive(&args, 2)?);
         let segments = segments(&args, 3, 24)?;
-        scene.faces(&args, mode, frustum_faces(radius, radius, height, segments))?;
+        let normal = frustum_normal(radius, radius, height);
+        scene.solid(&args, mode, frustum_faces(radius, radius, height, segments), Some(&normal))?;
         Ok(MultiValue::new())
     });
     function!("cone", |scene, args| {
         let mode = args.mode(0)?;
         let (radius, height) = (positive(&args, 1)?, positive(&args, 2)?);
         let segments = segments(&args, 3, 24)?;
-        scene.faces(&args, mode, frustum_faces(radius, 0.0, height, segments))?;
+        let normal = frustum_normal(radius, 0.0, height);
+        scene.solid(&args, mode, frustum_faces(radius, 0.0, height, segments), Some(&normal))?;
         Ok(MultiValue::new())
     });
     // torus(mode, R, r[, segments, sides]): y축을 둘러싼 고리.
@@ -832,7 +871,11 @@ pub(super) fn create(
         let sides = args
             .opt_number(4)?
             .map_or(12, |n| n.round().clamp(3.0, 64.0) as usize);
-        scene.faces(&args, mode, torus_faces(major, minor, segments, sides))?;
+        let normal = move |_: &[Vec3], p: Vec3| {
+            let ring = normalize([p[0], 0.0, p[2]])?;
+            normalize(sub(p, ring.map(|v| v * major)))
+        };
+        scene.solid(&args, mode, torus_faces(major, minor, segments, sides), Some(&normal))?;
         Ok(MultiValue::new())
     });
     // plane(mode, w[, d]): y = 0의 바닥판. 양면이다.
@@ -846,7 +889,7 @@ pub(super) fn create(
         };
         let (a, c) = (w / 2.0, d / 2.0);
         let points = [[-a, 0.0, c], [a, 0.0, c], [a, 0.0, -c], [-a, 0.0, -c]];
-        scene.face(&args, mode, &points, true)?;
+        scene.face(&args, mode, &points, None, true)?;
         Ok(MultiValue::new())
     });
     // polygon(mode, x1, y1, z1, ...): 평평한 면 하나. 양면이다.
@@ -856,7 +899,7 @@ pub(super) fn create(
         if points.len() < 3 {
             return Err(args.error("a polygon needs at least three points"));
         }
-        scene.face(&args, mode, &points, true)?;
+        scene.face(&args, mode, &points, None, true)?;
         Ok(MultiValue::new())
     });
     // mesh(mode, vertices, faces): vertices = {{x, y, z}, ...}, faces = {{1, 2, 3}, ...}(1부터). 양면이다.
@@ -893,7 +936,7 @@ pub(super) fn create(
             if points.len() < 3 {
                 return Err(args.error("each face needs at least three vertices"));
             }
-            scene.face(&args, mode, &points, true)?;
+            scene.face(&args, mode, &points, None, true)?;
         }
         Ok(MultiValue::new())
     });
@@ -910,6 +953,19 @@ pub(super) fn create(
         scene.add(&args, Item::Line { points, color })?;
         Ok(MultiValue::new())
     });
+    // setShading("smooth" | "flat"): 곡면을 꼭짓점 법선으로 부드럽게(기본) 또는 면마다 한 색으로 칠한다. 뒤에 더하는 입체에 쓴다.
+    function!("setShading", |scene, args| {
+        scene.smooth = match args.string(0)?.as_str() {
+            "smooth" => true,
+            "flat" => false,
+            other => {
+                return Err(args.error(format!(
+                    "shading must be \"smooth\" or \"flat\", got \"{other}\""
+                )));
+            }
+        };
+        Ok(MultiValue::new())
+    });
     // project(x, y, z): 지금 변환을 적용한 점이 캔버스의 어디에 그려지는지 `x, y, depth`. 카메라 뒤면 nil.
     function!("project", |scene, args| {
         let camera = Camera::new(&scene);
@@ -924,7 +980,7 @@ pub(super) fn create(
             Value::Number(f64::from(view[2])),
         ]))
     });
-    // draw(): 모은 면과 선을 먼 것부터 캔버스에 그린다(지금의 g 변환을 따른다).
+    // draw(): 모은 면과 선을 캔버스에 그린다(지금의 g 변환을 따른다). 장면 하나가 모양 하나다.
     {
         let scene = scene.clone();
         let recorder = recorder.clone();
@@ -933,10 +989,18 @@ pub(super) fn create(
             lua.create_function(move |_, values: MultiValue| {
                 let _ = Args::with_self("scene:", SCENE_MARK, "draw", values);
                 let scene = scene.borrow();
-                let projected = scene.project(&Camera::new(&scene));
                 let mut rec = recorder.borrow_mut();
-                for shape in projected {
-                    rec.draw_with(shape.mode, &shape.path, shape.color)?;
+                let mesh = {
+                    let to_canvas = |p: Point| rec.to_canvas(p);
+                    let target = Target {
+                        camera: Camera::new(&scene),
+                        to_canvas: &to_canvas,
+                        line_width: rec.stroke_width(),
+                    };
+                    scene.mesh(&target)
+                };
+                if !mesh.tris.is_empty() {
+                    rec.push_shape(Shape::Scene3D(std::sync::Arc::new(mesh)))?;
                 }
                 Ok(())
             })?,
@@ -990,25 +1054,6 @@ mod tests {
         assert!(
             (p[0] - 5.0).abs() < 1e-5 && (p[2] + 1.0).abs() < 1e-5,
             "{p:?}"
-        );
-    }
-
-    #[test]
-    fn clips_to_the_viewport() {
-        let square = vec![[-5.0, -5.0], [5.0, -5.0], [5.0, 5.0], [-5.0, 5.0]];
-        let clipped = clip_rect(square, [0.0, 0.0, 10.0, 10.0]);
-        assert!(
-            clipped
-                .iter()
-                .all(|p| (0.0..=5.0).contains(&p[0]) && (0.0..=5.0).contains(&p[1]))
-        );
-        assert_eq!(
-            clip_segment([-5.0, 5.0], [15.0, 5.0], [0.0, 0.0, 10.0, 10.0]),
-            Some(([0.0, 5.0], [10.0, 5.0]))
-        );
-        assert_eq!(
-            clip_segment([-5.0, -5.0], [-1.0, -1.0], [0.0, 0.0, 10.0, 10.0]),
-            None
         );
     }
 }

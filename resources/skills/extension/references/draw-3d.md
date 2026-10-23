@@ -2,9 +2,9 @@
 
 Part of the drawing API (`draw.md`). Example: `examples/turntable.md`.
 
-`g.newScene([x, y, w, h])` returns a 3D scene that draws into that rectangle of the canvas (default: the whole canvas). Collect solids, lines, and faces in it, then call `scene:draw()` once: the app projects them through the camera and adds them to the canvas as ordinary 2D shapes, farthest first. Call scene functions with a colon (`s:box(...)`).
+`g.newScene([x, y, w, h])` returns a 3D scene that draws into that rectangle of the canvas (default: the whole canvas). Collect solids, lines, and faces in it, then call `scene:draw()` once: the app projects them through the camera and draws them per pixel with a depth buffer, so whatever is nearer hides what is behind it, even where objects cut through each other. The whole scene is one shape on the canvas. Call scene functions with a colon (`s:box(...)`).
 
-Coordinates: right-handed, **y up**, in any unit you like (sizes around 1 work well with the default camera). Angles are radians. Solids are centered on the origin; move them with the transform. Each face gets one flat shade from the light (ambient + direct).
+Coordinates: right-handed, **y up**, in any unit you like (sizes around 1 work well with the default camera). Angles are radians. Solids are centered on the origin; move them with the transform. Light (ambient + direct) is computed per pixel. Curved solids (spheres, cylinders, cones, tori) are shaded smoothly; boxes, planes, polygons, and meshes have flat faces.
 
 | Function | Meaning |
 |---|---|
@@ -22,11 +22,13 @@ Coordinates: right-handed, **y up**, in any unit you like (sizes around 1 work w
 | `s:plane(mode, w[, d])` | Flat floor at y = 0, `w` along x and `d` along z. Visible from both sides. |
 | `s:polygon(mode, x1, y1, z1, ...)` | One flat face (points also as one table). Visible from both sides. |
 | `s:mesh(mode, vertices, faces)` | Your own model: `vertices = { {x, y, z}, ... }`, `faces = { {1, 2, 3}, {1, 3, 4}, ... }` (vertex numbers start at 1). Faces are visible from both sides. |
-| `s:line(x1, y1, z1, x2, y2, z2, ...)` | 3D polyline in the current color and `g.setLineWidth`. |
+| `s:line(x1, y1, z1, x2, y2, z2, ...)` | 3D polyline in the current color and `g.setLineWidth`, hidden where solids are in front of it. |
+| `s:setShading(mode)` | `"smooth"` (default) or `"flat"`: how curved solids added after it are shaded. `"flat"` gives a faceted, low-poly look. |
 | `s:project(x, y, z)` | Returns `x, y, depth`: where that point (with the current transform) lands on the canvas, or `nil` behind the camera. Use it to place `g.print` labels. |
 | `s:draw()` | Draws everything collected, with the current 2D transform of `g`. |
 
-- `"fill"` faces are shaded; `"line"` draws each face's outline in the current color, without shading, including hidden edges.
-- Hidden faces of boxes, spheres, cylinders, cones, and tori are skipped. Overlaps are resolved by sorting faces by their average distance (painter's algorithm), not per pixel: faces that cut through each other, or a long face next to small ones, can be drawn in the wrong order. Keep objects separate and split big faces (a floor) into a few if objects stand on them and look wrong.
-- Every visible face is one shape: keep the shape limit in mind (an animation frame allows 2,000; a 16-segment sphere is about 70 visible faces). Use fewer segments for small or many objects.
+- `"fill"` faces are shaded; `"line"` draws each face's outline in the current color, without shading (edges behind filled solids are hidden; a scene of only outlines shows them all).
+- Translucent colors (alpha below 1) are drawn after the opaque ones, farthest first, so glass and water show what is behind them. The back faces of closed solids are skipped, so a translucent sphere shows only its front.
+- Two faces in exactly the same place (the tops of two boxes at the same height) flicker between each other; offset one slightly.
+- The scene counts as one shape, so the 2,000-shape limit does not apply to it; it may hold up to 20,000 faces. Cost grows with the area the scene covers more than with its faces: a full-canvas animated scene takes a few milliseconds per frame.
 - Text and `g` shapes are not part of the scene: draw them before `s:draw()` to put them behind, after to put them in front.

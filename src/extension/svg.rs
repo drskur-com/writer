@@ -30,6 +30,23 @@ pub fn to_svg(still: &Still) -> String {
     for shape in still.shapes.iter() {
         match shape {
             Shape::Effects(effects) => fx = effects_attr(effects, (w, h), &mut defs, &mut next_id),
+            // 3차원 장면은 깊이 버퍼로 그린 그림(PNG)으로 넣는다.
+            Shape::Scene3D(mesh) => {
+                use base64::Engine as _;
+                let Some(png) = super::raster3d::png(mesh, 3. * still.scale) else {
+                    continue;
+                };
+                let [x, y, sw, sh] = mesh.bounds;
+                let data = base64::engine::general_purpose::STANDARD.encode(png);
+                let _ = writeln!(
+                    body,
+                    r#"<image x="{}" y="{}" width="{}" height="{}" preserveAspectRatio="none"{fx} href="data:image/png;base64,{data}"/>"#,
+                    num(x),
+                    num(y),
+                    num(sw),
+                    num(sh)
+                );
+            }
             Shape::Image {
                 image,
                 src: [sx, sy, sw, sh],

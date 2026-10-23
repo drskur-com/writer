@@ -213,6 +213,8 @@ pub enum Shape {
     ClipPath(Option<(Vec<Segment>, FillRule)>),
     /// 뒤 모양들에 이 효과를 건다(다음 `Effects`까지).
     Effects(Effects),
+    /// 3차원 장면(`scene:draw()`): 투영한 삼각형을 깊이 버퍼로 그린다(ADR-0045).
+    Scene3D(std::sync::Arc<super::raster3d::Mesh>),
     /// 그림 파일(`g.draw`). `transform`은 그림의 픽셀 좌표(원래 크기)를 캔버스로 옮기고, `src`(x, y, w, h,
     /// 그림 픽셀)만 보인다. `smooth`가 아니면 가장 가까운 픽셀로 키운다(픽셀 그림).
     Image {
@@ -431,14 +433,18 @@ impl Recorder {
         self.draw_paint(mode, local, paint)
     }
 
-    /// 지금 색 대신 `color`로 그린다(3차원 장면이 면마다 밝기를 바꾼다).
-    pub(super) fn draw_with(
-        &mut self,
-        mode: Mode,
-        local: &[Segment],
-        color: Color,
-    ) -> mlua::Result<()> {
-        self.draw_paint(mode, local, Paint::Solid(color))
+    /// 지역 좌표의 점을 캔버스 좌표로(3차원 장면이 투영한 점에 쓴다).
+    pub(super) fn to_canvas(&self, p: Point) -> Point {
+        self.transform.apply(p)
+    }
+
+    /// 지금 선 굵기(캔버스 좌표).
+    pub(super) fn stroke_width(&self) -> f32 {
+        self.line_width * self.transform.scale()
+    }
+
+    pub(super) fn push_shape(&mut self, shape: Shape) -> mlua::Result<()> {
+        self.push(shape)
     }
 
     fn draw_paint(&mut self, mode: Mode, local: &[Segment], paint: Paint) -> mlua::Result<()> {

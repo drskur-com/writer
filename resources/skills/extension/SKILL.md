@@ -121,7 +121,7 @@ local first3 = s:sub(1, (utf8.offset(s, 4) or #s + 1) - 1)   -- first 3 characte
 ## Shared rules
 
 - **Arguments.** Every argument needs a default (`local power = args.power or 1`). Numbers, `true`, and `false` arrive as numbers and booleans; everything else as strings. Split lists with `string.split(args.values or "", ",")` and convert each item with `tonumber`.
-- **Limits.** Each draw call has 0.1 s (an animation frame at most 2,000 shapes), loading the file 0.1 s, and each command 2 s; the script has no files, network, `io`, or `os.execute` (`require` only within a folder extension; `g.newImage` reads only image files in the library). If the user asks for something the API cannot do (making new image files, reading other files, network, realistic 3D with textures, text along a path, or smooth 3D shading), say so and offer the closest thing it can do.
+- **Limits.** Each draw call has 0.1 s (an animation frame at most 2,000 shapes), loading the file 0.1 s, and each command 2 s; the script has no files, network, `io`, or `os.execute` (`require` only within a folder extension; `g.newImage` reads only image files in the library). If the user asks for something the API cannot do (making new image files, reading other files, network, realistic 3D with textures or shadows cast between objects, text along a path), say so and offer the closest thing it can do.
 
 ## Fixing an extension
 

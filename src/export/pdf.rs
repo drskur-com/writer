@@ -384,7 +384,11 @@ fn draw_shapes(
         let blended = blend.is_some()
             && matches!(
                 shape,
-                Shape::Fill { .. } | Shape::Stroke { .. } | Shape::Text { .. } | Shape::Image { .. }
+                Shape::Fill { .. }
+                    | Shape::Stroke { .. }
+                    | Shape::Text { .. }
+                    | Shape::Image { .. }
+                    | Shape::Scene3D(_)
             );
         if let (true, Some(mode)) = (blended, blend) {
             surface.push_blend_mode(mode);
@@ -494,6 +498,16 @@ fn draw_shapes(
                 }
             }
             Shape::Text { .. } => {}
+            // 3차원 장면은 깊이 버퍼로 그린 그림으로 넣는다(인쇄용으로 크게).
+            Shape::Scene3D(mesh) => {
+                let png = crate::extension::raster3d::png(mesh, RASTER_SCALE * scale);
+                let [bx, by, bw, bh] = mesh.bounds;
+                if let Some(image) =
+                    png.and_then(|png| Image::from_png(Arc::new(png).into(), true).ok())
+                {
+                    draw_image(surface, image, bx, by, bw, bh, false);
+                }
+            }
             Shape::Image {
                 image,
                 src: [sx, sy, sw, sh],

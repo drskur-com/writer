@@ -199,6 +199,43 @@ fn draw(ctx: &mut RenderContext, fonts: &mut Fonts, shapes: &[Shape], base: Affi
                 });
                 ctx.set_transform(base);
             }
+            Shape::Scene3D(mesh) => {
+                let [s, ..] = base.as_coeffs();
+                let Some(pixels) = super::raster3d::rasterize(mesh, s as f32, MAX_PIXELS) else {
+                    continue;
+                };
+                let (w, h, k) = (pixels.width, pixels.height, f64::from(pixels.scale));
+                let pixmap = Arc::new(Pixmap::from_parts(
+                    pixels.rgba,
+                    w as u16,
+                    h as u16,
+                    PixelMetadata {
+                        may_have_transparency: true,
+                        alpha_type: ImageAlphaType::Alpha,
+                    },
+                ));
+                let brush = vello_cpu::Image {
+                    image: ImageSource::Pixmap(pixmap),
+                    sampler: ImageSampler::default(),
+                };
+                let [bx, by, ..] = mesh.bounds.map(f64::from);
+                let mut clip = BezPath::new();
+                for (ix, [x, y]) in mesh.clip.iter().enumerate() {
+                    let p = KPoint::new(f64::from(*x), f64::from(*y));
+                    if ix == 0 { clip.move_to(p) } else { clip.line_to(p) }
+                }
+                clip.close_path();
+                ctx.set_transform(base);
+                ctx.set_fill_rule(Fill::NonZero);
+                ctx.push_clip_path(&clip);
+                ctx.set_transform(base * Affine::translate((bx, by)) * Affine::scale(1.0 / k));
+                with_effects(ctx, &effects, |ctx| {
+                    ctx.set_paint(brush.clone());
+                    ctx.fill_rect(&Rect::new(0.0, 0.0, f64::from(w), f64::from(h)));
+                });
+                ctx.set_transform(base);
+                ctx.pop_clip();
+            }
             Shape::Effects(next) => {
                 effects = *next;
                 ctx.set_blend_mode(blend_mode(effects.blend));
@@ -498,6 +535,11 @@ fn hash_shape(shape: &Shape, f: &mut dyn FnMut(f32)) {
             f(f32::from_bits((image.id >> 32) as u32));
             src.iter().chain(transform).for_each(|v| f(*v));
             f(*opacity);
+        }
+        Shape::Scene3D(mesh) => {
+            f(800.0);
+            f(f32::from_bits(mesh.key as u32));
+            f(f32::from_bits((mesh.key >> 32) as u32));
         }
         Shape::Effects(effects) => {
             f(600.0 + effects.blend as u8 as f32);

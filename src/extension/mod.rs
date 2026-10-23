@@ -21,6 +21,7 @@ pub mod sound;
 pub(crate) mod path;
 pub mod image;
 pub mod raster;
+pub mod raster3d;
 pub mod render;
 mod scene;
 pub mod svg;
@@ -2528,6 +2529,8 @@ return {
                                     })
                                     .collect(),
                                 Shape::Text { origin, .. } => vec![*origin],
+                                // 장면은 칸(뷰포트) 안만 그린다.
+                                Shape::Scene3D(mesh) => mesh.clip.to_vec(),
                                 Shape::Clip(_)
                                 | Shape::ClipPath(_)
                                 | Shape::Effects(_)
@@ -2586,14 +2589,26 @@ return {
         )
         .unwrap();
         let shapes = extension.draw(0.0, &[], &Theme::default()).unwrap();
-        // 정면에서 본 상자는 앞면 하나만 보이고, 선은 상자 앞(먼저 그린 면 위)에 온다.
-        assert_eq!(shapes.len(), 3, "{shapes:?}");
-        assert!(
-            matches!(&shapes[0], Shape::Fill { paint, .. } if paint.color()[0] > 0.3 && paint.color()[1] == 0.0),
-            "{shapes:?}"
-        );
-        assert!(matches!(&shapes[1], Shape::Stroke { .. }));
-        assert!(matches!(&shapes[2], Shape::Text { text, .. } if text == "100,50"));
+        // 장면 하나가 모양 하나다. 정면에서 본 상자는 앞면(삼각형 둘)만 남고, 선은 굵기만큼의 사각형이다.
+        assert_eq!(shapes.len(), 2, "{shapes:?}");
+        let Shape::Scene3D(mesh) = &shapes[0] else {
+            panic!("{shapes:?}");
+        };
+        assert_eq!(mesh.tris.iter().filter(|tri| tri.lit).count(), 2);
+        assert_eq!(mesh.tris.iter().filter(|tri| !tri.lit).count(), 2);
+        assert_eq!(mesh.bounds, [0.0, 0.0, 200.0, 100.0]);
+        assert!(matches!(&shapes[1], Shape::Text { text, .. } if text == "100,50"));
+        // 그리면 선이 상자보다 앞(위)에 보이고, 상자는 빛을 받은 빨강이다.
+        let pixmap = render::Renderer::new().render(&shapes, 1.0, 200, 100, None);
+        let at = |x, y| {
+            let p = pixmap.sample(x, y);
+            [p.r, p.g, p.b, p.a]
+        };
+        let [r, g, b, a] = at(100, 40);
+        assert!(r > 100 && g == 0 && b == 0 && a == 255, "{:?}", at(100, 40));
+        // 굵기 1인 선이 픽셀 경계에 걸쳐 반쯤 덮는다(색은 칠한 빨강 그대로).
+        assert_eq!(at(120, 50), [128, 0, 0, 128]);
+        assert_eq!(at(20, 20)[3], 0);
 
         let err = Extension::load(
             "x",

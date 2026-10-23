@@ -38,7 +38,7 @@
 | [0023](./0023-editor-task-checkbox-overlay.md) | 에디터의 할 일 항목은 기호 위에 체크 상자를 겹쳐 그리고, 누르면 원문의 `[ ]`·`[x]`만 바꾼다 | Proposed | 2026-10-22 |
 | [0024](./0024-note-todos.md) | 메모의 할 일은 원문을 유일한 저장소로 두고, 할 일 화면은 메모를 훑어 모은 색인으로 만든다 | Proposed | 2026-10-22 |
 | [0025](./0025-editor-link-open.md) | 에디터 링크는 보조 키(macOS ⌘, Windows Ctrl)+클릭으로 연다 | Proposed | 2026-10-22 |
-| [0026](./0026-lua-extensions.md) | 확장은 라이브러리의 Lua(Luau) 스크립트로 두고, 시트의 `` ```ext `` 블록에 캔버스로 그리거나 메뉴 명령을 더한다 | Proposed (화면 그리기 Superseded by 0042) | 2026-10-23 |
+| [0026](./0026-lua-extensions.md) | 확장은 라이브러리의 Lua(Luau) 스크립트로 두고, 시트의 `` ```ext `` 블록에 캔버스로 그리거나 메뉴 명령을 더한다 | Proposed (화면 그리기 Superseded by 0042, 3차원 그리기 by 0045) | 2026-10-23 |
 | [0027](./0027-ui-i18n.md) | UI 글은 rust-i18n으로 영어·한국어를 고른다 | Proposed | 2026-10-23 |
 | [0028](./0028-agent-web-fetch.md) | 어시스턴트는 web_fetch로 웹 페이지를 읽고, 처음 보는 사이트는 사용자가 허락한다 | Proposed | 2026-10-23 |
 | [0029](./0029-extension-drafts.md) | 어시스턴트가 고친 확장은 답 동안 초안에 두고, 답이 끝나면 확장마다 한 번 승인받는다 | Proposed | 2026-10-23 |
@@ -56,6 +56,7 @@
 | [0042](./0042-extension-cpu-raster.md) | 확장의 모양 목록은 vello_cpu로 픽셀 이미지에 그려 화면·PNG에 같이 쓴다 | Proposed | 2026-10-23 |
 | [0043](./0043-extension-effects.md) | 확장 캔버스에 그림자·흐림·섞기와 글자 돌리기를 더하고, 효과는 모양 목록의 상태로 둔다 | Proposed | 2026-10-23 |
 | [0044](./0044-extension-images.md) | 확장은 라이브러리 안의 그림 파일만 `g.newImage`로 읽어 LÖVE식 `g.draw`로 그린다 | Proposed | 2026-10-23 |
+| [0045](./0045-extension-3d-depth-buffer.md) | 3차원 장면은 삼각형 묶음 하나로 모양 목록에 넣고, 깊이 버퍼로 픽셀마다 빛을 주어 그린다 | Proposed | 2026-10-23 |
 
 ## 작성 규칙
 
