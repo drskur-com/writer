@@ -148,6 +148,19 @@ Reading and changing (these return numbers or a **new** path; the original stays
 | `p:translate(dx, dy)`, `p:rotate(angle[, cx, cy])`, `p:scale(sx[, sy, cx, cy])` | Moved, turned around `cx, cy`, or scaled from `cx, cy` (default origin). |
 | `p:clone()` | A copy you can keep building on. |
 
+Combining (each returns a **new** path; `other` is a path or an SVG path string; `rule` is `"nonzero"` (default) or `"evenodd"` and says how both paths are filled):
+
+| Method | Meaning |
+|---|---|
+| `p:union(other[, rule])` | Both shapes merged into one outline. |
+| `p:subtract(other[, rule])` | `p` with `other` cut out (a bite out of an apple, a window in a wall). |
+| `p:intersect(other[, rule])` | Only where both overlap. |
+| `p:xor(other[, rule])` | Where exactly one of them is. |
+| `p:outline(width[, join, cap, miterLimit])` | The outline of the line you would get with `g.stroke(p)` at that width, as a path to fill: give it a gradient, combine it, or outline it again (a lettering-style double outline). `join`: `"miter"` (default), `"round"`, `"bevel"`; `cap`: `"butt"` (default), `"round"`, `"square"`. |
+| `p:offset(distance[, join, rule])` | The filled shape grown by `distance` (negative shrinks). Good for halos, borders around a shape, and insets. `join` defaults to `"round"`. |
+
+The results are polygons: their curves become many short straight lines (fine to look at, but no longer the same commands, so `lerpPath` cannot morph them into the original). Combine once at the top of the file when the inputs do not change.
+
 ### Gradients
 
 `g.newLinearGradient(x1, y1, x2, y2, stops)` and `g.newRadialGradient(cx, cy, r, stops)` return a gradient; pass it to `g.setColor` and every fill and outline after it uses it (text uses its first color). `stops` is `{ {0, color}, {0.6, color}, {1, color} }` with positions from 0 to 1, or just `{ color, color, ... }` spread evenly. Colors take any color form, including alpha: `{ 1, 1, 1, 0 }` fades out. Outside the range the end colors continue.
@@ -164,6 +177,7 @@ Gradient coordinates follow the transform at the time you draw, like a shape's. 
 | `g.setDash({on, off, ...}[, offset])` / `g.setDash()` | Dashed outlines; lengths follow the transform. Change `offset` with `t` for "marching ants". `g.setDash()` returns to solid lines. |
 | `g.setFillRule(rule)` | `"nonzero"` (default) or `"evenodd"`. With `"evenodd"`, an inner subpath cuts a hole (a ring, the letter O) regardless of its direction. |
 | `g.setScissor(x, y, w, h)` / `g.setScissor()` | Draw only inside that canvas rectangle (ignores the transform), as in LÖVE. |
+| `g.setClip(path[, rule])` / `g.setClip()` | Draw only inside a path (or SVG path string), placed with the current transform. Calling it again keeps only where all clip paths overlap; `g.setClip()` removes them all. `rule` defaults to the current fill rule. Text is clipped to the clip area's bounding rectangle, not to its shape. |
 
 ### Animation helpers
 
@@ -210,7 +224,7 @@ Coordinates: right-handed, **y up**, in any unit you like (sizes around 1 work w
 
 ### Not available
 
-Anything else in LÖVE: images, canvases, shaders, GPU meshes, textures, per-pixel lighting, fonts from files, `love.update`/`love.draw` callbacks, input, sound. Also: clipping to a path (only rectangles, `g.setScissor`), boolean operations on paths, blend modes, blur and soft shadows (layer a few translucent copies instead), text along a path. Calling a function that does not exist fails with a list of the available ones.
+Anything else in LÖVE: images, canvases, shaders, GPU meshes, textures, per-pixel lighting, fonts from files, `love.update`/`love.draw` callbacks, input, sound. Also: blend modes, blur and soft shadows (layer a few translucent copies, or `p:offset` with fading colors), text along a path, clipping text to a shape. Calling a function that does not exist fails with a list of the available ones.
 
 ## Commands
 

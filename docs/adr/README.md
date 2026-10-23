@@ -40,6 +40,7 @@
 | [0025](./0025-editor-link-open.md) | 에디터 링크는 보조 키(macOS ⌘, Windows Ctrl)+클릭으로 연다 | Proposed | 2026-10-22 |
 | [0026](./0026-lua-extensions.md) | 확장은 라이브러리의 Lua(Luau) 스크립트로 두고, 시트의 `` ```ext `` 블록에 캔버스로 그리거나 메뉴 명령을 더한다 | Proposed | 2026-10-23 |
 | [0027](./0027-ui-i18n.md) | UI 글은 rust-i18n으로 영어·한국어를 고른다 | Proposed | 2026-10-23 |
+| [0028](./0028-agent-web-fetch.md) | 어시스턴트는 web_fetch로 웹 페이지를 읽고, 처음 보는 사이트는 사용자가 허락한다 | Proposed | 2026-10-23 |
 
 ## 작성 규칙
 

@@ -13,8 +13,9 @@
 //!
 //! 오류 글은 모델이 읽고 고치므로 영어로 쓴다.
 
+mod boolean;
 pub mod canvas;
-mod path;
+pub(crate) mod path;
 mod scene;
 mod worker;
 
@@ -905,6 +906,49 @@ return {
     }
 
     #[test]
+    fn clips_and_combines_paths() {
+        let source = r##"
+local A = g.newPath():rect(0, 0, 10, 10)
+local B = g.newPath():rect(5, 0, 10, 10)
+return {
+  size = { 100, 100 },
+  draw = function(g)
+    g.translate(20, 0)
+    g.setClip(g.newPath():circle(5, 5, 5))
+    g.rectangle("fill", 0, 0, 10, 10)
+    g.setClip()
+    g.origin()
+    g.fill(A:union(B))
+    g.fill(A:subtract(B))
+    g.fill(g.newPath("M0 0 L 50 0"):outline(4, "round", "round"))
+    g.fill(A:offset(2))
+    local x, y, w, h = A:intersect(B):bounds()
+    g.print(string.format("%g %g %g %g", x, y, w, h), 0, 0)
+  end,
+}
+"##;
+        let extension = Extension::load("clip", source).unwrap();
+        let shapes = extension.draw(0.0, &[], &Theme::default()).unwrap();
+        // 자르는 경로도 변환을 따른다.
+        let Shape::ClipPath(Some((path, FillRule::NonZero))) = &shapes[0] else {
+            panic!("{:?}", shapes[0]);
+        };
+        assert_eq!(path[0], Segment::Move([30.0, 5.0]));
+        assert_eq!(shapes[2], Shape::ClipPath(None));
+        let points = |ix: usize| match &shapes[ix] {
+            Shape::Fill { path, .. } => path.len(),
+            other => panic!("{other:?}"),
+        };
+        assert!(points(3) >= 5 && points(4) >= 5);
+        assert!(points(5) > 10);
+        assert!(
+            matches!(&shapes[7], Shape::Text { text, .. } if text == "5 0 5 10"),
+            "{:?}",
+            shapes[7]
+        );
+    }
+
+    #[test]
     fn vector_errors_name_what_is_wrong() {
         let draw = |body: &str| {
             let source = format!("return {{ size = {{10, 10}}, draw = function(g) {body} end }}");
@@ -922,6 +966,8 @@ return {
         assert!(draw("g.setLineJoin('sharp')").contains("line join"));
         assert!(draw("g.newLinearGradient(0, 0, 1, 1, {})").contains("at least one color stop"));
         assert!(draw("g.fill(3)").contains("must be a path"));
+        assert!(draw("g.newPath('M0 0 L1 0'):outline(0)").contains("more than 0"));
+        assert!(draw("g.setClip('M0 0 L1 0 L1 1 Z', 'odd')").contains("fill rule"));
     }
 
     #[test]
@@ -1089,7 +1135,7 @@ return {
                                     })
                                     .collect(),
                                 Shape::Text { origin, .. } => vec![*origin],
-                                Shape::Clip(_) => Vec::new(),
+                                Shape::Clip(_) | Shape::ClipPath(_) => Vec::new(),
                             };
                             assert!(points.into_iter().all(inside), "t = {t}: {shape:?}");
                         }

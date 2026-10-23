@@ -32,6 +32,8 @@ rust-i18n = "4"
 sys-locale = "0.3"
 # 확장 캔버스의 경로 측정·자르기·점선과 화면 테셀레이션(ADR-0026). 버전은 gpui와 맞춘다.
 lyon = "1.0"
+# 확장 경로의 불리언 연산(합·차·교·XOR), 선 윤곽, 넓히기·좁히기.
+i_overlay = "9"
 dirs = "5"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
@@ -55,9 +57,15 @@ redb = "4.4"
 serde_json = "1"
 rig-core = "0.45"
 rig-bedrock = "0.45"
+# 어시스턴트의 web_fetch: HTTP(rig와 같은 reqwest), HTML → 마크다운, 옛 문자 인코딩(EUC-KR 등).
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip"] }
+url = "2"
+percent-encoding = "2"
+htmd = "0.5"
+encoding_rs = "0.8"
 # rig-bedrock은 aws-config 기본 기능을 꺼서 credential_process·SSO 프로필을 못 읽는다. 직접 켜 둔다.
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
 aws-sdk-bedrock = "1"
 unicode-normalization = "0.1.26"
 similar = { version = "3.2.0", features = ["inline"] }
@@ -94,3 +102,6 @@ opt-level = 3
 # 제목 줄 확대를 위한 gpui-base 패치(PLAN §1.4).
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }
+# Bedrock이 Claude의 도구 호출에 `"type": "tool_use"`를 붙이면서 rig-bedrock 0.45가 그것을 호스트 도구로
+# 잘못 읽어 호출이 사라진다(답이 오지 않는다). streaming.rs 한 줄을 고친 사본. 고친 판이 나오면 지운다.
+rig-bedrock = { path = "vendor/rig-bedrock" }

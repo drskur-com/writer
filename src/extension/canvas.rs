@@ -131,6 +131,8 @@ pub enum Shape {
     },
     /// 뒤 모양들을 이 사각형(x, y, w, h, 캔버스 좌표)으로 자른다. `None`이면 자르지 않는다.
     Clip(Option<[f32; 4]>),
+    /// 뒤 모양들을 이 경로(캔버스 좌표)의 안쪽으로도 자른다. 여럿이면 모두의 겹친 곳이다. `None`이면 경로 자르기를 모두 푼다.
+    ClipPath(Option<(Vec<Segment>, FillRule)>),
 }
 
 /// 테마 색. `g.theme`으로 Lua에 넘긴다.
@@ -627,6 +629,7 @@ pub(super) const FUNCTIONS: &[&str] = &[
     "setDash",
     "setFillRule",
     "setScissor",
+    "setClip",
     "lerpPath",
     "lerp",
     "lerpColor",
@@ -1017,6 +1020,31 @@ pub(super) fn create(lua: &Lua, recorder: Rc<RefCell<Recorder>>) -> mlua::Result
             Some([x, y, w.max(0.0), h.max(0.0)])
         };
         rec.push(Shape::Clip(rect))?;
+        Ok(MultiValue::new())
+    });
+
+    // setClip(path[, rule]): 뒤 모양을 그 경로 안쪽으로 자른다(그때의 변환을 따른다). 거듭 부르면 겹친 곳만 남는다.
+    // setClip()은 경로 자르기를 모두 푼다.
+    function!("setClip", |rec, args| {
+        if args.len() == 0 || matches!(args.values.first(), Some(Value::Nil)) {
+            rec.push(Shape::ClipPath(None))?;
+            return Ok(MultiValue::new());
+        }
+        let local = path_arg(&args, 0)?;
+        let rule = match args.values.get(1) {
+            None | Some(Value::Nil) => rec.fill_rule,
+            _ => match args.string(1)?.as_str() {
+                "nonzero" => FillRule::NonZero,
+                "evenodd" => FillRule::EvenOdd,
+                other => {
+                    return Err(args.error(format!(
+                        "fill rule must be \"nonzero\" or \"evenodd\", got \"{other}\""
+                    )));
+                }
+            },
+        };
+        let path = rec.path(&local);
+        rec.push(Shape::ClipPath(Some((path, rule))))?;
         Ok(MultiValue::new())
     });
 

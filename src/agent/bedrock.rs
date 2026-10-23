@@ -7,7 +7,9 @@ use futures::StreamExt as _;
 use futures::channel::mpsc;
 use rig_bedrock::client::BedrockRuntime;
 use rig_core::completion::CompletionRequest;
-use rig_core::message::{Message, ToolResultContent};
+use rig_core::message::{
+    DocumentSourceKind, Image, ImageMediaType, Message, ToolResultContent, UserContent,
+};
 use rig_core::streaming::{Item, StreamEvent};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,7 +17,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use futures::channel::oneshot;
 
 use super::tools::Planned;
-use super::{Approval, Backend, ChangeCard, ChangeState, ChatEvent, Turn, Workspace};
+use super::web;
+use super::{
+    AllowedSites, Approval, Backend, ChangeCard, ChangeState, ChatEvent, FetchApproval, FetchCard,
+    Turn, Workspace,
+};
 
 /// 설정에서 모델을 고르지 않았을 때 쓰는 모델(Bedrock 전역 교차 리전 추론 프로필).
 pub const DEFAULT_MODEL: &str = "global.anthropic.claude-opus-5-5";
@@ -123,6 +129,150 @@ pub struct ChatRequest {
     pub system: String,
     /// 지금까지의 대화. 마지막은 이번에 보낼 사용자 말이다.
     pub turns: Vec<Turn>,
+    /// 이 대화에서 읽기를 허락한 사이트(`web_fetch`).
+    pub allowed_sites: AllowedSites,
+}
+
+/// 이미지를 볼 수 없는 모델에 이미지 대신 넣는 글.
+const NO_IMAGES: &str = "The image was not attached because this model did not accept it. \
+Tell the user you could not look at the image itself.";
+
+/// 도구 결과 뒤에 따로 붙인 이미지를 가리키는 글.
+const IMAGE_AFTER: &str = "The image is attached right after the tool results.";
+
+/// web_fetch가 가져온 이미지를 모델에 넣는 자리.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImagePlacement {
+    /// 도구 결과 안(Claude).
+    InToolResult,
+    /// 도구 결과는 글만 두고, 같은 사용자 메시지의 도구 결과 뒤에 이미지 블록으로. 도구 결과 안의 이미지를
+    /// 거절하는 모델(Bedrock의 GPT: "doesn't support the image field for user messages")도 이것은 받는다.
+    AfterToolResults,
+    /// 넣지 않는다(모델이 이미지를 거절했다).
+    None,
+}
+
+/// 모델에 맞는 이미지 자리. 도구 결과 안의 이미지를 확실히 받는 것은 Claude다.
+fn image_placement(model: &str) -> ImagePlacement {
+    if model.contains("anthropic.claude") {
+        ImagePlacement::InToolResult
+    } else {
+        ImagePlacement::AfterToolResults
+    }
+}
+
+/// Bedrock 오류가 이미지 때문인지.
+fn mentions_image(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("image")
+}
+
+/// 대화에서 이미지(도구 결과 안과 따로 붙인 것)를 빼고 그 자리에 알림 글을 둔다. 뺀 것이 있으면 `true`.
+fn strip_images(messages: &mut [Message]) -> bool {
+    let mut stripped = false;
+    for message in messages {
+        let Message::User { content } = message else {
+            continue;
+        };
+        for item in content.iter_mut() {
+            match item {
+                UserContent::ToolResult(result) => {
+                    let before = result.content.len();
+                    result
+                        .content
+                        .retain(|part| !matches!(part, ToolResultContent::Image(_)));
+                    if result.content.len() != before {
+                        result.content.push(ToolResultContent::text(NO_IMAGES));
+                        stripped = true;
+                    }
+                }
+                UserContent::Image(_) => {
+                    *item = UserContent::text(NO_IMAGES);
+                    stripped = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    stripped
+}
+
+fn fetched_image(image: web::FetchedImage) -> Image {
+    Image {
+        data: DocumentSourceKind::Raw(image.bytes),
+        media_type: Some(match image.format {
+            web::ImageFormat::Png => ImageMediaType::PNG,
+            web::ImageFormat::Jpeg => ImageMediaType::JPEG,
+            web::ImageFormat::Gif => ImageMediaType::GIF,
+            web::ImageFormat::Webp => ImageMediaType::WEBP,
+        }),
+        ..Image::default()
+    }
+}
+
+/// `web_fetch`: 처음 보는 사이트면 허락을 묻고, 읽어서 모델에 줄 도구 결과와 (도구 결과 뒤에 붙일) 이미지를
+/// 돌려준다. 사용자가 답을 멈췄으면 `None`.
+async fn web_fetch(
+    arguments: &serde_json::Map<String, serde_json::Value>,
+    allowed: &AllowedSites,
+    images: ImagePlacement,
+    tx: &mpsc::UnboundedSender<ChatEvent>,
+) -> Option<(Vec<ToolResultContent>, Option<Image>)> {
+    let text = |text: String| Some((vec![ToolResultContent::text(text)], None));
+    let fetch = match web::parse(arguments) {
+        Ok(parsed) => parsed,
+        Err(err) => return text(format!("Error: {err}")),
+    };
+    let url = &fetch.url;
+    let site = web::site(url);
+    let known = allowed.lock().is_ok_and(|sites| sites.contains(&site));
+    if !known {
+        let id = NEXT_CHANGE.fetch_add(1, Ordering::Relaxed);
+        let (reply, answer) = oneshot::channel();
+        let card = FetchCard {
+            id,
+            url: url.to_string(),
+            site: site.clone(),
+            state: ChangeState::Pending,
+        };
+        tx.unbounded_send(ChatEvent::ApproveFetch(FetchApproval { card, reply }))
+            .ok()?;
+        match answer.await {
+            Ok(true) => {
+                if let Ok(mut sites) = allowed.lock() {
+                    sites.insert(site);
+                }
+            }
+            Ok(false) => return text(FETCH_DECLINED.into()),
+            Err(_) => return None,
+        }
+    }
+    let sites = allowed
+        .lock()
+        .map(|sites| sites.clone())
+        .unwrap_or_default();
+    let shown = web::shown(url);
+    let fetched = web::fetch(fetch.clone(), &sites).await;
+    let summary = if fetched.ok {
+        format!("{} · {shown}", t!("assistant.tool.fetched"))
+    } else {
+        t!("assistant.tool.fetch_failed", url = shown).into()
+    };
+    tx.unbounded_send(ChatEvent::Tool(summary)).ok()?;
+    let mut content = vec![ToolResultContent::text(fetched.text)];
+    let mut after = None;
+    if let Some(image) = fetched.image {
+        match images {
+            ImagePlacement::InToolResult => {
+                content.push(ToolResultContent::Image(fetched_image(image)));
+            }
+            ImagePlacement::AfterToolResults => {
+                content.push(ToolResultContent::text(IMAGE_AFTER));
+                after = Some(fetched_image(image));
+            }
+            ImagePlacement::None => content.push(ToolResultContent::text(NO_IMAGES)),
+        }
+    }
+    Some((content, after))
 }
 
 /// tokio 런타임. 처음 대화를 보낼 때 만든다.
@@ -153,6 +303,9 @@ pub fn stream(request: ChatRequest) -> mpsc::UnboundedReceiver<ChatEvent> {
 
 /// 사용자가 변경을 거절했을 때 모델에 돌려줄 글.
 const DECLINED: &str = "The user declined this change. Do not retry it unless they ask; you may ask what they would like instead.";
+
+/// 사용자가 사이트 읽기를 거절했을 때 모델에 돌려줄 글.
+const FETCH_DECLINED: &str = "The user did not allow reading this site. Do not try it again unless they ask; answer without it or ask for another source.";
 
 /// 승인 카드 번호. 대화가 달라도 겹치지 않게 앱 전체에서 센다.
 static NEXT_CHANGE: AtomicU64 = AtomicU64::new(1);
@@ -189,35 +342,76 @@ async fn run(request: ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Res
         })
         .collect();
 
+    // web_fetch 이미지를 넣을 자리. 그래도 모델이 거절하면 이미지를 빼고 한 번 다시 보낸다.
+    let mut tool_images = image_placement(&backend.model);
+    let mut retried_without_images = false;
     for _ in 0..MAX_TOOL_ROUNDS {
-        let Some((prompt, history)) = messages.split_last() else {
-            break;
-        };
-        let completion = CompletionRequest::new(prompt.clone())
-            .preamble(&request.system)
-            .messages(history.iter().cloned())
-            .tools(tools.iter().cloned())
-            .max_tokens(MAX_TOKENS);
-
-        let mut stream = model.stream(completion).map_err(|err| err.to_string())?;
-        while let Some(item) = stream.next().await {
-            // 글 조각만 화면에 넘긴다(도구 호출은 다 받은 뒤 응답에서 읽는다).
-            if let Item::Event(StreamEvent::Text { text, .. }) =
-                item.map_err(|err| err.to_string())?
-                // 받는 쪽(화면)이 대화를 버렸으면 그만 받는다.
-                && tx.unbounded_send(ChatEvent::Text(text)).is_err()
-            {
+        let response = loop {
+            let Some((prompt, history)) = messages.split_last() else {
                 return Ok(());
+            };
+            let completion = CompletionRequest::new(prompt.clone())
+                .preamble(&request.system)
+                .messages(history.iter().cloned())
+                .tools(tools.iter().cloned())
+                .max_tokens(MAX_TOKENS);
+            let result: Result<Option<_>, String> = async {
+                let mut stream = model.stream(completion).map_err(|err| err.to_string())?;
+                while let Some(item) = stream.next().await {
+                    // 글 조각만 화면에 넘긴다(도구 호출은 다 받은 뒤 응답에서 읽는다).
+                    if let Item::Event(StreamEvent::Text { text, .. }) =
+                        item.map_err(|err| err.to_string())?
+                        // 받는 쪽(화면)이 대화를 버렸으면 그만 받는다.
+                        && tx.unbounded_send(ChatEvent::Text(text)).is_err()
+                    {
+                        return Ok(None);
+                    }
+                }
+                stream
+                    .finish()
+                    .await
+                    .map(Some)
+                    .map_err(|err| err.to_string())
             }
-        }
-        let response = stream.finish().await.map_err(|err| err.to_string())?;
+            .await;
+            match result {
+                Ok(Some(response)) => break response,
+                Ok(None) => return Ok(()),
+                Err(err)
+                    if !retried_without_images
+                        && mentions_image(&err)
+                        && strip_images(&mut messages) =>
+                {
+                    retried_without_images = true;
+                    tool_images = ImagePlacement::None;
+                }
+                Err(err) => return Err(err),
+            }
+        };
         let calls: Vec<_> = response.tool_calls().cloned().collect();
         let (Some(workspace), false) = (&request.workspace, calls.is_empty()) else {
             return Ok(());
         };
         messages.extend(response.message());
         let mut results = Vec::with_capacity(calls.len());
+        // 도구 결과 뒤에 붙일 이미지(`ImagePlacement::AfterToolResults`).
+        let mut after_results: Vec<Image> = Vec::new();
         for call in &calls {
+            if call.function.name == web::WEB_FETCH {
+                let Some((content, image)) = web_fetch(
+                    &call.function.arguments,
+                    &request.allowed_sites,
+                    tool_images,
+                    tx,
+                )
+                .await
+                else {
+                    return Ok(());
+                };
+                results.push(call.result(content));
+                after_results.extend(image);
+                continue;
+            }
             let text = match workspace.plan(&call.function.name, &call.function.arguments) {
                 Planned::Done(output) => {
                     if tx.unbounded_send(ChatEvent::Tool(output.summary)).is_err() {
@@ -258,7 +452,10 @@ async fn run(request: ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Res
             };
             results.push(call.result(vec![ToolResultContent::text(text)]));
         }
-        messages.push(Message::tool_results(results));
+        let mut content: Vec<UserContent> =
+            results.into_iter().map(UserContent::ToolResult).collect();
+        content.extend(after_results.into_iter().map(UserContent::Image));
+        messages.push(Message::User { content });
     }
     Err(t!(
         "assistant.error.too_many_tool_rounds",
@@ -270,6 +467,49 @@ async fn run(request: ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strips_images_for_models_that_refuse_them() {
+        assert_eq!(
+            image_placement("global.anthropic.claude-opus-5-5"),
+            ImagePlacement::InToolResult
+        );
+        assert_eq!(
+            image_placement("global.openai.gpt-6.1-sol"),
+            ImagePlacement::AfterToolResults
+        );
+        assert!(mentions_image(
+            "ValidationException: The model does not support image content"
+        ));
+
+        let image = ToolResultContent::Image(Image {
+            data: DocumentSourceKind::Raw(vec![1, 2, 3]),
+            media_type: Some(ImageMediaType::PNG),
+            ..Image::default()
+        });
+        let name = rig_core::message::ToolName::new("web_fetch").unwrap();
+        let mut messages = vec![
+            Message::user("보여 줘"),
+            Message::User {
+                content: vec![UserContent::tool_result(
+                    rig_core::message::CallId::from(rig_core::message::LocalCallId::new()),
+                    name,
+                    vec![ToolResultContent::text("Fetched the image"), image],
+                )],
+            },
+        ];
+        assert_eq!(messages.iter().flat_map(Message::images).count(), 1);
+        assert!(strip_images(&mut messages));
+        assert_eq!(messages.iter().flat_map(Message::images).count(), 0);
+        let Message::User { content } = &messages[1] else {
+            panic!()
+        };
+        let UserContent::ToolResult(result) = &content[0] else {
+            panic!()
+        };
+        assert_eq!(result.content.len(), 2);
+        assert!(!strip_images(&mut messages));
+    }
 
     #[test]
     fn picks_global_profile_first_and_skips_missing_models() {
@@ -324,6 +564,7 @@ mod tests {
                 text: "한 문장으로 인사해 줘.".into(),
                 ..Turn::default()
             }],
+            allowed_sites: AllowedSites::default(),
         });
         let mut chunks = 0;
         let mut text = String::new();
@@ -342,5 +583,64 @@ mod tests {
         println!("chunks={chunks} text={text:?} last={last:?}");
         assert!(matches!(last, Some(ChatEvent::Done)), "{last:?}");
         assert!(!text.is_empty());
+    }
+}
+/// 실제 Bedrock으로 도구 루프를 돈다(도구 호출이 사라지지 않는지, web_fetch 이미지).
+/// `WRITER_AI_PROFILE=<프로필> [WRITER_AI_REGION=…] [WRITER_AI_MODEL=…] [Q=질문] cargo test -- --ignored live_tools --nocapture`
+#[cfg(test)]
+mod live_tools {
+    use super::*;
+    #[test]
+    #[ignore]
+    fn live_tools() {
+        let root = std::env::temp_dir().join("writer-live-tools");
+        let _ = std::fs::remove_dir_all(&root);
+        crate::library::initialize(&root).unwrap();
+        crate::agent::skills::sync_builtin(&root).unwrap();
+        crate::extension::ensure_dir(&root).unwrap();
+        std::fs::write(
+            root.join("Notes/Inbox/a.md"),
+            "# 첫 메모\n\n오늘은 비가 왔다. 우산을 잃어버렸다.\n",
+        )
+        .unwrap();
+        let ws = Workspace::new(&root);
+        let system = crate::agent::system_prompt(None, true, ws.skills(), ws.extensions());
+        let question = std::env::var("Q")
+            .unwrap_or_else(|_| "Notes/Inbox에 있는 메모를 한 줄로 요약해 줘.".into());
+        let mut rx = stream(ChatRequest {
+            backend: Backend {
+                profile: std::env::var("WRITER_AI_PROFILE").expect("WRITER_AI_PROFILE"),
+                region: std::env::var("WRITER_AI_REGION").ok(),
+                model: std::env::var("WRITER_AI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()),
+            },
+            workspace: Some(ws),
+            system,
+            turns: vec![Turn {
+                user: true,
+                text: question,
+                ..Turn::default()
+            }],
+            allowed_sites: AllowedSites::default(),
+        });
+        let start = std::time::Instant::now();
+        futures::executor::block_on(async {
+            while let Some(event) = rx.next().await {
+                let t = start.elapsed().as_secs_f32();
+                let finished = matches!(event, ChatEvent::Done | ChatEvent::Failed(_));
+                match event {
+                    ChatEvent::Text(piece) => println!("{t:6.2} text {piece:?}"),
+                    ChatEvent::ApproveFetch(approval) => {
+                        println!("{t:6.2} approve {}", approval.card.url);
+                        approval.reply.send(true).ok();
+                    }
+                    other => println!("{t:6.2} {other:?}"),
+                }
+                if finished {
+                    break;
+                }
+            }
+        });
+        println!("total {:?}", start.elapsed());
+        std::fs::remove_dir_all(&root).ok();
     }
 }

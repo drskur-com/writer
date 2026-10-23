@@ -14,7 +14,10 @@ use lyon::math::point;
 use lyon::path::{Event, Path as LyonPath};
 use mlua::{AnyUserData, MultiValue, UserData, UserDataMethods, Value};
 
-use super::canvas::{Args, Color, Point, Segment, ellipse_arc, polyline, rounded_rect};
+use super::boolean::{self, Op};
+use super::canvas::{
+    Args, Color, FillRule, LineCap, LineJoin, Point, Segment, ellipse_arc, polyline, rounded_rect,
+};
 
 /// 길이를 잴 때 곡선을 펴는 허용 오차(지역 좌표).
 const MEASURE_TOLERANCE: f32 = 0.01;
@@ -672,7 +675,54 @@ pub(super) const PATH_METHODS: &[&str] = &[
     "translate",
     "rotate",
     "scale",
+    "union",
+    "subtract",
+    "intersect",
+    "xor",
+    "outline",
+    "offset",
 ];
+
+fn fill_rule_arg(args: &Args, ix: usize) -> mlua::Result<FillRule> {
+    match args.values.get(ix) {
+        None | Some(Value::Nil) => Ok(FillRule::NonZero),
+        _ => match args.string(ix)?.as_str() {
+            "nonzero" => Ok(FillRule::NonZero),
+            "evenodd" => Ok(FillRule::EvenOdd),
+            other => Err(args.error(format!(
+                "fill rule must be \"nonzero\" or \"evenodd\", got \"{other}\""
+            ))),
+        },
+    }
+}
+
+fn join_arg(args: &Args, ix: usize, default: LineJoin) -> mlua::Result<LineJoin> {
+    match args.values.get(ix) {
+        None | Some(Value::Nil) => Ok(default),
+        _ => match args.string(ix)?.as_str() {
+            "miter" => Ok(LineJoin::Miter),
+            "round" => Ok(LineJoin::Round),
+            "bevel" => Ok(LineJoin::Bevel),
+            other => Err(args.error(format!(
+                "line join must be \"miter\", \"round\" or \"bevel\", got \"{other}\""
+            ))),
+        },
+    }
+}
+
+fn cap_arg(args: &Args, ix: usize) -> mlua::Result<LineCap> {
+    match args.values.get(ix) {
+        None | Some(Value::Nil) => Ok(LineCap::Butt),
+        _ => match args.string(ix)?.as_str() {
+            "butt" => Ok(LineCap::Butt),
+            "round" => Ok(LineCap::Round),
+            "square" => Ok(LineCap::Square),
+            other => Err(args.error(format!(
+                "line cap must be \"butt\", \"round\" or \"square\", got \"{other}\""
+            ))),
+        },
+    }
+}
 
 fn new_path(lua: &mlua::Lua, path: LuaPath) -> mlua::Result<AnyUserData> {
     lua.create_userdata(path)
@@ -853,6 +903,46 @@ impl UserData for LuaPath {
                 .borrow::<LuaPath>()?
                 .map_points(|[x, y]| [cx + (x - cx) * sx, cy + (y - cy) * sy]);
             new_path(lua, path)
+        });
+
+        // 불리언 연산: union·subtract·intersect·xor(other[, rule]). 곡선은 촘촘한 직선이 된다.
+        for (name, op) in [
+            ("union", Op::Union),
+            ("subtract", Op::Subtract),
+            ("intersect", Op::Intersect),
+            ("xor", Op::Xor),
+        ] {
+            methods.add_function(name, move |lua, (ud, values): (AnyUserData, MultiValue)| {
+                let args = Args::method("path:", name, values);
+                let other = path_arg(&args, 0)?;
+                let rule = fill_rule_arg(&args, 1)?;
+                let segments =
+                    boolean::boolean(&ud.borrow::<LuaPath>()?.segments, &other, op, rule)
+                        .map_err(|err| args.error(err))?;
+                new_path(lua, LuaPath { segments })
+            });
+        }
+        // outline(width[, join, cap, miterLimit]): 그 굵기로 그은 선의 윤곽(칠할 경로).
+        methods.add_function("outline", |lua, (ud, values): (AnyUserData, MultiValue)| {
+            let args = Args::method("path:", "outline", values);
+            let width = args.number(0)?;
+            let join = join_arg(&args, 1, LineJoin::Miter)?;
+            let cap = cap_arg(&args, 2)?;
+            let miter = args.opt_number(3)?.unwrap_or(10.0);
+            let segments =
+                boolean::outline(&ud.borrow::<LuaPath>()?.segments, width, join, cap, miter)
+                    .map_err(|err| args.error(err))?;
+            new_path(lua, LuaPath { segments })
+        });
+        // offset(distance[, join, rule]): 칠한 모양을 넓히거나(양수) 좁힌다(음수).
+        methods.add_function("offset", |lua, (ud, values): (AnyUserData, MultiValue)| {
+            let args = Args::method("path:", "offset", values);
+            let distance = args.number(0)?;
+            let join = join_arg(&args, 1, LineJoin::Round)?;
+            let rule = fill_rule_arg(&args, 2)?;
+            let segments = boolean::offset(&ud.borrow::<LuaPath>()?.segments, distance, join, rule)
+                .map_err(|err| args.error(err))?;
+            new_path(lua, LuaPath { segments })
         });
 
         // 없는 메서드를 부르면 쓸 수 있는 목록을 알린다.

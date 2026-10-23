@@ -7,7 +7,9 @@
 //!   - 세 색 이상 선형: 삼각형을 멈춤 사이의 띠로 잘라 띠마다 두 색으로 칠한다(정확하다).
 //!   - 방사형: 삼각형을 고리 × 부채꼴 칸으로 잘라 칸마다 반지름 방향의 두 색 선형으로 칠한다(근사, 칸 경계의
 //!     오차는 0.25px 안쪽).
-//! - `Shape::Clip`은 뒤 모양들의 content mask가 된다.
+//! - `Shape::Clip`(사각형)은 뒤 모양들의 content mask가 된다. `Shape::ClipPath`(경로)는 그 경로의 삼각형과
+//!   모양의 삼각형이 겹친 곳(볼록 ∩ 볼록)만 남긴다. 여럿이면 모두 겹친 곳이다. 글자는 GPU 글자라 경로로는 못
+//!   자르고 그 겹친 곳의 테두리 상자로 자른다.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -45,6 +47,8 @@ struct Piece {
 #[derive(Default)]
 pub(super) struct TessCache {
     entries: HashMap<u64, (u64, Rc<Vec<Piece>>)>,
+    /// 경로 자르기 영역(삼각형). 열쇠는 자르는 경로들과 배율.
+    regions: HashMap<u64, (u64, Rc<Vec<Tri>>)>,
     frame: u64,
 }
 
@@ -60,14 +64,28 @@ impl TessCache {
         pieces
     }
 
+    fn region(&mut self, key: u64, build: impl FnOnce() -> Vec<Tri>) -> Rc<Vec<Tri>> {
+        let frame = self.frame;
+        if let Some((used, region)) = self.regions.get_mut(&key) {
+            *used = frame;
+            return region.clone();
+        }
+        let region = Rc::new(build());
+        self.regions.insert(key, (frame, region.clone()));
+        region
+    }
+
     fn begin_frame(&mut self) {
         self.frame += 1;
     }
 
     fn end_frame(&mut self) {
+        let frame = self.frame;
         if self.entries.len() > CACHE_LIMIT {
-            let frame = self.frame;
             self.entries.retain(|_, (used, _)| *used == frame);
+        }
+        if self.regions.len() > CACHE_LIMIT / 8 {
+            self.regions.retain(|_, (used, _)| *used == frame);
         }
     }
 }
@@ -86,10 +104,43 @@ pub(super) fn paint(
     let at = |[x, y]: P| point(origin.x + px(x * scale), origin.y + px(y * scale));
     let font = window.text_style().font();
     let mut clip: Option<Bounds<Pixels>> = None;
+    // 경로 자르기: 지금 걸린 경로들과 그 겹친 영역(열쇠, 삼각형).
+    let mut clip_paths: Vec<&(Vec<extension::Segment>, FillRule)> = Vec::new();
+    let mut region: Option<(u64, Rc<Vec<Tri>>)> = None;
     for shape in shapes {
+        if let Shape::ClipPath(next) = shape {
+            match next {
+                Some(path) => clip_paths.push(path),
+                None => clip_paths.clear(),
+            }
+            region = (!clip_paths.is_empty()).then(|| {
+                let key = clip_key(&clip_paths, scale);
+                let tris = cache.region(key, || clip_region(&clip_paths, scale));
+                (key, tris)
+            });
+            continue;
+        }
+        // 글자는 경로로 못 자르므로 영역의 테두리 상자로 자른다.
+        let region_mask = region.as_ref().map(|(_, tris)| {
+            if tris.is_empty() {
+                return Bounds::default();
+            }
+            let [x0, y0, x1, y1] = bbox(&tris.iter().flatten().copied().collect::<Vec<_>>());
+            Bounds {
+                origin: point(origin.x + px(x0), origin.y + px(y0)),
+                size: size(px(x1 - x0), px(y1 - y0)),
+            }
+        });
+        let region_ref = region.as_ref();
         let mut paint_one = |window: &mut Window, cache: &mut TessCache| match shape {
             Shape::Fill { .. } | Shape::Stroke { .. } => {
-                let pieces = cache.get(shape_key(shape, scale), || build(shape, scale));
+                let key = match region_ref {
+                    Some((region_key, _)) => combine(shape_key(shape, scale), *region_key),
+                    None => shape_key(shape, scale),
+                };
+                let pieces = cache.get(key, || {
+                    build(shape, scale, region_ref.map(|(_, tris)| tris.as_slice()))
+                });
                 for piece in pieces.iter() {
                     window.paint_path(translated(&piece.path, origin), piece.background);
                 }
@@ -133,7 +184,7 @@ pub(super) fn paint(
                 )
                 .ok();
             }
-            Shape::Clip(_) => {}
+            Shape::Clip(_) | Shape::ClipPath(_) => {}
         };
         if let Shape::Clip(rect) = shape {
             clip = rect.map(|[x, y, w, h]| Bounds {
@@ -142,7 +193,16 @@ pub(super) fn paint(
             });
             continue;
         }
-        match clip {
+        let mask = match (
+            clip,
+            matches!(shape, Shape::Text { .. })
+                .then_some(region_mask)
+                .flatten(),
+        ) {
+            (Some(a), Some(b)) => Some(a.intersect(&b)),
+            (a, b) => a.or(b),
+        };
+        match mask {
             Some(bounds) => window.with_content_mask(Some(ContentMask { bounds }), |window| {
                 paint_one(window, &mut cache)
             }),
@@ -233,13 +293,69 @@ fn shape_key(shape: &Shape, scale: f32) -> u64 {
             hash_path(path, &mut f);
             hash_paint(paint, &mut f);
         }
-        Shape::Text { .. } | Shape::Clip(_) => {}
+        Shape::Text { .. } | Shape::Clip(_) | Shape::ClipPath(_) => {}
     }
     hasher.finish()
 }
 
+fn combine(a: u64, b: u64) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (a, b).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// 자르는 경로들과 배율의 열쇠.
+fn clip_key(paths: &[&(Vec<extension::Segment>, FillRule)], scale: f32) -> u64 {
+    let mut key = 0x5eed_u64;
+    for (path, rule) in paths {
+        let shape = Shape::Fill {
+            path: path.clone(),
+            paint: Paint::Solid([0.0; 4]),
+            rule: *rule,
+        };
+        key = combine(key, shape_key(&shape, scale));
+    }
+    key
+}
+
+/// 자르는 경로들이 모두 겹친 곳(삼각형, px).
+fn clip_region(paths: &[&(Vec<extension::Segment>, FillRule)], scale: f32) -> Vec<Tri> {
+    let mut region: Option<Vec<Tri>> = None;
+    for (path, rule) in paths {
+        let tris = fill_triangles(path, scale, *rule);
+        region = Some(match region {
+            None => tris,
+            Some(region) => intersect(&region, &tris),
+        });
+    }
+    region.unwrap_or_default()
+}
+
+/// 두 삼각형 묶음이 겹친 곳. 테셀레이션 결과는 서로 겹치지 않으므로 결과도 겹치지 않는다.
+fn intersect(a: &[Tri], b: &[Tri]) -> Vec<Tri> {
+    let b: Vec<(&Tri, [f32; 4])> = b
+        .iter()
+        .filter(|tri| tri_area(tri) > 1e-6)
+        .map(|tri| (tri, bbox(tri)))
+        .collect();
+    let mut out = Vec::new();
+    for ta in a {
+        let box_a = bbox(ta);
+        for (tb, box_b) in &b {
+            if overlaps(box_a, *box_b) {
+                fan(&clip_convex(ta, &tb[..]), &mut out);
+            }
+        }
+    }
+    out
+}
+
+fn tri_area([a, b, c]: &Tri) -> f32 {
+    ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs() / 2.0
+}
+
 /// 모양을 삼각형으로 나누고 칠별로 조각을 만든다(캔버스 왼쪽 위가 원점, px).
-fn build(shape: &Shape, scale: f32) -> Vec<Piece> {
+fn build(shape: &Shape, scale: f32, region: Option<&[Tri]>) -> Vec<Piece> {
     let (triangles, paint) = match shape {
         Shape::Fill { path, paint, rule } => (fill_triangles(path, scale, *rule), paint),
         Shape::Stroke { path, paint, style } => {
@@ -248,7 +364,11 @@ fn build(shape: &Shape, scale: f32) -> Vec<Piece> {
             }
             (stroke_triangles(path, scale, style), paint)
         }
-        Shape::Text { .. } | Shape::Clip(_) => return Vec::new(),
+        Shape::Text { .. } | Shape::Clip(_) | Shape::ClipPath(_) => return Vec::new(),
+    };
+    let triangles = match region {
+        Some(region) => intersect(&triangles, region),
+        None => triangles,
     };
     if triangles.is_empty() {
         return Vec::new();
@@ -568,21 +688,26 @@ fn clip_poly(poly: &[P], f: impl Fn(P) -> f32) -> Vec<P> {
 
 /// 삼각형을 볼록 다각형 `cell` 안쪽으로 자른다.
 fn clip_convex(tri: &Tri, cell: &[P]) -> Vec<P> {
-    let mut poly = tri.to_vec();
     let n = cell.len();
-    // 안쪽 판단은 칸의 무게중심이 있는 쪽이다(감는 방향과 상관없다).
-    let centroid = cell
-        .iter()
-        .fold([0.0, 0.0], |acc, p| [acc[0] + p[0], acc[1] + p[1]]);
-    let centroid = [centroid[0] / n as f32, centroid[1] / n as f32];
+    // 안쪽은 칸이 감는 방향(부호 있는 넓이)으로 정한다. 아주 가는 칸에서도 흔들리지 않는다.
+    let twice_area: f32 = (0..n)
+        .map(|ix| {
+            let (a, b) = (cell[ix], cell[(ix + 1) % n]);
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum();
+    if twice_area.abs() < 1e-9 {
+        return Vec::new();
+    }
+    let orient = twice_area.signum();
+    let mut poly = tri.to_vec();
     for ix in 0..n {
         if poly.is_empty() {
             break;
         }
         let (a, b) = (cell[ix], cell[(ix + 1) % n]);
         let side = |p: P| (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
-        let sign = side(centroid).signum();
-        poly = clip_poly(&poly, |p| side(p) * sign);
+        poly = clip_poly(&poly, |p| side(p) * orient);
     }
     poly
 }
@@ -598,9 +723,10 @@ fn fan(poly: &[P], out: &mut Vec<Tri>) {
 mod tests {
     // `super::*`는 gpui의 `test` 매크로까지 들여와 `#[test]`를 가린다.
     use super::{
-        P, Piece, TAU, Tri, clip_convex, color_at, fan, gradient_params, linear_pieces,
-        radial_pieces,
+        FillRule, P, Piece, TAU, Tri, clip_convex, clip_region, color_at, fan, gradient_params,
+        intersect, linear_pieces, radial_pieces,
     };
+    use crate::extension::Segment;
 
     /// GPUI 셰이더(`fill_color`의 선형 그라디언트)를 그대로 옮긴 계산: 점 `p`의 t(0..1로 자르기 전).
     fn shader_t(bounds: [f32; 4], angle: f32, p0: f32, p1: f32, p: P) -> f32 {
@@ -726,6 +852,75 @@ mod tests {
             })
             .sum();
         assert!((covered - 10_000.0).abs() < 2.0, "{covered}");
+    }
+
+    #[test]
+    fn clip_paths_keep_only_the_overlap() {
+        let square = |x: f32, y: f32, w: f32| {
+            vec![
+                Segment::Move([x, y]),
+                Segment::Line([x + w, y]),
+                Segment::Line([x + w, y + w]),
+                Segment::Line([x, y + w]),
+                Segment::Close,
+            ]
+        };
+        let (a, b) = (
+            (square(0.0, 0.0, 10.0), FillRule::NonZero),
+            (square(5.0, 5.0, 10.0), FillRule::NonZero),
+        );
+        // 두 정사각형이 겹친 5x5, 배율 2면 10x10.
+        let region = clip_region(&[&a, &b], 2.0);
+        assert!((area(&region) - 100.0).abs() < 0.01, "{}", area(&region));
+        // 모양(0..20 정사각형, px)을 그 영역으로 자르면 넓이가 영역과 같다.
+        let shape: Vec<Tri> = vec![
+            [[0.0, 0.0], [20.0, 0.0], [20.0, 20.0]],
+            [[0.0, 0.0], [20.0, 20.0], [0.0, 20.0]],
+        ];
+        assert!((area(&intersect(&shape, &region)) - 100.0).abs() < 0.01);
+        // 겹치지 않으면 빈 영역.
+        let far = (square(100.0, 100.0, 5.0), FillRule::NonZero);
+        assert!(clip_region(&[&a, &far], 1.0).is_empty());
+    }
+
+    #[test]
+    fn clipping_by_a_circle_stays_inside() {
+        // 원(290, 60, r 45)으로 사각형(240, 10, 100x100)을 자른다(화면의 배율 몇 가지).
+        let circle = |cx: f32, cy: f32, r: f32| {
+            let k = 0.552_284_8 * r;
+            vec![
+                Segment::Move([cx + r, cy]),
+                Segment::Cubic([cx + r, cy + k], [cx + k, cy + r], [cx, cy + r]),
+                Segment::Cubic([cx - k, cy + r], [cx - r, cy + k], [cx - r, cy]),
+                Segment::Cubic([cx - r, cy - k], [cx - k, cy - r], [cx, cy - r]),
+                Segment::Cubic([cx + k, cy - r], [cx + r, cy - k], [cx + r, cy]),
+                Segment::Close,
+            ]
+        };
+        for scale in [1.0, 1.18, 2.0, 2.36] {
+            let clip = (circle(290.0, 60.0, 45.0), FillRule::NonZero);
+            let region = clip_region(&[&clip], scale);
+            let rect = vec![
+                Segment::Move([240.0, 10.0]),
+                Segment::Line([340.0, 10.0]),
+                Segment::Line([340.0, 110.0]),
+                Segment::Line([240.0, 110.0]),
+                Segment::Close,
+            ];
+            let tris = super::fill_triangles(&rect, scale, FillRule::NonZero);
+            let clipped = intersect(&tris, &region);
+            let want = std::f32::consts::PI * (45.0 * scale).powi(2);
+            assert!(
+                (area(&clipped) - want).abs() < want * 0.005,
+                "{scale}: {} vs {want}",
+                area(&clipped)
+            );
+            // 모든 점이 원 안(허용 오차 1px).
+            for p in clipped.iter().flatten() {
+                let d = ((p[0] - 290.0 * scale).powi(2) + (p[1] - 60.0 * scale).powi(2)).sqrt();
+                assert!(d <= 45.0 * scale + 1.0, "{scale}: {p:?} at {d}");
+            }
+        }
     }
 
     #[test]

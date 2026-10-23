@@ -7,11 +7,15 @@ mod edit;
 mod prompt;
 pub mod skills;
 mod tools;
+mod web;
 
 pub use bedrock::{BedrockModel, ChatRequest, DEFAULT_MODEL, available_models, stream};
 pub use diff::{DiffLine, LineKind};
 pub use prompt::{Sheet, system_prompt};
 pub use tools::Workspace;
+
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use futures::channel::oneshot;
 
@@ -35,6 +39,19 @@ pub enum Activity {
     Tool(String),
     /// 파일을 바꾸려 했다(승인 카드).
     Change(ChangeCard),
+    /// 처음 보는 사이트의 웹 페이지를 읽으려 했다(허락 카드).
+    Fetch(FetchCard),
+}
+
+/// 웹 페이지 읽기 허락 카드. 허락하면 그 사이트는 이 대화에서 다시 묻지 않는다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FetchCard {
+    pub id: u64,
+    pub url: String,
+    /// 허락하는 사이트(호스트).
+    pub site: String,
+    /// `Applied`면 허락했다.
+    pub state: ChangeState,
 }
 
 /// 승인 카드: 바꿀 파일과 변경 내용.
@@ -67,6 +84,16 @@ pub struct Approval {
     pub reply: oneshot::Sender<bool>,
 }
 
+/// 웹 페이지를 읽어도 되는지 묻는다.
+#[derive(Debug)]
+pub struct FetchApproval {
+    pub card: FetchCard,
+    pub reply: oneshot::Sender<bool>,
+}
+
+/// 이 대화에서 읽기를 허락한 사이트. 요청과 함께 모델 호출 쪽에 넘긴다.
+pub type AllowedSites = Arc<Mutex<HashSet<String>>>;
+
 /// 답을 받는 동안 화면에 넘기는 일.
 #[derive(Debug)]
 pub enum ChatEvent {
@@ -76,6 +103,8 @@ pub enum ChatEvent {
     Tool(String),
     /// 파일을 바꾸려 한다. 사용자가 답할 때까지 도구가 기다린다.
     Approve(Approval),
+    /// 처음 보는 사이트를 읽으려 한다. 사용자가 답할 때까지 도구가 기다린다.
+    ApproveFetch(FetchApproval),
     /// 승인한 변경을 쓰지 못했다(카드 번호).
     ChangeFailed(u64),
     /// 답이 끝났다.
@@ -121,11 +150,18 @@ pub struct Conversation {
     error: Option<String>,
     /// 답을 기다리는 승인 카드와 답을 돌려보낼 곳. 버리면 도구는 거절로 알고 멈춘다.
     pending: Option<(u64, oneshot::Sender<bool>)>,
+    /// 읽기를 허락한 사이트.
+    allowed_sites: AllowedSites,
 }
 
 impl Conversation {
     pub fn turns(&self) -> &[Turn] {
         &self.turns
+    }
+
+    /// 읽기를 허락한 사이트(모델 호출 쪽과 함께 쓴다).
+    pub fn allowed_sites(&self) -> AllowedSites {
+        self.allowed_sites.clone()
     }
 
     pub fn is_streaming(&self) -> bool {
@@ -182,6 +218,11 @@ impl Conversation {
             ChatEvent::Approve(Approval { card, reply }) => {
                 self.pending = Some((card.id, reply));
                 self.push_activity(Activity::Change(card));
+                None
+            }
+            ChatEvent::ApproveFetch(FetchApproval { card, reply }) => {
+                self.pending = Some((card.id, reply));
+                self.push_activity(Activity::Fetch(card));
                 None
             }
             ChatEvent::ChangeFailed(id) => {
@@ -265,11 +306,12 @@ impl Conversation {
             .iter_mut()
             .flat_map(|turn| &mut turn.activity)
             .find_map(|activity| match activity {
-                Activity::Change(card) if card.id == id => Some(card),
+                Activity::Change(card) if card.id == id => Some(&mut card.state),
+                Activity::Fetch(card) if card.id == id => Some(&mut card.state),
                 _ => None,
             });
-        if let Some(card) = card {
-            card.state = state;
+        if let Some(card_state) = card {
+            *card_state = state;
         }
     }
 
@@ -415,9 +457,37 @@ mod tests {
             .flat_map(|turn| &turn.activity)
             .find_map(|activity| match activity {
                 Activity::Change(card) if card.id == id => Some(card.state),
+                Activity::Fetch(card) if card.id == id => Some(card.state),
                 _ => None,
             })
             .unwrap()
+    }
+
+    #[test]
+    fn fetch_approval_waits_and_updates_card() {
+        let mut chat = Conversation::default();
+        chat.send("이 링크 요약해 줘").unwrap();
+        let (reply, answer) = oneshot::channel();
+        chat.apply(ChatEvent::ApproveFetch(FetchApproval {
+            card: FetchCard {
+                id: 7,
+                url: "https://example.com/a".into(),
+                site: "example.com".into(),
+                state: ChangeState::Pending,
+            },
+            reply,
+        }));
+        assert_eq!(chat.pending_change(), Some(7));
+        chat.decide(7, true);
+        assert_eq!(state_of(&chat, 7), ChangeState::Applied);
+        assert_eq!(futures::executor::block_on(answer), Ok(true));
+        // 허락한 사이트는 대화가 들고 있고, 비우면 잊는다.
+        chat.allowed_sites()
+            .lock()
+            .unwrap()
+            .insert("example.com".into());
+        chat.clear();
+        assert!(chat.allowed_sites().lock().unwrap().is_empty());
     }
 
     #[test]

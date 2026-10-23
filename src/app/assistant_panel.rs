@@ -783,6 +783,7 @@ impl WriterApp {
             workspace,
             system,
             turns,
+            allowed_sites: chat.conversation.allowed_sites(),
         });
         chat.reply = Some(cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.next().await {
@@ -1023,6 +1024,7 @@ impl WriterApp {
                         .clone();
                     change_card(card, pending == Some(card.id), &scroll, cx, pal)
                 }
+                agent::Activity::Fetch(card) => fetch_card(card, pending == Some(card.id), cx, pal),
             })
             .collect();
         assistant_reply(false, text, activity, pal)
@@ -1124,6 +1126,99 @@ fn change_card(
                             .primary()
                             .label(t!("assistant.change.apply"))
                             .on_click(apply),
+                    ),
+            )
+        })
+        .into_any_element()
+}
+
+/// 웹 페이지 읽기 허락 카드: 읽을 주소 전체와, 기다리는 중이면 [거절] [허용] 버튼.
+/// 주소를 다 보여 주는 것은 모델이 주소에 글을 실어 내보내지 않는지 사용자가 볼 수 있게 하려는 것이다.
+fn fetch_card(
+    card: &agent::FetchCard,
+    waiting: bool,
+    cx: &mut Context<WriterApp>,
+    pal: Palette,
+) -> AnyElement {
+    let id = card.id as usize;
+    let (status, status_color) = match card.state {
+        agent::ChangeState::Pending => (t!("assistant.fetch.pending"), pal.muted),
+        agent::ChangeState::Applied => (t!("assistant.fetch.allowed"), pal.success),
+        agent::ChangeState::Declined | agent::ChangeState::Failed => {
+            (t!("assistant.fetch.declined"), pal.muted)
+        }
+    };
+    let card_id = card.id;
+    let decide = |approve: bool| {
+        cx.listener(move |this: &mut WriterApp, _: &ClickEvent, _, cx| {
+            this.assistant_chat.conversation.decide(card_id, approve);
+            cx.notify();
+        })
+    };
+    let (decline, allow) = (decide(false), decide(true));
+    div()
+        .w_full()
+        .rounded_lg()
+        .border_1()
+        .border_color(pal.panel_border)
+        .overflow_hidden()
+        .child(
+            div()
+                .px_2()
+                .py_1()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .bg(pal.hover)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(t!("assistant.fetch.title", site = card.site.clone())),
+                )
+                .child(div().flex_shrink_0().text_color(status_color).child(status)),
+        )
+        .child(
+            div()
+                .px_2()
+                .py_1()
+                .text_xs()
+                .font_family("monospace")
+                .text_color(pal.foreground)
+                .child(SharedString::from(card.url.clone())),
+        )
+        .when(waiting, |this| {
+            this.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(pal.panel_border)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(pal.muted)
+                            .child(t!("assistant.fetch.note", site = card.site.clone())),
+                    )
+                    .child(
+                        Button::new(("fetch-decline", id))
+                            .small()
+                            .label(t!("assistant.fetch.decline"))
+                            .on_click(decline),
+                    )
+                    .child(
+                        Button::new(("fetch-allow", id))
+                            .small()
+                            .primary()
+                            .label(t!("assistant.fetch.allow"))
+                            .on_click(allow),
                     ),
             )
         })

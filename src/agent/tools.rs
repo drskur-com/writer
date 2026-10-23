@@ -251,6 +251,7 @@ impl Workspace {
                     "required": ["path", "content"],
                 }),
             ),
+            (super::web::WEB_FETCH, super::web::DESCRIPTION, super::web::parameters()),
         ]
         .into_iter()
         .chain(load_skill)
@@ -517,7 +518,7 @@ impl Workspace {
                     texts += 1;
                     extend(*origin);
                 }
-                Shape::Clip(_) => {}
+                Shape::Clip(_) | Shape::ClipPath(_) => {}
             }
         }
         let Some([x0, y0, x1, y1]) = bounds else {
@@ -902,6 +903,7 @@ mod tests {
                 CREATE_SHEET,
                 RUN_EXTENSION,
                 WRITE,
+                super::super::web::WEB_FETCH,
                 LOAD_SKILL
             ]
         );
@@ -915,7 +917,7 @@ mod tests {
         );
         // 스킬이 없으면 load_skill을 주지 않는다.
         let (bare, _) = workspace();
-        assert_eq!(bare.definitions().len(), 6);
+        assert_eq!(bare.definitions().len(), 7);
     }
 
     #[test]
