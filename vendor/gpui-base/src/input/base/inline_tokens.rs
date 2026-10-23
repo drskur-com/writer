@@ -287,8 +287,8 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     /// Derive the inline objects from the text again if it or the selections changed since the
     /// last time (Writer patch). Ranges that split a character, overlap, span lines, or touch an
-    /// IME composition are skipped. An object a selection touches (its ends included) is shown as
-    /// its source text, followed by its element as an empty-range decoration, so the caret can
+    /// IME composition are skipped. An object a caret touches (its ends included) or a selection
+    /// cuts into is shown as its source text, followed by its element as an empty-range decoration, so the caret can
     /// enter it and edit the source.
     pub(crate) fn refresh_derived_tokens(&mut self) {
         use super::rope_ext::RopeExt as _;
@@ -307,11 +307,6 @@ impl<M: InputModeKind> InputBaseState<M> {
         if self.derived_revision.as_ref() == Some(&key) {
             return;
         }
-        let touched = |range: &Range<usize>| {
-            key.1
-                .iter()
-                .any(|&(start, end)| start <= range.end && range.start <= end)
-        };
         let mut spans = Vec::new();
         for row in 0..self.text.lines_len() {
             let line_start = self.text.line_start_offset(row);
@@ -336,14 +331,47 @@ impl<M: InputModeKind> InputBaseState<M> {
                     continue;
                 }
                 end = range.end - line_start;
-                if touched(&range) {
-                    spans.push(InlineTokenSpan {
-                        range: range.end..range.end,
-                        token,
-                    });
-                } else {
-                    spans.push(InlineTokenSpan { range, token });
-                }
+                spans.push(InlineTokenSpan { range, token });
+            }
+        }
+        // A caret between two adjacent objects opens only one: the one it moved into (the right
+        // one when it moved forward without an edit), otherwise the one before it.
+        let previous = self
+            .derived_revision
+            .as_ref()
+            .filter(|(revision, _)| *revision == key.0)
+            .map(|(_, selections)| selections.as_slice())
+            .unwrap_or_default();
+        let mut open = vec![false; spans.len()];
+        for (ix, &(start, end)) in key.1.iter().enumerate() {
+            let first = spans.partition_point(|span| span.range.end < start);
+            let touched = (first..spans.len()).take_while(|&i| spans[i].range.start <= end);
+            if start < end {
+                // A selection opens only the objects it cuts into; one it covers whole stays an
+                // object, shown selected.
+                touched
+                    .filter(|&i| {
+                        let range = &spans[i].range;
+                        (range.start < start && start < range.end)
+                            || (range.start < end && end < range.end)
+                    })
+                    .for_each(|i| open[i] = true);
+                continue;
+            }
+            let forward = previous
+                .get(ix)
+                .is_some_and(|&(before, after)| before == after && before < start);
+            let touched: Vec<usize> = touched.collect();
+            let pick = match touched.as_slice() {
+                [_, right] if forward => *right,
+                [left, ..] => *left,
+                [] => continue,
+            };
+            open[pick] = true;
+        }
+        for (span, open) in spans.iter_mut().zip(open) {
+            if open {
+                span.range = span.range.end..span.range.end;
             }
         }
         if spans != self.derived_tokens {

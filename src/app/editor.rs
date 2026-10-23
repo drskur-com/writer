@@ -228,6 +228,8 @@ fn page_break_mark(size: Size<Pixels>, cx: &App) -> AnyElement {
 struct Markup {
     /// ATX 제목 굵기와 `#` 흐림. 줄 크기와 함께 바뀌도록 키 입력마다 즉시 다시 계산한다.
     headings: TextDecorationCollection,
+    /// 펼친 인라인 확장(`{{…}}`)의 원문 흐림. 객체가 펼쳐지는 대로 보이도록 제목과 함께 즉시 계산한다.
+    calls: TextDecorationCollection,
     /// 제목 레벨(H1~H6)별 굵기. 책 스타일이 있으면 H1~H3은 부·장·절 굵기를 쓴다.
     heading_weights: [FontWeight; 6],
     /// 기호 흐림.
@@ -242,6 +244,7 @@ impl Markup {
     fn new(state: &Entity<EditorState>, styles: Option<&library::Styles>, cx: &mut App) -> Self {
         state.update(cx, |state, cx| Self {
             headings: state.create_decorations_collection(Vec::new(), cx),
+            calls: state.create_decorations_collection(Vec::new(), cx),
             heading_weights: heading_weights(styles),
             markers: state.create_decorations_collection(Vec::new(), cx),
             inline: state.create_decorations_collection(Vec::new(), cx),
@@ -249,8 +252,8 @@ impl Markup {
         })
     }
 
-    /// ATX 제목 표시를 원문에서 바로 다시 계산한다. 줄 텍스트만 보므로 긴 문서도 가볍다.
-    fn apply_headings(&self, text: &str, cx: &mut App) {
+    /// ATX 제목과 인라인 확장 표시를 원문에서 바로 다시 계산한다. 줄 텍스트만 보므로 긴 문서도 가볍다.
+    fn apply_lines(&self, text: &str, cx: &mut App) {
         let decorations = markdown::heading_spans(text)
             .into_iter()
             .map(|span| {
@@ -266,6 +269,22 @@ impl Markup {
             })
             .collect();
         self.headings.set(decorations, cx);
+        // 객체로 보이는 동안은 가려지고, 커서가 닿아 펼치면 원문이 흐리게 보인다(ADR-0036).
+        let mut calls = Vec::new();
+        let mut start = 0;
+        for line in text.split('\n') {
+            calls.extend(crate::extension::inline_calls(line).into_iter().map(|call| {
+                TextDecoration::new(
+                    start + call.range.start..start + call.range.end,
+                    HighlightStyle {
+                        fade_out: Some(MARKER_FADE),
+                        ..Default::default()
+                    },
+                )
+            }));
+            start += line.len() + 1;
+        }
+        self.calls.set(calls, cx);
     }
 
     /// 파서 스팬으로 표시를 바꾼다. 색은 지금 테마에서 가져온다.
@@ -334,7 +353,7 @@ impl Markup {
                         ..Default::default()
                     },
                 ),
-                // setext 제목. ATX 제목은 `apply_headings`가 맡는다.
+                // setext 제목. ATX 제목은 `apply_lines`가 맡는다.
                 SpanKind::Heading(_) => (&mut blocks, FontWeight::BOLD.into()),
                 SpanKind::Quote => (
                     &mut blocks,
@@ -785,7 +804,7 @@ impl WriterApp {
             state
         });
         let markup = Markup::new(&state, styles.as_ref(), cx);
-        markup.apply_headings(&text, cx);
+        markup.apply_lines(&text, cx);
         markup.apply(markdown::spans(&text), cx);
         let subscription = cx.subscribe_in(
             &state,
@@ -840,7 +859,7 @@ impl WriterApp {
         let text = editor.state.read(cx).value();
         sync_line_groups(editor, &text, cx);
         sync_tables(editor, &text, cx);
-        editor.markup.apply_headings(&text, cx);
+        editor.markup.apply_lines(&text, cx);
         editor.markup_refresh = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(MARKUP_DELAY).await;
             let Ok(text) = this.update(cx, |this, cx| {
@@ -932,7 +951,7 @@ impl WriterApp {
                     configure_text_transform(state, editor.styles.as_ref());
                 });
                 let text = editor.state.read(cx).value();
-                editor.markup.apply_headings(&text, cx);
+                editor.markup.apply_lines(&text, cx);
             }
         }
         // 확장 파일이 바뀌었으면(모델이 고쳤으면) 캔버스를 다시 재고 그린다.
@@ -964,7 +983,7 @@ impl WriterApp {
             .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
         sync_line_groups(editor, &text, cx);
         sync_tables(editor, &text, cx);
-        editor.markup.apply_headings(&text, cx);
+        editor.markup.apply_lines(&text, cx);
         editor.markup.apply(markdown::spans(&text), cx);
     }
 
@@ -1009,6 +1028,6 @@ impl WriterApp {
             configure_text_transform(state, transform_styles.as_ref());
         });
         let text = editor.state.read(cx).value();
-        editor.markup.apply_headings(&text, cx);
+        editor.markup.apply_lines(&text, cx);
     }
 }

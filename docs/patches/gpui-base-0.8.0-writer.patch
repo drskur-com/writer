@@ -906,8 +906,8 @@ diff -ruN a/src/input/base/element_writer.rs b/src/input/base/element_writer.rs
 +}
 diff -ruN a/src/input/base/inline_tokens.rs b/src/input/base/inline_tokens.rs
 --- a/src/input/base/inline_tokens.rs	2006-07-24 10:21:28
-+++ b/src/input/base/inline_tokens.rs	2026-10-23 17:06:25
-@@ -249,12 +249,110 @@
++++ b/src/input/base/inline_tokens.rs	2026-10-23 17:50:54
+@@ -249,12 +249,138 @@
      }
  }
  
@@ -950,8 +950,8 @@ diff -ruN a/src/input/base/inline_tokens.rs b/src/input/base/inline_tokens.rs
 +
 +    /// Derive the inline objects from the text again if it or the selections changed since the
 +    /// last time (Writer patch). Ranges that split a character, overlap, span lines, or touch an
-+    /// IME composition are skipped. An object a selection touches (its ends included) is shown as
-+    /// its source text, followed by its element as an empty-range decoration, so the caret can
++    /// IME composition are skipped. An object a caret touches (its ends included) or a selection
++    /// cuts into is shown as its source text, followed by its element as an empty-range decoration, so the caret can
 +    /// enter it and edit the source.
 +    pub(crate) fn refresh_derived_tokens(&mut self) {
 +        use super::rope_ext::RopeExt as _;
@@ -970,11 +970,6 @@ diff -ruN a/src/input/base/inline_tokens.rs b/src/input/base/inline_tokens.rs
 +        if self.derived_revision.as_ref() == Some(&key) {
 +            return;
 +        }
-+        let touched = |range: &Range<usize>| {
-+            key.1
-+                .iter()
-+                .any(|&(start, end)| start <= range.end && range.start <= end)
-+        };
 +        let mut spans = Vec::new();
 +        for row in 0..self.text.lines_len() {
 +            let line_start = self.text.line_start_offset(row);
@@ -999,14 +994,47 @@ diff -ruN a/src/input/base/inline_tokens.rs b/src/input/base/inline_tokens.rs
 +                    continue;
 +                }
 +                end = range.end - line_start;
-+                if touched(&range) {
-+                    spans.push(InlineTokenSpan {
-+                        range: range.end..range.end,
-+                        token,
-+                    });
-+                } else {
-+                    spans.push(InlineTokenSpan { range, token });
-+                }
++                spans.push(InlineTokenSpan { range, token });
++            }
++        }
++        // A caret between two adjacent objects opens only one: the one it moved into (the right
++        // one when it moved forward without an edit), otherwise the one before it.
++        let previous = self
++            .derived_revision
++            .as_ref()
++            .filter(|(revision, _)| *revision == key.0)
++            .map(|(_, selections)| selections.as_slice())
++            .unwrap_or_default();
++        let mut open = vec![false; spans.len()];
++        for (ix, &(start, end)) in key.1.iter().enumerate() {
++            let first = spans.partition_point(|span| span.range.end < start);
++            let touched = (first..spans.len()).take_while(|&i| spans[i].range.start <= end);
++            if start < end {
++                // A selection opens only the objects it cuts into; one it covers whole stays an
++                // object, shown selected.
++                touched
++                    .filter(|&i| {
++                        let range = &spans[i].range;
++                        (range.start < start && start < range.end)
++                            || (range.start < end && end < range.end)
++                    })
++                    .for_each(|i| open[i] = true);
++                continue;
++            }
++            let forward = previous
++                .get(ix)
++                .is_some_and(|&(before, after)| before == after && before < start);
++            let touched: Vec<usize> = touched.collect();
++            let pick = match touched.as_slice() {
++                [_, right] if forward => *right,
++                [left, ..] => *left,
++                [] => continue,
++            };
++            open[pick] = true;
++        }
++        for (span, open) in spans.iter_mut().zip(open) {
++            if open {
++                span.range = span.range.end..span.range.end;
 +            }
 +        }
 +        if spans != self.derived_tokens {
@@ -1019,7 +1047,7 @@ diff -ruN a/src/input/base/inline_tokens.rs b/src/input/base/inline_tokens.rs
      pub(super) fn token_boundary(&self, offset: usize, bias: sum_tree::Bias) -> usize {
          let spans = self.token_spans();
          let ix = spans.partition_point(|s| s.range.end <= offset);
-@@ -285,6 +383,9 @@
+@@ -285,6 +411,9 @@
          range: &Range<usize>,
          new_len: usize,
      ) -> Option<Box<TokenDelta>> {
@@ -1396,8 +1424,8 @@ diff -ruN a/src/input/base/state_writer.rs b/src/input/base/state_writer.rs
 +}
 diff -ruN a/src/input/base/tests/element_writer.rs b/src/input/base/tests/element_writer.rs
 --- a/src/input/base/tests/element_writer.rs	1970-01-01 09:00:00
-+++ b/src/input/base/tests/element_writer.rs	2026-10-23 17:09:30
-@@ -0,0 +1,768 @@
++++ b/src/input/base/tests/element_writer.rs	2026-10-23 17:53:38
+@@ -0,0 +1,882 @@
 +//! Tests for the writer patches to the text element: line styles, line blocks, collapsed lines,
 +//! line overlays and row placement (see `docs/patches/`).
 +
@@ -2164,6 +2192,120 @@ diff -ruN a/src/input/base/tests/element_writer.rs b/src/input/base/tests/elemen
 +        editor.update(cx, |state, cx| state.set_selected_range(9..9, cx));
 +        window.draw(cx).clear(cx);
 +        assert_eq!(ranges(cx), vec![2..7]);
++    });
++}
++
++#[gpui::test]
++fn a_caret_between_adjacent_objects_opens_the_one_it_moves_into(cx: &mut TestAppContext) {
++    let text = "{{x}}{{x}}";
++    let (editor, window) = decoration_editor(cx, text, true);
++    let mut cx = VisualTestContext::from_window(window.into(), cx);
++    cx.update(|window, cx| {
++        editor.update(cx, |state, cx| {
++            state.set_inline_objects(
++                |_, line: &str| {
++                    line.match_indices("{{x}}")
++                        .map(|(at, _)| {
++                            (
++                                at..at + 5,
++                                crate::input::InlineToken::new("x", "{{x}}").with_label("X"),
++                            )
++                        })
++                        .collect()
++                },
++                |_, _, _| gpui::div().w(px(30.)).h(px(10.)).into_any_element(),
++                None,
++                cx,
++            );
++            state.set_selected_range(4..4, cx);
++        });
++        window.draw(cx).clear(cx);
++        let ranges = |cx: &App| -> Vec<std::ops::Range<usize>> {
++            editor
++                .read(cx)
++                .token_spans()
++                .iter()
++                .map(|span| span.range())
++                .collect()
++        };
++        assert_eq!(ranges(cx), vec![5..5, 5..10]);
++
++        // Moving right onto the shared edge opens the second one only.
++        editor.update(cx, |state, cx| state.right(&crate::input::MoveRight, window, cx));
++        window.draw(cx).clear(cx);
++        assert_eq!(editor.read(cx).cursor(), 5);
++        assert_eq!(ranges(cx), vec![0..5, 10..10]);
++
++        // Moving back left onto it opens the first one only.
++        editor.update(cx, |state, cx| state.set_selected_range(6..6, cx));
++        window.draw(cx).clear(cx);
++        editor.update(cx, |state, cx| state.left(&crate::input::MoveLeft, window, cx));
++        window.draw(cx).clear(cx);
++        assert_eq!(editor.read(cx).cursor(), 5);
++        assert_eq!(ranges(cx), vec![5..5, 5..10]);
++    });
++}
++
++#[gpui::test]
++fn a_selection_opens_only_the_objects_it_cuts_into(cx: &mut TestAppContext) {
++    let text = "x {{a}}{{b}} y";
++    let (editor, window) = decoration_editor(cx, text, true);
++    let mut cx = VisualTestContext::from_window(window.into(), cx);
++    cx.update(|window, cx| {
++        editor.update(cx, |state, cx| {
++            state.set_inline_objects(
++                |_, line: &str| {
++                    ["{{a}}", "{{b}}"]
++                        .into_iter()
++                        .filter_map(|source| {
++                            let at = line.find(source)?;
++                            Some((
++                                at..at + 5,
++                                crate::input::InlineToken::new("x", source).with_label("X"),
++                            ))
++                        })
++                        .collect()
++                },
++                |_, _, _| gpui::div().w(px(30.)).h(px(10.)).into_any_element(),
++                None,
++                cx,
++            );
++            state.set_selected_range(0..0, cx);
++        });
++        window.draw(cx).clear(cx);
++        let ranges = |cx: &App| -> Vec<std::ops::Range<usize>> {
++            editor
++                .read(cx)
++                .token_spans()
++                .iter()
++                .map(|span| span.range())
++                .collect()
++        };
++
++        // Extending from outside takes whole objects, which stay objects.
++        for end in [1, 2, 7, 12] {
++            editor.update(cx, |state, cx| {
++                state.select_right(&crate::actions::SelectRight, window, cx)
++            });
++            window.draw(cx).clear(cx);
++            assert_eq!(editor.read(cx).selected_range(), 0..end);
++            assert_eq!(ranges(cx), vec![2..7, 7..12]);
++        }
++
++        // From inside the first source (entered at its edge), it stays open; the second is taken
++        // whole.
++        for at in [2, 4] {
++            editor.update(cx, |state, cx| state.set_selected_range(at..at, cx));
++            window.draw(cx).clear(cx);
++        }
++        for end in [5, 6, 7, 12] {
++            editor.update(cx, |state, cx| {
++                state.select_right(&crate::actions::SelectRight, window, cx)
++            });
++            window.draw(cx).clear(cx);
++            assert_eq!(editor.read(cx).selected_range(), 4..end);
++            assert_eq!(ranges(cx), vec![7..7, 7..12]);
++        }
 +    });
 +}
 diff -ruN a/src/input/base/token_presentation.rs b/src/input/base/token_presentation.rs

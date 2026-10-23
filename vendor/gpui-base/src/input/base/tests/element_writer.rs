@@ -766,3 +766,117 @@ fn inline_objects_stay_atomic_until_the_caret_touches_them(cx: &mut TestAppConte
         assert_eq!(ranges(cx), vec![2..7]);
     });
 }
+
+#[gpui::test]
+fn a_caret_between_adjacent_objects_opens_the_one_it_moves_into(cx: &mut TestAppContext) {
+    let text = "{{x}}{{x}}";
+    let (editor, window) = decoration_editor(cx, text, true);
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        editor.update(cx, |state, cx| {
+            state.set_inline_objects(
+                |_, line: &str| {
+                    line.match_indices("{{x}}")
+                        .map(|(at, _)| {
+                            (
+                                at..at + 5,
+                                crate::input::InlineToken::new("x", "{{x}}").with_label("X"),
+                            )
+                        })
+                        .collect()
+                },
+                |_, _, _| gpui::div().w(px(30.)).h(px(10.)).into_any_element(),
+                None,
+                cx,
+            );
+            state.set_selected_range(4..4, cx);
+        });
+        window.draw(cx).clear(cx);
+        let ranges = |cx: &App| -> Vec<std::ops::Range<usize>> {
+            editor
+                .read(cx)
+                .token_spans()
+                .iter()
+                .map(|span| span.range())
+                .collect()
+        };
+        assert_eq!(ranges(cx), vec![5..5, 5..10]);
+
+        // Moving right onto the shared edge opens the second one only.
+        editor.update(cx, |state, cx| state.right(&crate::input::MoveRight, window, cx));
+        window.draw(cx).clear(cx);
+        assert_eq!(editor.read(cx).cursor(), 5);
+        assert_eq!(ranges(cx), vec![0..5, 10..10]);
+
+        // Moving back left onto it opens the first one only.
+        editor.update(cx, |state, cx| state.set_selected_range(6..6, cx));
+        window.draw(cx).clear(cx);
+        editor.update(cx, |state, cx| state.left(&crate::input::MoveLeft, window, cx));
+        window.draw(cx).clear(cx);
+        assert_eq!(editor.read(cx).cursor(), 5);
+        assert_eq!(ranges(cx), vec![5..5, 5..10]);
+    });
+}
+
+#[gpui::test]
+fn a_selection_opens_only_the_objects_it_cuts_into(cx: &mut TestAppContext) {
+    let text = "x {{a}}{{b}} y";
+    let (editor, window) = decoration_editor(cx, text, true);
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        editor.update(cx, |state, cx| {
+            state.set_inline_objects(
+                |_, line: &str| {
+                    ["{{a}}", "{{b}}"]
+                        .into_iter()
+                        .filter_map(|source| {
+                            let at = line.find(source)?;
+                            Some((
+                                at..at + 5,
+                                crate::input::InlineToken::new("x", source).with_label("X"),
+                            ))
+                        })
+                        .collect()
+                },
+                |_, _, _| gpui::div().w(px(30.)).h(px(10.)).into_any_element(),
+                None,
+                cx,
+            );
+            state.set_selected_range(0..0, cx);
+        });
+        window.draw(cx).clear(cx);
+        let ranges = |cx: &App| -> Vec<std::ops::Range<usize>> {
+            editor
+                .read(cx)
+                .token_spans()
+                .iter()
+                .map(|span| span.range())
+                .collect()
+        };
+
+        // Extending from outside takes whole objects, which stay objects.
+        for end in [1, 2, 7, 12] {
+            editor.update(cx, |state, cx| {
+                state.select_right(&crate::actions::SelectRight, window, cx)
+            });
+            window.draw(cx).clear(cx);
+            assert_eq!(editor.read(cx).selected_range(), 0..end);
+            assert_eq!(ranges(cx), vec![2..7, 7..12]);
+        }
+
+        // From inside the first source (entered at its edge), it stays open; the second is taken
+        // whole.
+        for at in [2, 4] {
+            editor.update(cx, |state, cx| state.set_selected_range(at..at, cx));
+            window.draw(cx).clear(cx);
+        }
+        for end in [5, 6, 7, 12] {
+            editor.update(cx, |state, cx| {
+                state.select_right(&crate::actions::SelectRight, window, cx)
+            });
+            window.draw(cx).clear(cx);
+            assert_eq!(editor.read(cx).selected_range(), 4..end);
+            assert_eq!(ranges(cx), vec![7..7, 7..12]);
+        }
+    });
+}

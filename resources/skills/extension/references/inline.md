@@ -1,6 +1,6 @@
 # Inline extensions (`{{name key=value}}`)
 
-An extension can also appear inside a paragraph or heading: `오늘은 {{today}}입니다.` The editor shows the call as one object; when the caret touches it, the source `{{today}}` appears for editing, with the result shown faded right after it. Copying copies the source, and the book preview and exports show its text. Users can also edit its arguments in a dialog by double-clicking it. Example: `examples/today.md`.
+An extension can also appear inside a paragraph or heading: `오늘은 {{today}}입니다.` The editor shows the call as one object; when the caret touches it (or a selection ends inside it), the source `{{today}}` appears faded for editing; a selection covering the whole call keeps it an object, with the result shown faded right after it. Copying copies the source, and the book preview and exports show its text. Users can also edit its arguments in a dialog by double-clicking it. Example: `examples/today.md`.
 
 ## Writing a call
 
