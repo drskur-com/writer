@@ -47,7 +47,7 @@ const BUILTIN: &[Builtin] = &[
     builtin!("brainstorm": "SKILL.md"),
     builtin!("settings": "SKILL.md"),
     builtin!("sheet-format": "SKILL.md"),
-    builtin!("extension": "SKILL.md"),
+    builtin!("extension": "SKILL.md", "references/api.md", "references/examples.md"),
 ];
 
 /// 깐 빌트인 스킬의 기록(`.writer/skills.toml`).

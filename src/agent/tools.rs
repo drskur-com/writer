@@ -50,6 +50,8 @@ const RUN_EXTENSION: &str = "run_extension";
 pub struct Workspace {
     root: PathBuf,
     skills: Vec<Skill>,
+    /// 확장 앞머리(ADR-0026). 시스템 프롬프트에 목록으로 넣는다.
+    extensions: Vec<crate::extension::Meta>,
 }
 
 /// 파일을 바꾸는 도구의 계획. 사용자가 승인하면 [`Workspace::commit`]으로 쓴다.
@@ -109,11 +111,21 @@ pub struct ToolOutput {
 }
 
 impl Workspace {
-    /// `root`의 작업 공간. 스킬은 지금 읽어 둔다(보낼 때마다 만들므로 늘 최신이다).
+    /// `root`의 작업 공간. 스킬과 확장 목록은 지금 읽어 둔다(보낼 때마다 만들므로 늘 최신이다).
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let skills = skills::load(&root);
-        Self { root, skills }
+        let extensions = crate::extension::catalog(&root);
+        Self {
+            root,
+            skills,
+            extensions,
+        }
+    }
+
+    /// 라이브러리의 확장(이름순).
+    pub fn extensions(&self) -> &[crate::extension::Meta] {
+        &self.extensions
     }
 
     /// 쓸 수 있는 스킬(이름순).
@@ -344,7 +356,67 @@ impl Workspace {
         }
     }
 
+    /// 확장을 시험하고, 성공하면 앞머리에서 빠진 것을 덧붙인다(목록·Insert 대화상자가 앞머리를 쓴다).
     fn run_extension(&self, arguments: &Map<String, Value>) -> Result<String, String> {
+        let report = self.try_extension(arguments)?;
+        let name = arguments.get("name").and_then(Value::as_str).unwrap_or("");
+        let draws = crate::extension::Extension::open(&self.root, name).is_ok_and(|ext| ext.draws);
+        let meta = std::fs::read_to_string(crate::extension::path(&self.root, name))
+            .ok()
+            .and_then(|source| crate::extension::parse_meta(name, &source));
+        let mut notes = Vec::new();
+        match &meta {
+            None => notes.push(
+                "The file has no header. Start it with a --[[--- ... ---]] block holding description \
+                 (in the user's language), args, and example; see the extension skill."
+                    .to_string(),
+            ),
+            Some(meta) => {
+                if meta.description.trim().is_empty() {
+                    notes.push("The header has no description.".to_string());
+                }
+                let scale = crate::extension::SCALE_ARG;
+                if meta.args.iter().any(|(arg, _)| arg == scale) {
+                    notes.push(format!(
+                        "`{scale}` is reserved: the app scales every block by it and does not pass it to the \
+                         extension. Rename that argument."
+                    ));
+                }
+                let described =
+                    |key: &str| key == scale || meta.args.iter().any(|(arg, _)| arg == key);
+                let undocumented: Vec<&str> = arguments
+                    .get("args")
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flat_map(|args| args.keys())
+                    .map(String::as_str)
+                    .chain(meta.example.iter().map(|(key, _)| key.as_str()))
+                    .filter(|key| !described(key))
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                if !undocumented.is_empty() {
+                    notes.push(format!(
+                        "Arguments not described under args in the header: {}.",
+                        undocumented.join(", ")
+                    ));
+                }
+                if draws && !meta.args.is_empty() && meta.example.is_empty() {
+                    notes.push(
+                        "The header has no example (the values used for the preview and when inserting the block)."
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(if notes.is_empty() {
+            report
+        } else {
+            format!("{report}\nNote: {}", notes.join(" "))
+        })
+    }
+
+    fn try_extension(&self, arguments: &Map<String, Value>) -> Result<String, String> {
         use crate::extension::{CommandContext, Extension, Shape, Theme};
         let name = arguments.get("name").and_then(Value::as_str).unwrap_or("");
         let extension = Extension::open(&self.root, name)?;
@@ -396,7 +468,9 @@ impl Workspace {
                     .collect()
             })
             .unwrap_or_default();
-        let (width, height) = extension.size;
+        // 배율은 앱이 적용하고 확장에는 넘기지 않는다.
+        let args = crate::extension::without_scale(&args);
+        let (width, height) = extension.size_for(&args)?;
         let header = format!(
             "Canvas {width} x {height}, animated: {}, commands: {commands}.",
             extension.animated
@@ -1061,7 +1135,8 @@ mod tests {
         std::fs::create_dir_all(root.join("Extensions")).unwrap();
         std::fs::write(
             root.join("Extensions/dot.lua"),
-            "return { size = { 100, 50 }, draw = function(g, t, args) g.circle('fill', 10 + t, 10, args.r) end,\n\
+            "--[[---\ndescription: 점\nargs:\n  r: 반지름\nexample:\n  r: 5\n---]]\n\
+             return { size = { 100, 50 }, draw = function(g, t, args) g.circle('fill', 10 + t, 10, args.r) end,\n\
              commands = { { title = 'Shout', run = function(ctx) return ctx.selection .. '!' end } } }",
         )
         .unwrap();
@@ -1085,6 +1160,30 @@ mod tests {
         assert!(out.text.starts_with("Error: "), "{}", out.text);
         let out = run(json!({ "name": "none" }));
         assert!(out.text.contains("No extension named"), "{}", out.text);
+        assert!(
+            !run(json!({ "name": "dot", "args": { "r": 5 } }))
+                .text
+                .contains("Note:")
+        );
+        // 앞머리에 없는 인자, 앞머리가 없는 확장은 알린다.
+        let out = run(json!({ "name": "dot", "args": { "r": 5, "color": "red" } }));
+        assert!(
+            out.text
+                .contains("not described under args in the header: color."),
+            "{}",
+            out.text
+        );
+        std::fs::write(
+            root.join("Extensions/bare.lua"),
+            "return { draw = function(g) g.circle('fill', 1, 1, 1) end }",
+        )
+        .unwrap();
+        let out = run(json!({ "name": "bare" }));
+        assert!(
+            out.text.contains("Note: The file has no header."),
+            "{}",
+            out.text
+        );
     }
 
     #[cfg(unix)]

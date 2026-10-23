@@ -14,6 +14,8 @@
 //! 오류 글은 모델이 읽고 고치므로 영어로 쓴다.
 
 pub mod canvas;
+mod scene;
+mod worker;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -25,6 +27,7 @@ use std::time::{Duration, Instant, SystemTime};
 use mlua::{Function, Lua, Table, Value, VmState};
 
 pub use canvas::{Align, Color, Segment, Shape, Theme};
+pub use worker::{Info, Worker};
 
 /// 라이브러리 루트 안의 확장 폴더.
 pub const EXTENSIONS_DIR: &str = "Extensions";
@@ -38,8 +41,12 @@ const FENCE_TAG: &str = "ext";
 /// 확장 하나가 쓸 수 있는 메모리.
 const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 
-/// 파일을 읽어 표를 돌려받는 데 쓸 수 있는 시간.
-const LOAD_TIMEOUT: Duration = Duration::from_secs(1);
+/// 파일을 읽어 표를 돌려받는 데 쓸 수 있는 시간. 시트를 배치하려면 캔버스 크기가 필요해서 UI 스레드가
+/// 이만큼 기다릴 수 있다. 확장의 최상위 코드는 표를 돌려주기만 하면 되므로 넉넉하다.
+const LOAD_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// 반복 주기(`period`)의 최대 길이. 이보다 길면 프레임을 캐시하지 않는다.
+const MAX_PERIOD: f32 = 10.0;
 
 /// 한 프레임을 그리는 데 쓸 수 있는 시간.
 const DRAW_TIMEOUT: Duration = Duration::from_millis(100);
@@ -67,6 +74,39 @@ pub struct Block {
     pub name: String,
     /// 본문의 `key: value` 줄. 순서대로.
     pub args: Vec<(String, String)>,
+}
+
+/// 앱이 읽는 블록 인자: 캔버스를 이 배율로 그린다(0.1~4, 기본 1). 확장에는 넘기지 않는다.
+pub const SCALE_ARG: &str = "scale";
+
+impl Block {
+    /// 블록의 배율(`scale:`). 숫자가 아니면 1이다.
+    pub fn scale(&self) -> f32 {
+        scale_of(&self.args)
+    }
+
+    /// 확장에 넘길 인자(`scale` 뺌).
+    pub fn extension_args(&self) -> Vec<(String, String)> {
+        without_scale(&self.args)
+    }
+}
+
+/// 인자의 배율(`scale:`). 없거나 숫자가 아니면 1이고, 0.1~4로 자른다.
+pub fn scale_of(args: &[(String, String)]) -> f32 {
+    args.iter()
+        .rev()
+        .find(|(key, _)| key == SCALE_ARG)
+        .and_then(|(_, value)| value.parse::<f32>().ok())
+        .filter(|scale| scale.is_finite())
+        .map_or(1.0, |scale| scale.clamp(0.1, 4.0))
+}
+
+/// `scale`을 뺀 인자.
+pub fn without_scale(args: &[(String, String)]) -> Vec<(String, String)> {
+    args.iter()
+        .filter(|(key, _)| key != SCALE_ARG)
+        .cloned()
+        .collect()
 }
 
 /// 본문에서 확장 블록을 찾는다. 닫지 않은 펜스는 블록이 아니다(쓰는 중이다).
@@ -198,6 +238,99 @@ pub fn commands(root: &Path) -> Vec<(String, usize, String)> {
         .collect()
 }
 
+/// 확장 파일 맨 위의 앞머리(`--[[---` … `---]]` 블록 주석). Lua를 돌리지 않고 읽는다.
+///
+/// 목록·Insert 대화상자·시스템 프롬프트에 쓴다. 사람에게 보이는 글이라 설명은 사용자의 언어로 쓴다
+/// (모델이 읽는 글을 영어로 쓰는 규칙의 예외).
+///
+/// ```lua
+/// --[[---
+/// name: archer
+/// description: 궁수가 과녁에 화살을 쏜다.
+/// args:
+///   speed: 화살 속도. 기본값 1.
+/// example:
+///   speed: 1.5
+/// ---]]
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Meta {
+    /// 확장 이름(파일 이름). 앞머리의 `name`이 다르면 파일 이름을 따른다(블록은 파일 이름으로 찾는다).
+    pub name: String,
+    pub description: String,
+    /// 블록 인자와 그 설명. 순서대로.
+    pub args: Vec<(String, String)>,
+    /// 미리보기와 블록 넣기에 쓰는 인자 값.
+    pub example: Vec<(String, String)>,
+}
+
+const META_OPEN: &str = "--[[---";
+const META_CLOSE: &str = "---]]";
+
+/// 앞머리를 읽는다. 파일이 앞머리로 시작하지 않으면(앞의 빈 줄은 괜찮다) `None`.
+pub fn parse_meta(name: &str, source: &str) -> Option<Meta> {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let rest = source.trim_start().strip_prefix(META_OPEN)?;
+    let (body, _) = rest.split_once(META_CLOSE)?;
+    let mut meta = Meta {
+        name: name.to_string(),
+        ..Meta::default()
+    };
+    let mut section: Option<&mut Vec<(String, String)>> = None;
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let indented = line.starts_with([' ', '\t']);
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        if indented {
+            if let Some(section) = section.as_deref_mut()
+                && !key.is_empty()
+            {
+                section.push((key.to_string(), value.to_string()));
+            }
+            continue;
+        }
+        section = None;
+        match key {
+            "description" => meta.description = value.to_string(),
+            "args" => section = Some(&mut meta.args),
+            "example" => section = Some(&mut meta.example),
+            _ => {}
+        }
+    }
+    Some(meta)
+}
+
+/// 확장 폴더의 앞머리 목록(이름순). 앞머리가 없는 확장은 이름만 있다.
+pub fn catalog(root: &Path) -> Vec<Meta> {
+    scan(root)
+        .into_iter()
+        .map(|(name, _)| {
+            std::fs::read_to_string(path(root, &name))
+                .ok()
+                .and_then(|source| parse_meta(&name, &source))
+                .unwrap_or(Meta {
+                    name,
+                    ..Meta::default()
+                })
+        })
+        .collect()
+}
+
+/// 시트에 넣을 블록 글(끝 줄바꿈 없음).
+pub fn block_text(name: &str, args: &[(String, String)]) -> String {
+    let mut text = format!("```{FENCE_TAG} {name}\n");
+    for (key, value) in args {
+        text.push_str(&format!("{key}: {value}\n"));
+    }
+    text.push_str("```");
+    text
+}
+
 /// 명령에 넘기는 정보.
 #[derive(Clone, Debug, Default)]
 pub struct CommandContext {
@@ -216,9 +349,13 @@ pub struct Extension {
     g: Table,
     recorder: Rc<RefCell<canvas::Recorder>>,
     deadline: Rc<Cell<Instant>>,
-    /// 캔버스 크기(논리 단위).
-    pub size: (f32, f32),
+    /// 캔버스 크기(논리 단위). 블록 인자로 정하는 확장(`size = function(args)`)이면 `None`이고
+    /// [`Self::size_for`]로 묻는다.
+    pub size: Option<(f32, f32)>,
+    size_fn: Option<Function>,
     pub animated: bool,
+    /// 애니메이션이 되풀이되는 주기(초). 있으면 한 주기의 프레임을 캐시해 다시 그리지 않는다.
+    pub period: Option<f32>,
     pub draws: bool,
     /// 명령 제목(순서대로).
     pub commands: Vec<String>,
@@ -233,6 +370,31 @@ impl std::fmt::Debug for Extension {
             .field("commands", &self.commands)
             .finish_non_exhaustive()
     }
+}
+
+/// 확장 파일의 소스. 이름·파일 종류·크기를 검사한다.
+pub fn read_source(root: &Path, name: &str) -> Result<String, String> {
+    if !valid_name(name) {
+        return Err(format!(
+            "Invalid extension name \"{name}\" (use letters, digits, - and _)."
+        ));
+    }
+    let file = path(root, name);
+    let meta = std::fs::symlink_metadata(&file).map_err(|_| {
+        format!("No extension named \"{name}\" ({EXTENSIONS_DIR}/{name}.{EXTENSION_FILE}).")
+    })?;
+    if !meta.is_file() {
+        return Err(format!(
+            "{EXTENSIONS_DIR}/{name}.{EXTENSION_FILE} is not a file."
+        ));
+    }
+    if meta.len() > MAX_SOURCE_BYTES {
+        return Err(format!(
+            "The extension file is too large (limit {MAX_SOURCE_BYTES} bytes)."
+        ));
+    }
+    let source = std::fs::read_to_string(&file).map_err(|err| err.to_string())?;
+    Ok(source)
 }
 
 /// Lua 오류를 모델이 읽을 한 줄로.
@@ -257,27 +419,18 @@ fn message(err: mlua::Error) -> String {
 impl Extension {
     /// `root`(라이브러리)의 확장 `name`을 읽는다.
     pub fn open(root: &Path, name: &str) -> Result<Self, String> {
-        if !valid_name(name) {
-            return Err(format!(
-                "Invalid extension name \"{name}\" (use letters, digits, - and _)."
-            ));
+        Self::load(name, &read_source(root, name)?)
+    }
+
+    /// 앱이 알아야 할 것(작업 스레드에서 UI 스레드로 넘긴다).
+    pub fn info(&self) -> Info {
+        Info {
+            size: self.size,
+            animated: self.animated,
+            period: self.period,
+            draws: self.draws,
+            commands: self.commands.clone(),
         }
-        let file = path(root, name);
-        let meta = std::fs::symlink_metadata(&file).map_err(|_| {
-            format!("No extension named \"{name}\" ({EXTENSIONS_DIR}/{name}.{EXTENSION_FILE}).")
-        })?;
-        if !meta.is_file() {
-            return Err(format!(
-                "{EXTENSIONS_DIR}/{name}.{EXTENSION_FILE} is not a file."
-            ));
-        }
-        if meta.len() > MAX_SOURCE_BYTES {
-            return Err(format!(
-                "The extension file is too large (limit {MAX_SOURCE_BYTES} bytes)."
-            ));
-        }
-        let source = std::fs::read_to_string(&file).map_err(|err| err.to_string())?;
-        Self::load(name, &source)
     }
 
     /// 소스에서 확장을 읽는다.
@@ -320,7 +473,10 @@ impl Extension {
         if !draws && commands.is_empty() {
             return Err("the returned table has neither draw nor commands".into());
         }
-        let size = canvas_size(&module)?;
+        let (size, size_fn) = match module.get::<Value>("size").map_err(message)? {
+            Value::Function(size_fn) => (None, Some(size_fn)),
+            value => (Some(canvas_size(value)?), None),
+        };
         let animated = match module.get::<Value>("animated").map_err(message)? {
             Value::Nil => false,
             Value::Boolean(animated) => animated,
@@ -331,7 +487,24 @@ impl Extension {
                 ));
             }
         };
-        let recorder = Rc::new(RefCell::new(canvas::Recorder::new(size.0, size.1)));
+        let period = match module.get::<Value>("period").map_err(message)? {
+            Value::Nil => None,
+            Value::Integer(n) => Some(n as f32),
+            Value::Number(n) => Some(n as f32),
+            other => {
+                return Err(format!(
+                    "period must be a number of seconds, got {}",
+                    other.type_name()
+                ));
+            }
+        };
+        if let Some(period) = period
+            && !(period > 0.0 && period <= MAX_PERIOD)
+        {
+            return Err(format!("period must be between 0 and {MAX_PERIOD} seconds"));
+        }
+        let (width, height) = size.unwrap_or(DEFAULT_SIZE);
+        let recorder = Rc::new(RefCell::new(canvas::Recorder::new(width, height)));
         let g = canvas::create(&lua, recorder.clone()).map_err(message)?;
         Ok(Self {
             lua,
@@ -340,7 +513,9 @@ impl Extension {
             recorder,
             deadline,
             size,
+            size_fn,
             animated,
+            period,
             draws,
             commands,
         })
@@ -357,9 +532,17 @@ impl Extension {
             return Err("this extension has no draw function".into());
         }
         let draw: Function = self.module.get("draw").map_err(message)?;
-        self.recorder
-            .borrow_mut()
-            .reset(self.size.0, self.size.1, theme.foreground);
+        let (width, height) = self.size_for(args)?;
+        self.recorder.borrow_mut().reset(
+            width,
+            height,
+            theme.foreground,
+            if self.animated {
+                canvas::ANIMATED_SHAPE_LIMIT
+            } else {
+                canvas::STILL_SHAPE_LIMIT
+            },
+        );
         let run = || -> mlua::Result<()> {
             self.g
                 .raw_set("theme", canvas::theme_table(&self.lua, theme)?)?;
@@ -371,6 +554,18 @@ impl Extension {
         };
         run().map_err(message)?;
         Ok(std::mem::take(&mut self.recorder.borrow_mut().shapes))
+    }
+
+    /// 블록 인자 `args`일 때의 캔버스 크기.
+    pub fn size_for(&self, args: &[(String, String)]) -> Result<(f32, f32), String> {
+        let Some(size_fn) = &self.size_fn else {
+            return Ok(self.size.unwrap_or(DEFAULT_SIZE));
+        };
+        let call = || -> mlua::Result<Value> {
+            self.deadline.set(Instant::now() + DRAW_TIMEOUT);
+            size_fn.call(self.args_table(args)?)
+        };
+        canvas_size(call().map_err(message)?).map_err(|err| format!("size(args): {err}"))
     }
 
     /// 명령 `index`를 부른다. 넣을 글을 돌려준다(`nil`이면 `None`).
@@ -449,13 +644,14 @@ fn command_titles(module: &Table) -> Result<Vec<String>, String> {
         .collect()
 }
 
-fn canvas_size(module: &Table) -> Result<(f32, f32), String> {
-    let size = match module.get::<Value>("size").map_err(message)? {
+/// `size` 값(또는 `size(args)`가 돌려준 값): `{ width, height }`. 없으면 기본 크기.
+fn canvas_size(value: Value) -> Result<(f32, f32), String> {
+    let size = match value {
         Value::Nil => return Ok(DEFAULT_SIZE),
         Value::Table(size) => size,
         other => {
             return Err(format!(
-                "size must be {{ width, height }}, got {}",
+                "size must be {{ width, height }} or function(args) returning it, got {}",
                 other.type_name()
             ));
         }
@@ -474,13 +670,14 @@ fn canvas_size(module: &Table) -> Result<(f32, f32), String> {
     Ok((side(1)?, side(2)?))
 }
 
-/// 읽은 확장(또는 읽지 못한 까닭).
-pub type Loaded = Result<Extension, String>;
+/// 작업 스레드에 띄운 확장(또는 띄우지 못한 까닭).
+pub type Loaded = Result<Worker, String>;
 
-/// 열린 라이브러리의 확장 캐시. 파일 수정 시각이 바뀌면 다시 읽는다. UI 스레드에서만 쓴다.
+/// 열린 시트(또는 대화상자)의 확장 캐시: 확장마다 작업 스레드 하나. 파일 수정 시각이 바뀌면 새로 띄우고
+/// 옛 스레드는 요청 통로가 끊겨 끝난다. UI 스레드에서만 쓴다.
 pub struct Host {
     root: PathBuf,
-    /// 이름 → (읽을 때의 파일 수정 시각, 읽은 확장).
+    /// 이름 → (띄울 때의 파일 수정 시각, 띄운 확장).
     cache: RefCell<HashMap<String, Cached>>,
 }
 
@@ -498,7 +695,7 @@ impl Host {
         &self.root
     }
 
-    /// 확장 `name`. 처음이거나 파일이 바뀌었으면 읽는다.
+    /// 확장 `name`. 처음이거나 파일이 바뀌었으면 띄운다(읽기가 끝날 때까지 기다린다).
     pub fn get(&self, name: &str) -> Rc<Loaded> {
         let modified = std::fs::metadata(path(&self.root, name))
             .and_then(|meta| meta.modified())
@@ -508,7 +705,8 @@ impl Host {
         {
             return loaded.clone();
         }
-        let loaded = Rc::new(Extension::open(&self.root, name));
+        let loaded =
+            Rc::new(read_source(&self.root, name).and_then(|source| Worker::spawn(name, source)));
         self.cache
             .borrow_mut()
             .insert(name.to_string(), (modified, loaded.clone()));
@@ -542,6 +740,37 @@ mod tests {
         assert_eq!(blocks("~~~~ ext 별\n~~~~").len(), 1);
     }
 
+    #[test]
+    fn reads_meta_without_running_lua() {
+        let source = "\n--[[---\nname: other\ndescription: 궁수가 쏜다.\nargs:\n  speed: 화살 속도. 기본값 1.\n  label: 글\nexample:\n  speed: 1.5\nunknown: x\n---]]\nreturn {}";
+        assert_eq!(
+            parse_meta("archer", source),
+            Some(Meta {
+                name: "archer".into(),
+                description: "궁수가 쏜다.".into(),
+                args: vec![
+                    ("speed".into(), "화살 속도. 기본값 1.".into()),
+                    ("label".into(), "글".into())
+                ],
+                example: vec![("speed".into(), "1.5".into())],
+            })
+        );
+        // 앞머리가 맨 위에 없거나 닫히지 않으면 없는 것이다.
+        assert_eq!(
+            parse_meta("x", "return {}\n--[[---\ndescription: d\n---]]"),
+            None
+        );
+        assert_eq!(parse_meta("x", "--[[---\ndescription: d\n"), None);
+        // 앞머리는 Lua 주석이라 실행에 영향이 없다.
+        assert!(Extension::load("archer", source).is_err_and(|err| err.contains("neither")));
+        // 넣은 블록은 다시 블록으로 읽힌다.
+        let text = block_text("archer", &[("speed".into(), "1.5".into())]);
+        assert_eq!(
+            blocks(&text)[0].args,
+            [("speed".to_string(), "1.5".to_string())]
+        );
+    }
+
     const ARCHER: &str = r#"
 return {
   size = { 200, 100 },
@@ -565,7 +794,7 @@ return {
     #[test]
     fn draws_shapes_in_canvas_space() {
         let extension = Extension::load("archer", ARCHER).unwrap();
-        assert_eq!(extension.size, (200.0, 100.0));
+        assert_eq!(extension.size, Some((200.0, 100.0)));
         assert!(extension.animated && extension.draws);
         assert_eq!(extension.commands, ["Upper", "Nothing"]);
         let args = [
@@ -665,6 +894,169 @@ return {
             extension.draw(0.0, &[], &theme).unwrap(),
             extension.draw(1.0, &[], &theme).unwrap()
         );
+    }
+
+    #[test]
+    fn scale_is_read_by_the_app() {
+        let block = &blocks("```ext dot\nr: 3\nscale: 2\n```")[0];
+        assert_eq!(block.scale(), 2.0);
+        assert_eq!(block.extension_args(), [("r".to_string(), "3".to_string())]);
+        assert_eq!(scale_of(&[("scale".into(), "x".into())]), 1.0);
+        assert_eq!(scale_of(&[("scale".into(), "100".into())]), 4.0);
+        assert_eq!(scale_of(&[]), 1.0);
+    }
+
+    #[test]
+    fn size_can_follow_block_args() {
+        let extension = Extension::load(
+            "x",
+            "return { size = function(args) return { 100 * (args.scale or 1), 50 } end, \
+             draw = function(g) g.rectangle('fill', 0, 0, g.getWidth(), g.getHeight()) end }",
+        )
+        .unwrap();
+        assert_eq!(extension.size, None);
+        let args = [("scale".to_string(), "2".to_string())];
+        assert_eq!(extension.size_for(&args), Ok((200.0, 50.0)));
+        assert_eq!(extension.size_for(&[]), Ok((100.0, 50.0)));
+        // 캔버스(g.getWidth)도 그 크기다.
+        let shapes = extension.draw(0.0, &args, &Theme::default()).unwrap();
+        let Shape::Fill { path, .. } = &shapes[0] else {
+            panic!()
+        };
+        assert!(path.contains(&Segment::Line([200.0, 0.0])));
+        let bad = Extension::load(
+            "x",
+            "return { size = function() return { 0, 1 } end, draw = function() end }",
+        )
+        .unwrap();
+        assert!(bad.size_for(&[]).unwrap_err().contains("between 1 and"));
+    }
+
+    /// `extension` 스킬의 예제는 모델이 그대로 베끼므로 모두 실제로 돌아야 한다.
+    #[test]
+    fn skill_examples_run() {
+        let doc = include_str!("../../resources/skills/extension/references/examples.md");
+        let sources: Vec<&str> = doc
+            .split("```lua\n")
+            .skip(1)
+            .filter_map(|rest| rest.split("\n```").next())
+            .collect();
+        assert_eq!(sources.len(), 5);
+        let theme = Theme::default();
+        let args = [
+            ("values".to_string(), "12, 30, 21, 8".to_string()),
+            ("labels".to_string(), "봄, 여름, 가을, 겨울".to_string()),
+            ("label".to_string(), "명중!".to_string()),
+        ];
+        for source in sources {
+            let extension = Extension::load("example", source).unwrap();
+            // 앞머리가 있고, 그림을 그리면 example 값이 모두 args에 설명되어 있다.
+            let meta = parse_meta("example", source).unwrap();
+            assert!(!meta.description.is_empty());
+            for (key, _) in &meta.example {
+                assert!(meta.args.iter().any(|(arg, _)| arg == key), "{key}");
+            }
+            if extension.draws {
+                assert!(!meta.example.is_empty());
+                extension.draw(0.0, &meta.example, &theme).unwrap();
+            }
+            if extension.draws {
+                for t in [0.0, 0.7, 1.9, 2.5] {
+                    for args in [&args[..], &[]] {
+                        let shapes = extension.draw(t, args, &theme).unwrap();
+                        assert!(!shapes.is_empty());
+                        let (w, h) = extension.size_for(args).unwrap();
+                        let inside = |[x, y]: [f32; 2]| {
+                            (-1.0..=w + 1.0).contains(&x) && (-1.0..=h + 1.0).contains(&y)
+                        };
+                        for shape in &shapes {
+                            let points: Vec<[f32; 2]> = match shape {
+                                Shape::Fill { path, .. } | Shape::Stroke { path, .. } => path
+                                    .iter()
+                                    .filter_map(|segment| match *segment {
+                                        Segment::Move(p) | Segment::Line(p) => Some(p),
+                                        Segment::Cubic(_, _, p) => Some(p),
+                                        Segment::Close => None,
+                                    })
+                                    .collect(),
+                                Shape::Text { origin, .. } => vec![*origin],
+                            };
+                            assert!(points.into_iter().all(inside), "t = {t}: {shape:?}");
+                        }
+                    }
+                }
+            }
+            for ix in 0..extension.commands.len() {
+                for selection in ["", "가나다\nabc"] {
+                    let ctx = CommandContext {
+                        selection: selection.into(),
+                        ..CommandContext::default()
+                    };
+                    extension.run_command(ix, &ctx).unwrap();
+                }
+            }
+        }
+        // 글자 단위 명령은 한글을 깨뜨리지 않는다.
+        let tools = Extension::load(
+            "text-tools",
+            doc.split("```lua\n")
+                .nth(4)
+                .unwrap()
+                .split("\n```")
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let ctx = CommandContext {
+            selection: "가나다".into(),
+            ..CommandContext::default()
+        };
+        assert_eq!(tools.run_command(2, &ctx), Ok(Some("다나가".into())));
+        assert_eq!(tools.run_command(1, &ctx), Ok(Some("「가나다」".into())));
+    }
+
+    #[test]
+    fn draws_a_3d_scene() {
+        let extension = Extension::load(
+            "x",
+            r#"return { size = { 200, 100 }, draw = function(g)
+                local s = g.newScene()
+                s:camera(0, 0, 5, 0, 0, 0)
+                s:setColor(1, 0, 0)
+                s:box("fill", 1)
+                s:line(-1, 0, 1, 1, 0, 1)
+                s:draw()
+                local x, y = s:project(0, 0, 0)
+                g.print(string.format("%d,%d", x, y), 0, 0)
+            end }"#,
+        )
+        .unwrap();
+        let shapes = extension.draw(0.0, &[], &Theme::default()).unwrap();
+        // 정면에서 본 상자는 앞면 하나만 보이고, 선은 상자 앞(먼저 그린 면 위)에 온다.
+        assert_eq!(shapes.len(), 3, "{shapes:?}");
+        assert!(
+            matches!(&shapes[0], Shape::Fill { color, .. } if color[0] > 0.3 && color[1] == 0.0),
+            "{shapes:?}"
+        );
+        assert!(matches!(&shapes[1], Shape::Stroke { .. }));
+        assert!(matches!(&shapes[2], Shape::Text { text, .. } if text == "100,50"));
+
+        let err = Extension::load(
+            "x",
+            "return { draw = function(g) g.newScene():teapot('fill') end }",
+        )
+        .unwrap()
+        .draw(0.0, &[], &Theme::default())
+        .unwrap_err();
+        assert!(err.contains("scene:teapot does not exist"), "{err}");
+        let err = Extension::load(
+            "x",
+            "return { draw = function(g) g.newScene():sphere('fill', 'big') end }",
+        )
+        .unwrap()
+        .draw(0.0, &[], &Theme::default())
+        .unwrap_err();
+        assert!(err.contains("scene:sphere: argument #2"), "{err}");
     }
 
     #[test]

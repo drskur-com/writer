@@ -1,76 +1,44 @@
 ---
 name: extension
-description: Write or fix a Writer extension — a Lua script in Extensions/ that draws a picture or animation inside a sheet (a ```ext block) or adds a command to the Extensions menu (for example inserting today's date or transforming the selected text). Use when the user wants something drawn or animated in the editor, a custom text command, or when an extension shows an error.
+description: Write, change, or fix a Writer extension — a Lua script in Extensions/ that draws a picture, chart, or animation inside a sheet (a ```ext block) or adds a command to the Extensions menu (for example inserting today's date or transforming the selected text). Use when the user wants something drawn or animated in the editor, a custom text command or shortcut action, or when an extension block or command shows an error.
 ---
 
 # Writer extensions
 
-Answer in the user's language. Code, comments, and file names in English unless the user asks otherwise.
+An extension is one Lua (Luau) file, `Extensions/<name>.lua`, that returns a table. The app uses two entry points:
 
-## Files and blocks
+- `draw(g, t, args)` draws on a canvas wherever a sheet has a ```` ```ext <name> ```` block. `g` is a canvas with the LÖVE `love.graphics` API. `g.newScene()` adds simple 3D (boxes, spheres, meshes, a camera and a light), drawn as flat-shaded 2D shapes.
+- `commands` adds items to the app's **Extensions** menu. A command gets the selected text and returns the text that replaces it.
 
-- One extension = one file: `Extensions/<name>.lua` (`<name>`: letters, digits, `-`, `_`). Create it with `write_file`, change it with `edit_file`. The app reloads it when the file changes.
-- A sheet shows a drawing with a fenced block. The body lines are `key: value` arguments (numbers, `true`/`false`, or text):
+Before writing code, read `references/api.md` (the complete API: module fields, every `g` function, `ctx`, the sandbox). For a new extension, also read `references/examples.md` and start from the closest example.
 
-  ````
-  ```ext archer
-  power: 3
-  label: Hit!
-  ```
-  ````
+Answer in the user's language. Write code, comments, and file names in English unless the user asks otherwise. The header's `description` and `args` lines are shown to the user, so write them in the user's language. Text that the drawing or command shows to readers (labels, inserted text) follows the manuscript's language.
 
-  Add or change the block in the sheet with `edit_file` (sheets are Markdown; keep a blank line before and after the block).
-- Commands appear in the app's **Extensions** menu. The user runs them on the open sheet.
+## Workflow
 
-## The script
+1. **Decide what to build.** A picture or animation in the sheet is `draw`. An action on text is a command. One file can have both. If the request is ambiguous (for example "a date": insert it once, or draw it), pick the reading that fits best and say which one you chose. Ask only when the choice changes the result a lot.
+2. **Check what exists.** The `<extensions>` list in your instructions shows the existing extensions with their descriptions. If one already does what the user wants, use it (add its block, step 5) instead of writing a new one. If one is close, `read_file` it and change it with `edit_file`. Name a new extension with short lowercase English words joined by `-` (for example `archer`, `bar-chart`, `insert-date`).
+3. **Write the file** with `write_file` at `Extensions/<name>.lua`, in one file. Start it with the header (`references/api.md`, "The header"): `description`, `args` with each argument's meaning and default, and `example` values that show the drawing well. The user picks extensions by this header in Insert → Extension…, so keep it accurate whenever you change the code.
+4. **Test it with `run_extension`. Never skip this step.**
+   - Draw: call at `t = 0` with the arguments the block will use. If animated, also call at a few later times (for example 0.7 and 1.9) and at the end of a loop. Also call once without arguments to check the defaults.
+   - The result reports the shape count and the drawing bounds. Fix it if anything is drawn outside the canvas, if nothing is drawn, or if the shape count is in the thousands.
+   - Commands: run each one with a sample selection that includes Korean or other non-ASCII text, and with an empty selection.
+   - Test with the header's `example` values too: that is what the user sees in the Insert dialog's preview.
+   - If there is an error, fix the file with `edit_file` and test again. The user sees the error in the sheet otherwise. Also fix any `Note:` about the header.
+5. **Place the block** if the user wants the drawing in a sheet. Add the ```` ```ext ```` block with `edit_file`, with a blank line before and after it, where the user asked (by default at the end of the open sheet). Put arguments one per line as `key: value`. If the user did not ask for it in a sheet, tell them they can insert it with Insert → Extension….
+6. **Reply briefly**: what the extension does, how to use it (the block, **Insert → Extension…**, or the menu item **Extensions → title**), and how to change it. Do not paste the whole script; it is in the file.
 
-The file returns one table. Use only the fields you need:
+## Design rules
 
-```lua
-return {
-  size = { 400, 160 },   -- canvas width, height in canvas units (default 400 x 200). Shrunk to fit the page width.
-  animated = true,       -- call draw every frame while visible (default false: draw once with t = 0)
-  draw = function(g, t, args)
-    -- g: the canvas (below). t: seconds since the block appeared. args: the block's key: value lines.
-  end,
-  commands = {
-    { title = "Insert today's date", run = function(ctx)
-        return os.date("%Y-%m-%d")   -- the returned string replaces the selection (or is inserted at the cursor); nil does nothing
-      end },
-  },
-}
-```
+- **Theme colors.** Use `g.theme.foreground`, `.muted`, `.accent`, `.border`, and `.background` for lines, text, and backgrounds so the drawing works in light and dark themes. Use fixed colors only for things that have their own color (a red target, a blue sky).
+- **Size.** Set `size` to the space the drawing needs, usually 300–600 wide and 100–300 high. The app shrinks a canvas that is wider than the page and never enlarges it. When the space depends on the arguments (for example more bars), make `size` a `function(args)` returning `{ width, height }`. To make a drawing bigger or smaller, the user writes `scale: 1.5` in the block; the app handles it for every extension, so never define a `scale` argument. Lay things out from `g.getWidth()` and `g.getHeight()` rather than repeating numbers.
+- **Arguments.** Every argument needs a default (`local power = args.power or 1`). Numbers, `true`, and `false` arrive as numbers and booleans; everything else as strings. Split lists with `string.split(args.values or "", ",")` and convert each item with `tonumber`.
+- **Animation.** Compute everything from `t`, for example `local phase = (t % period) / period`. `draw` keeps no state between calls and starts each call from an empty canvas. Make the frame at `t = 0` meaningful on its own: exports will use it (PDF, EPUB, and DOCX export of extension blocks is not built yet; they currently come out as code blocks). For a loop, set `period` to its length in seconds (at most 10): the app caches one loop's frames and stops calling `draw`. Leave `animated` off for still pictures; an animation redraws the window 30 times a second while visible.
+- **Randomness.** `math.random` restarts from the same seed on every draw, so random stars or noise stay still and look the same every time. To vary them over time, derive the values from `t`.
+- **Text.** `g.print` draws one line per `\n` and does not wrap. Use `g.printf(text, x, y, width, "center")` to center text. Keep labels short; text does not rotate.
+- **Commands.** Return a string to replace the selection (or insert at the cursor when nothing is selected), or `nil` to change nothing. Keep the selection's text intact unless the command is meant to change it. For anything that counts or cuts characters in Korean or other non-ASCII text, use `utf8.len`, `utf8.codes`, `utf8.offset`, and `utf8.char`; `#s`, `s:sub`, `s:reverse`, and `s:upper` work on bytes and break Korean.
+- **Limits.** Each draw call has 0.1 s (an animation frame at most 2,000 shapes), loading the file 0.1 s, and each command 2 s; the script has no files, network, `io`, `os.execute`, or `require`. If the user asks for something the API cannot do (images, clicking, reading other files, network, realistic 3D with textures, shadows, or smooth shading), say so and offer the closest thing it can do.
 
-`ctx` (commands): `ctx.selection` (selected text, may be empty), `ctx.text` (whole sheet), `ctx.sheet` (sheet path).
+## Fixing an extension
 
-## Canvas `g` — the LÖVE `love.graphics` API
-
-Coordinates are canvas units, origin top-left, y down, angles in radians. Colors are 0–1 (`r, g, b[, a]`), a table `{r, g, b, a}`, or `"#rrggbb"`. The default color is the theme's text color.
-
-| Function | Notes |
-|---|---|
-| `g.setColor(r, g, b, a)`, `g.getColor()` | |
-| `g.setLineWidth(w)`, `g.getLineWidth()` | |
-| `g.setFont(size)` / `g.setFont(g.newFont(size))` | A font is just its size (default 12) |
-| `g.getWidth()`, `g.getHeight()`, `g.getDimensions()` | Canvas size |
-| `g.clear(r, g, b, a)` | Fills the whole canvas |
-| `g.rectangle(mode, x, y, w, h[, rx, ry])` | `mode`: `"fill"` or `"line"` |
-| `g.circle(mode, x, y, r)`, `g.ellipse(mode, x, y, rx, ry)` | |
-| `g.arc(mode, [arctype,] x, y, r, a1, a2)` | `arctype`: `"pie"` (default), `"open"`, `"closed"` |
-| `g.line(x1, y1, x2, y2, ...)` or `g.line(points)` | |
-| `g.polygon(mode, x1, y1, ...)` or `g.polygon(mode, points)` | |
-| `g.print(text, x, y)` | One line per `\n`. Text does not rotate |
-| `g.printf(text, x, y, limit, align)` | `align`: `"left"`, `"center"`, `"right"` inside width `limit` |
-| `g.push()`, `g.pop()`, `g.origin()`, `g.translate(dx, dy)`, `g.rotate(a)`, `g.scale(sx[, sy])` | |
-| `g.theme.foreground`, `.background`, `.muted`, `.accent`, `.border` | Theme colors as `{r, g, b, a}`; use them so drawings work in light and dark themes |
-
-Nothing else exists (no images, shaders, `love.*`, `love.update`, or input). Calling a missing function is an error that lists the available ones.
-
-## Rules
-
-- Draw everything every call: `draw` starts from an empty canvas with no transform. Compute the animation from `t` (for example `local phase = t % 2`), not from state kept between calls.
-- `math.random` is reset to the same seed before every draw, so the picture is the same for the same `t` (stars do not flicker). Books get the frame at `t = 0`, so make that frame meaningful.
-- The script runs in a sandbox: no files, network, `io`, `os.execute`, or `require`. `os.date`, `os.time`, `os.clock`, `string`, `table`, `math`, and `utf8` work. Each draw has a 0.1 s limit and each command 2 s.
-- Lua strings are bytes. For Korean or other non-ASCII text, use `utf8.len`, `utf8.codes`, `utf8.offset`, and `utf8.char` instead of `#s`, `s:sub`, or `s:upper` when counting or cutting characters.
-- After writing or changing an extension, always test it with `run_extension` (draw at `t = 0` and at a later `t` if animated; run each command) and fix any error before telling the user it is done. Check that the reported drawing bounds fall inside the canvas.
-- Tell the user how to use it: the ```ext block to put in a sheet, or the Extensions menu item.
+When the user reports a problem or a block shows an error ("확장 <name>: ..."), `read_file` the extension, reproduce the problem with `run_extension` using the block's arguments from the sheet, fix it, and test again. Error messages name the function and argument (for example `g.circle: argument #3 must be a number`) or the missing function.

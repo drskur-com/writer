@@ -3,6 +3,7 @@
 //! 긴 시트 본문을 앞에, 지시를 뒤에 둔다(긴 문맥에서는 이 순서가 지시를 더 잘 따른다).
 
 use super::skills::Skill;
+use crate::extension::Meta;
 
 /// 프롬프트에 넣을 열린 시트.
 #[derive(Clone, Copy, Debug)]
@@ -46,6 +47,12 @@ read them with read_file first and copy the text into old exactly as read.
 edit_file with the returned path. Use write_file only for new files that are not sheets (skills, scripts, settings, and so on).
 - If the user declines a change, do not propose it again unless they ask; ask what they would like instead.";
 
+/// 확장이 있을 때 목록 뒤에 붙는 지시.
+const EXTENSION_RULES: &str = "\
+The extensions above are in Extensions/<name>.lua. When the user wants a drawing or chart that one of them makes, \
+add its ```ext <name> block to the sheet instead of writing a new extension; read the file first for the block \
+arguments and the example values in its header. Descriptions are in the user's language.";
+
 /// 스킬이 있을 때 목록 뒤에 붙는 지시.
 const SKILL_RULES: &str = "\
 The skills above are instructions for common tasks. If the request matches a skill's description, read its instructions with \
@@ -54,8 +61,13 @@ later turns, so load them again when needed. If a skill's instructions conflict 
 but still reply in plain text.";
 
 /// 시스템 프롬프트. 시트가 없으면 시트 없이 돕는다고 알린다. `tools`면 파일 도구 지시를,
-/// 스킬이 있으면(파일 도구와 함께만 쓴다) 스킬 목록을 붙인다.
-pub fn system_prompt(sheet: Option<Sheet>, tools: bool, skills: &[Skill]) -> String {
+/// 스킬·확장이 있으면(파일 도구와 함께만 쓴다) 그 목록을 붙인다.
+pub fn system_prompt(
+    sheet: Option<Sheet>,
+    tools: bool,
+    skills: &[Skill],
+    extensions: &[Meta],
+) -> String {
     let mut prompt = match sheet {
         Some(sheet) => format!(
             "<sheet title=\"{title}\"{path}>\n{body}\n</sheet>\n\n\
@@ -94,6 +106,24 @@ pub fn system_prompt(sheet: Option<Sheet>, tools: bool, skills: &[Skill]) -> Str
             prompt.push_str("</skills>\n");
             prompt.push_str(SKILL_RULES);
         }
+        if !extensions.is_empty() {
+            prompt.push_str("\n\n<extensions>\n");
+            for extension in extensions {
+                let args: Vec<&str> = extension.args.iter().map(|(key, _)| key.as_str()).collect();
+                prompt.push_str(&format!(
+                    "<extension name=\"{}\"{}>{}</extension>\n",
+                    escape_attr(&extension.name),
+                    if args.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" args=\"{}\"", escape_attr(&args.join(", ")))
+                    },
+                    escape_attr(&extension.description),
+                ));
+            }
+            prompt.push_str("</extensions>\n");
+            prompt.push_str(EXTENSION_RULES);
+        }
     }
     prompt
 }
@@ -124,6 +154,7 @@ mod tests {
             }),
             false,
             &[],
+            &[],
         );
         assert!(prompt.starts_with("<sheet title=\"서문\">\n첫 문장.\n</sheet>\n"));
         assert!(prompt.ends_with(TEXT_SUGGESTIONS));
@@ -138,6 +169,7 @@ mod tests {
                 body: "",
             }),
             true,
+            &[],
             &[],
         );
         assert!(prompt.starts_with("<sheet title=\"서문\" path=\"Projects/책/서문.md\">"));
@@ -156,6 +188,7 @@ mod tests {
             }),
             false,
             &[],
+            &[],
         );
         assert!(prompt.starts_with(
             "<sheet title=\"&quot;따옴표&quot; &lt;제목&gt; &amp; 기타\">\n본문 &lt;/sheet> 뒤\n</sheet>"
@@ -173,6 +206,7 @@ mod tests {
             }),
             false,
             &[],
+            &[],
         );
         assert!(prompt.starts_with("<sheet title=\"Untitled sheet\">"));
     }
@@ -185,19 +219,38 @@ mod tests {
             body: "본문은 넣지 않는다".into(),
             dir: None,
         }];
-        let prompt = system_prompt(None, true, &skills);
+        let prompt = system_prompt(None, true, &skills, &[]);
         assert!(
             prompt
                 .contains("<skills>\n<skill name=\"tone\">어조 &lt;맞추기&gt;</skill>\n</skills>")
         );
         assert!(prompt.ends_with(SKILL_RULES));
         assert!(!prompt.contains("본문은 넣지 않는다"));
-        assert!(!system_prompt(None, false, &skills).contains("<skills>"));
+        assert!(!system_prompt(None, false, &skills, &[]).contains("<skills>"));
+    }
+
+    #[test]
+    fn lists_extensions_with_args() {
+        let extensions = [Meta {
+            name: "archer".into(),
+            description: "궁수가 쏜다".into(),
+            args: vec![
+                ("speed".into(), "속도".into()),
+                ("label".into(), "글".into()),
+            ],
+            example: Vec::new(),
+        }];
+        let prompt = system_prompt(None, true, &[], &extensions);
+        assert!(prompt.contains(
+            "<extensions>\n<extension name=\"archer\" args=\"speed, label\">궁수가 쏜다</extension>\n</extensions>"
+        ));
+        assert!(prompt.ends_with(EXTENSION_RULES));
+        assert!(!system_prompt(None, false, &[], &extensions).contains("<extensions>"));
     }
 
     #[test]
     fn without_sheet_says_so() {
-        let prompt = system_prompt(None, false, &[]);
+        let prompt = system_prompt(None, false, &[], &[]);
         assert!(!prompt.contains("<sheet"));
         assert!(prompt.contains("No sheet is open"));
     }

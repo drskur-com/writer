@@ -38,6 +38,7 @@ actions!(
         InsertImage,
         InsertFootnote,
         InsertTable,
+        InsertExtension,
         InsertSpecialChar,
         ToggleLineGroup,
         CompileProject,

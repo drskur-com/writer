@@ -2,18 +2,25 @@
 //!
 //! `` ```ext <이름> `` 펜스는 그대로 고칠 수 있는 글자로 두고, 닫는 줄 아래에 gpui-base 줄 블록으로
 //! 확장의 `draw`가 그린 모양을 그린다. 펜스 줄은 커서가 블록에 닿을 때만 보인다(표와 같다, ADR-0017).
-//! 캔버스는 본문 폭보다 크면 비율을 지켜 줄이고 가운데에 둔다. `animated` 확장은 보이는 동안 매
-//! 프레임 다시 그린다. 확장을 읽거나 그리다 실패하면 블록 자리에 까닭을 보인다.
+//! 캔버스는 본문 폭보다 크면 비율을 지켜 줄이고 가운데에 둔다. 확장을 읽거나 그리다 실패하면 블록 자리에
+//! 까닭을 보인다.
+//!
+//! `draw`는 확장의 작업 스레드에서 돈다([`extension::Worker`]). 그릴 때는 요청만 보내고 마지막으로 받은
+//! 결과를 그리므로, 느린 확장은 그 블록만 늦게 바뀌고 편집은 막히지 않는다([`Player`]).
+//! - 애니메이션은 초당 [`FPS`]번만 다시 그리고, 창이 비활성이거나 움직임 줄이기 설정이면 멈춘다.
+//! - `period`가 있는 애니메이션은 한 주기의 프레임을 캐시해, 한 바퀴 돈 뒤에는 Lua를 부르지 않는다.
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::gpui::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use super::style::Palette;
-use crate::extension::{self, Host, Segment, Shape};
+use crate::extension::{self, Host, Loaded, Segment, Shape};
 
 /// 캔버스 위·아래 여백(이미지 블록과 같다).
 const PADDING_TOP: f32 = 4.0;
@@ -22,19 +29,164 @@ const PADDING_BOTTOM: f32 = 16.0;
 /// 오류 안내 줄 높이.
 const ERROR_HEIGHT: f32 = 28.0;
 
+/// 애니메이션을 다시 그리는 횟수(초당).
+pub(super) const FPS: f32 = 30.0;
+
+type Theme = extension::Theme;
+
+/// 그릴 것: 아직 없음(첫 결과를 기다린다), 모양, 실패한 까닭.
+pub(super) enum Frame {
+    Pending,
+    Shapes(Rc<Vec<Shape>>),
+    Error(String),
+}
+
+/// 캔버스 하나(에디터 블록, 대화상자 미리보기)의 그리기 상태. 작업 스레드에 요청을 보내고 결과를 받아 둔다.
+pub(super) struct Player {
+    /// 만든 때. 애니메이션의 `t`는 여기서 잰다.
+    started: Instant,
+    state: RefCell<PlayerState>,
+}
+
+#[derive(Default)]
+struct PlayerState {
+    /// 지금 결과를 만든 확장·테마·인자. 하나라도 바뀌면 받은 것을 버리고 새로 그린다.
+    source: Option<Source>,
+    /// 작업 스레드에 보내는 요청 번호. `source`가 바뀔 때마다 새 번호를 써서 옛 결과와 섞이지 않는다.
+    request: u64,
+    /// 기다리는 요청의 프레임 번호.
+    pending: Option<u64>,
+    /// 마지막으로 받은 프레임 번호와 결과.
+    shown: Option<(u64, Drawn)>,
+    /// `period`가 있는 애니메이션의 한 주기 프레임(프레임 번호 → 모양).
+    frames: HashMap<u64, Rc<Vec<Shape>>>,
+}
+
+/// 결과를 만든 확장·테마·인자.
+type Source = (Rc<Loaded>, Theme, Vec<(String, String)>);
+
+/// 받은 결과: 모양, 또는 실패한 까닭.
+type Drawn = Result<Rc<Vec<Shape>>, String>;
+
+/// 요청 번호(앱 전체에서 겹치지 않는다).
+fn next_request() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+impl Player {
+    pub(super) fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            state: RefCell::default(),
+        }
+    }
+
+    /// 지금 그릴 프레임. 필요하면 작업 스레드에 다음 프레임을 요청하고, 다시 그릴 때를 예약한다.
+    pub(super) fn frame(
+        &self,
+        loaded: &Rc<Loaded>,
+        args: &[(String, String)],
+        theme: Theme,
+        ticker: &Ticker,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Frame {
+        let Ok(worker) = &**loaded else {
+            return Frame::Pending;
+        };
+        let mut state = self.state.borrow_mut();
+        let same = state
+            .source
+            .as_ref()
+            .is_some_and(|(drawn, drawn_theme, drawn_args)| {
+                Rc::ptr_eq(drawn, loaded) && *drawn_theme == theme && drawn_args == args
+            });
+        if !same {
+            *state = PlayerState {
+                source: Some((loaded.clone(), theme, args.to_vec())),
+                request: next_request(),
+                ..PlayerState::default()
+            };
+        }
+        // 받은 결과를 들인다.
+        if let Some(pending) = state.pending
+            && let Some(result) = worker.take(state.request)
+        {
+            state.pending = None;
+            let result = result.map(Rc::new);
+            if let (Some(_), Ok(shapes)) = (worker.info.period, &result) {
+                state.frames.insert(pending, shapes.clone());
+            }
+            state.shown = Some((pending, result));
+        }
+        // 이번에 보일 프레임.
+        let animate = worker.info.animated && !cx.reduce_motion();
+        let mut frame = 0;
+        if animate {
+            frame = (self.started.elapsed().as_secs_f32() * FPS) as u64;
+            if let Some(period) = worker.info.period {
+                frame %= ((period * FPS).round() as u64).max(1);
+            }
+        }
+        let cached = state.frames.get(&frame).cloned();
+        if let Some(shapes) = cached {
+            state.shown = Some((frame, Ok(shapes)));
+        } else if state.pending.is_none()
+            && state
+                .shown
+                .as_ref()
+                .is_none_or(|(shown, _)| *shown != frame)
+        {
+            worker.request(state.request, frame as f32 / FPS, args, theme);
+            state.pending = Some(frame);
+        }
+        // 기다리는 결과가 있으면 다음 화면 갱신 때 다시 본다. 애니메이션은 다음 프레임 시각에 다시 그린다.
+        if state.pending.is_some() {
+            window.request_animation_frame();
+        } else if animate && window.is_window_active() {
+            ticker.schedule(window, cx);
+        }
+        match &state.shown {
+            None => Frame::Pending,
+            Some((_, Ok(shapes))) => Frame::Shapes(shapes.clone()),
+            Some((_, Err(err))) => Frame::Error(err.clone()),
+        }
+    }
+}
+
+/// 애니메이션의 다음 프레임 예약. 한 화면(뷰)에 블록이 여럿이어도 예약은 하나만 둔다.
+#[derive(Default)]
+pub(super) struct Ticker {
+    scheduled: Rc<Cell<bool>>,
+}
+
+impl Ticker {
+    fn schedule(&self, window: &mut Window, cx: &mut App) {
+        if self.scheduled.replace(true) {
+            return;
+        }
+        let view = window.current_view();
+        let scheduled = self.scheduled.clone();
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs_f32(1.0 / FPS))
+                .await;
+            scheduled.set(false);
+            cx.update(|cx| cx.notify(view));
+        })
+        .detach();
+    }
+}
+
 /// 본문의 확장 블록 하나.
 struct EditorBlock {
     block: extension::Block,
-    /// 처음 본 때. 애니메이션의 `t`는 여기서 잰다.
-    started: Instant,
-    /// 정지 그림(`animated`가 아닌 확장): 그린 확장과 모양. 확장이 다시 읽히면 새로 그린다.
-    still: RefCell<Option<Still>>,
+    /// 확장에 넘길 인자(`scale` 뺌)와 앱이 적용할 배율.
+    args: Vec<(String, String)>,
+    scale: f32,
+    player: Player,
 }
-
-/// 정지 그림: 그린 확장, 그때의 테마, 결과.
-type Still = (Rc<extension::Loaded>, Theme, Result<Rc<Vec<Shape>>, String>);
-
-type Theme = extension::Theme;
 
 /// 열린 시트의 확장 블록 목록. 줄 스타일·줄 블록의 측정·그리기에서 함께 쓴다.
 pub(super) struct ExtensionBlocks {
@@ -43,6 +195,7 @@ pub(super) struct ExtensionBlocks {
     files: RefCell<Vec<(String, Option<std::time::SystemTime>)>>,
     /// 줄 순서대로.
     blocks: RefCell<Vec<Rc<EditorBlock>>>,
+    ticker: Ticker,
 }
 
 impl ExtensionBlocks {
@@ -51,6 +204,7 @@ impl ExtensionBlocks {
             files: RefCell::new(extension::scan(host.root())),
             host,
             blocks: RefCell::default(),
+            ticker: Ticker::default(),
         };
         blocks.sync(text);
         blocks
@@ -67,9 +221,10 @@ impl ExtensionBlocks {
                     .cloned()
                     .unwrap_or_else(|| {
                         Rc::new(EditorBlock {
+                            args: block.extension_args(),
+                            scale: block.scale(),
                             block,
-                            started: Instant::now(),
-                            still: RefCell::default(),
+                            player: Player::new(),
                         })
                     })
             })
@@ -108,10 +263,12 @@ impl ExtensionBlocks {
         };
         let width = wrap_width.unwrap_or(px(super::editor::EDITOR_MAX_WIDTH));
         match &*self.host.get(&block.block.name) {
-            Ok(extension) => {
-                let (_, height) = fit(extension.size, width);
-                height + px(PADDING_TOP + PADDING_BOTTOM)
-            }
+            Ok(worker) => match worker.size(&block.args) {
+                Ok(size) => {
+                    fit(scaled(size, block.scale), width).1 + px(PADDING_TOP + PADDING_BOTTOM)
+                }
+                Err(_) => px(ERROR_HEIGHT + PADDING_TOP + PADDING_BOTTOM),
+            },
             Err(_) => px(ERROR_HEIGHT + PADDING_TOP + PADDING_BOTTOM),
         }
     }
@@ -122,56 +279,36 @@ impl ExtensionBlocks {
         row: usize,
         size: Size<Pixels>,
         window: &mut Window,
-        cx: &App,
+        cx: &mut App,
     ) -> Option<AnyElement> {
         let block = self.last_row_block(row)?;
         let pal = Palette::from_theme(cx.theme());
         let loaded = self.host.get(&block.block.name);
-        let extension = match &*loaded {
-            Ok(extension) => extension,
-            Err(err) => return Some(error_box(&block.block.name, err, size, pal)),
+        let canvas_size = match &*loaded {
+            Ok(worker) => worker.size(&block.args),
+            Err(err) => Err(err.clone()),
         };
-        let theme = theme(pal);
-        let shapes = if extension.animated {
-            window.request_animation_frame();
-            let t = block.started.elapsed().as_secs_f32();
-            extension.draw(t, &block.block.args, &theme).map(Rc::new)
-        } else {
-            let mut still = block.still.borrow_mut();
-            let fresh = still.as_ref().is_some_and(|(drawn, drawn_theme, _)| {
-                Rc::ptr_eq(drawn, &loaded) && *drawn_theme == theme
-            });
-            if !fresh {
-                let shapes = extension.draw(0.0, &block.block.args, &theme).map(Rc::new);
-                *still = Some((loaded.clone(), theme, shapes));
-            }
-            still.as_ref().map(|(_, _, shapes)| shapes.clone())?
-        };
-        let shapes = match shapes {
-            Ok(shapes) => shapes,
+        let canvas_size = match canvas_size {
+            Ok(canvas_size) => canvas_size,
             Err(err) => return Some(error_box(&block.block.name, &err, size, pal)),
         };
-        let (width, height) = fit(extension.size, size.width);
-        let scale = f32::from(width) / extension.size.0;
+        let frame = block
+            .player
+            .frame(&loaded, &block.args, theme(pal), &self.ticker, window, cx);
+        let (width, height) = fit(scaled(canvas_size, block.scale), size.width);
         let left = (size.width - width) / 2.;
+        let shapes = match frame {
+            Frame::Shapes(shapes) => Some(shapes),
+            Frame::Pending => None,
+            Frame::Error(err) => return Some(error_box(&block.block.name, &err, size, pal)),
+        };
         Some(
             div()
                 .w(size.width)
                 .h(size.height)
                 .pt(px(PADDING_TOP))
                 .pl(left)
-                .child(
-                    canvas(
-                        |_, _, _| (),
-                        move |bounds, (), window, cx| {
-                            window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                                paint(&shapes, bounds.origin, scale, window, cx);
-                            });
-                        },
-                    )
-                    .w(width)
-                    .h(height),
-                )
+                .child(shapes_canvas(shapes, canvas_size, width, height))
                 .into_any_element(),
         )
     }
@@ -191,13 +328,41 @@ impl ExtensionBlocks {
     }
 }
 
+/// 모양을 `width` × `height`에 맞춰 그리는 캔버스. `canvas_size`는 배율을 곱하기 전 크기다(모양의
+/// 좌표가 이 크기 기준이다). 모양이 아직 없으면 빈 자리다.
+pub(super) fn shapes_canvas(
+    shapes: Option<Rc<Vec<Shape>>>,
+    canvas_size: (f32, f32),
+    width: Pixels,
+    height: Pixels,
+) -> impl IntoElement {
+    let scale = f32::from(width) / canvas_size.0;
+    canvas(
+        |_, _, _| (),
+        move |bounds, (), window, cx| {
+            if let Some(shapes) = shapes {
+                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    paint(&shapes, bounds.origin, scale, window, cx);
+                });
+            }
+        },
+    )
+    .w(width)
+    .h(height)
+}
+
+/// 배율 `scale`을 곱한 캔버스 크기.
+pub(super) fn scaled((w, h): (f32, f32), scale: f32) -> (f32, f32) {
+    (w * scale, h * scale)
+}
+
 /// 캔버스 크기를 폭 `width` 안에 맞춘다(키우지는 않는다).
-fn fit((w, h): (f32, f32), width: Pixels) -> (Pixels, Pixels) {
+pub(super) fn fit((w, h): (f32, f32), width: Pixels) -> (Pixels, Pixels) {
     let scale = (f32::from(width) / w).min(1.0);
     (px(w * scale), px(h * scale))
 }
 
-fn theme(pal: Palette) -> Theme {
+pub(super) fn theme(pal: Palette) -> Theme {
     let color = |hsla: Hsla| {
         let rgba = Rgba::from(hsla);
         [rgba.r, rgba.g, rgba.b, rgba.a]

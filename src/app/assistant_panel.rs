@@ -954,8 +954,9 @@ impl WriterApp {
     fn assistant_system_prompt(&self, workspace: Option<&agent::Workspace>, cx: &App) -> String {
         let tools = workspace.is_some();
         let skills = workspace.map_or(&[][..], agent::Workspace::skills);
+        let extensions = workspace.map_or(&[][..], agent::Workspace::extensions);
         let Some(editor) = &self.editor else {
-            return agent::system_prompt(None, tools, skills);
+            return agent::system_prompt(None, tools, skills, extensions);
         };
         let path = self.library.as_ref().and_then(|library| {
             let relative = editor.path().strip_prefix(&library.root).ok()?;
@@ -977,6 +978,7 @@ impl WriterApp {
             }),
             tools,
             skills,
+            extensions,
         )
     }
 }

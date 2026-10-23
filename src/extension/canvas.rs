@@ -16,8 +16,12 @@ pub type Color = [f32; 4];
 /// 캔버스 좌표의 점.
 pub type Point = [f32; 2];
 
-/// 한 프레임에 그릴 수 있는 가장 많은 모양. 끝없이 그리는 실수를 막는다.
-const MAX_SHAPES: usize = 20_000;
+/// 정지 그림 한 장에 그릴 수 있는 가장 많은 모양. 끝없이 그리는 실수를 막는다.
+pub const STILL_SHAPE_LIMIT: usize = 20_000;
+
+/// 애니메이션 한 프레임에 그릴 수 있는 가장 많은 모양. 모양을 삼각형으로 나누고 그리는 일은 UI 스레드에서
+/// 하므로 매 프레임의 몫에 상한을 둔다.
+pub const ANIMATED_SHAPE_LIMIT: usize = 2_000;
 
 /// 기본 글자 크기(LÖVE 기본 서체와 같다).
 const DEFAULT_FONT_SIZE: f32 = 12.0;
@@ -120,12 +124,13 @@ impl Transform {
 pub(super) struct Recorder {
     pub(super) width: f32,
     pub(super) height: f32,
-    color: Color,
+    pub(super) color: Color,
     line_width: f32,
     font_size: f32,
     transform: Transform,
     stack: Vec<Transform>,
     pub(super) shapes: Vec<Shape>,
+    limit: usize,
 }
 
 impl Recorder {
@@ -139,19 +144,22 @@ impl Recorder {
             transform: Transform::IDENTITY,
             stack: Vec::new(),
             shapes: Vec::new(),
+            limit: STILL_SHAPE_LIMIT,
         }
     }
 
     /// 새 프레임: 상태를 처음으로 되돌린다. 기본 색은 테마 글자색이다.
-    pub(super) fn reset(&mut self, width: f32, height: f32, color: Color) {
+    pub(super) fn reset(&mut self, width: f32, height: f32, color: Color, limit: usize) {
         *self = Self::new(width, height);
         self.color = color;
+        self.limit = limit;
     }
 
     fn push(&mut self, shape: Shape) -> mlua::Result<()> {
-        if self.shapes.len() >= MAX_SHAPES {
+        if self.shapes.len() >= self.limit {
             return Err(mlua::Error::runtime(format!(
-                "too many shapes in one frame (limit {MAX_SHAPES})"
+                "too many shapes in one frame (limit {})",
+                self.limit
             )));
         }
         self.shapes.push(shape);
@@ -175,8 +183,17 @@ impl Recorder {
     }
 
     fn draw(&mut self, mode: Mode, local: &[Segment]) -> mlua::Result<()> {
+        self.draw_with(mode, local, self.color)
+    }
+
+    /// 지금 색 대신 `color`로 그린다(3차원 장면이 면마다 밝기를 바꾼다).
+    pub(super) fn draw_with(
+        &mut self,
+        mode: Mode,
+        local: &[Segment],
+        color: Color,
+    ) -> mlua::Result<()> {
         let path = self.path(local);
-        let color = self.color;
         match mode {
             Mode::Fill => self.push(Shape::Fill { path, color }),
             Mode::Line => {
@@ -188,7 +205,7 @@ impl Recorder {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Mode {
+pub(super) enum Mode {
     Fill,
     Line,
 }
@@ -220,7 +237,7 @@ fn ellipse_arc(
     }
 }
 
-fn polyline(points: &[Point], closed: bool) -> Vec<Segment> {
+pub(super) fn polyline(points: &[Point], closed: bool) -> Vec<Segment> {
     let mut path = Vec::with_capacity(points.len() + 1);
     for (ix, &point) in points.iter().enumerate() {
         path.push(if ix == 0 {
@@ -282,37 +299,64 @@ fn rounded_rect(x: f32, y: f32, w: f32, h: f32, rx: f32, ry: f32) -> Vec<Segment
 }
 
 /// Lua 인자 읽기. 모델이 잘못 불렀을 때 고칠 수 있게 함수 이름과 자리를 알린다.
-struct Args {
+pub(super) struct Args {
+    /// 오류 글에 붙는 이름 앞(`g.`, `scene:`).
+    prefix: &'static str,
     name: &'static str,
-    values: Vec<Value>,
+    pub(super) values: Vec<Value>,
 }
 
 impl Args {
     /// `g:rectangle(...)`처럼 콜론으로 불러 앞에 `g`가 붙었으면 뗀다.
     fn new(name: &'static str, values: MultiValue) -> Self {
+        Self::with_self("g.", CANVAS_MARK, name, values)
+    }
+
+    /// `mark`가 붙은 표(`g`, 3차원 장면)가 첫 인자면 콜론 호출로 보고 뗀다.
+    pub(super) fn with_self(
+        prefix: &'static str,
+        mark: &str,
+        name: &'static str,
+        values: MultiValue,
+    ) -> Self {
         let mut values: Vec<Value> = values.into_iter().collect();
         if let Some(Value::Table(table)) = values.first()
-            && table.raw_get::<bool>(CANVAS_MARK).unwrap_or(false)
+            && table.raw_get::<bool>(mark).unwrap_or(false)
         {
             values.remove(0);
         }
-        Self { name, values }
+        Self {
+            prefix,
+            name,
+            values,
+        }
     }
 
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         self.values.len()
     }
 
-    fn error(&self, message: impl std::fmt::Display) -> mlua::Error {
-        mlua::Error::runtime(format!("g.{}: {message}", self.name))
+    pub(super) fn error(&self, message: impl std::fmt::Display) -> mlua::Error {
+        mlua::Error::runtime(format!("{}{}: {message}", self.prefix, self.name))
     }
 
-    fn number(&self, ix: usize) -> mlua::Result<f32> {
+    /// `ix`부터의 숫자: 숫자 여럿 또는 숫자 표 하나.
+    pub(super) fn numbers(&self, ix: usize) -> mlua::Result<Vec<f32>> {
+        match self.values.get(ix) {
+            Some(Value::Table(table)) => table
+                .sequence_values::<f32>()
+                .collect::<mlua::Result<_>>()
+                .map_err(|_| self.error("the point table must hold only numbers")),
+            _ => (ix..self.len()).map(|ix| self.number(ix)).collect(),
+        }
+    }
+
+    pub(super) fn number(&self, ix: usize) -> mlua::Result<f32> {
         self.opt_number(ix)?
             .ok_or_else(|| self.error(format!("argument #{} must be a number", ix + 1)))
     }
 
-    fn opt_number(&self, ix: usize) -> mlua::Result<Option<f32>> {
+    pub(super) fn opt_number(&self, ix: usize) -> mlua::Result<Option<f32>> {
         match self.values.get(ix) {
             None | Some(Value::Nil) => Ok(None),
             Some(Value::Integer(n)) => Ok(Some(*n as f32)),
@@ -325,7 +369,7 @@ impl Args {
         }
     }
 
-    fn string(&self, ix: usize) -> mlua::Result<String> {
+    pub(super) fn string(&self, ix: usize) -> mlua::Result<String> {
         match self.values.get(ix) {
             Some(Value::String(s)) => Ok(s.to_string_lossy()),
             Some(Value::Integer(n)) => Ok(n.to_string()),
@@ -335,7 +379,7 @@ impl Args {
         }
     }
 
-    fn mode(&self, ix: usize) -> mlua::Result<Mode> {
+    pub(super) fn mode(&self, ix: usize) -> mlua::Result<Mode> {
         match self.string(ix)?.as_str() {
             "fill" => Ok(Mode::Fill),
             "line" => Ok(Mode::Line),
@@ -347,15 +391,7 @@ impl Args {
 
     /// `ix`부터의 좌표: 숫자 여럿 또는 숫자 표 하나.
     fn points(&self, ix: usize) -> mlua::Result<Vec<Point>> {
-        let numbers: Vec<f32> = match self.values.get(ix) {
-            Some(Value::Table(table)) => table
-                .sequence_values::<f32>()
-                .collect::<mlua::Result<_>>()
-                .map_err(|_| self.error("the point table must hold only numbers"))?,
-            _ => (ix..self.len())
-                .map(|ix| self.number(ix))
-                .collect::<mlua::Result<_>>()?,
-        };
+        let numbers = self.numbers(ix)?;
         if !numbers.len().is_multiple_of(2) {
             return Err(self.error("coordinates must come in x, y pairs"));
         }
@@ -363,7 +399,7 @@ impl Args {
     }
 
     /// 색: `r, g, b[, a]`(0..1), `{r, g, b[, a]}`, `"#rrggbb[aa]"`. 1보다 큰 값이 있으면 0..255로 본다.
-    fn color(&self, ix: usize) -> mlua::Result<Color> {
+    pub(super) fn color(&self, ix: usize) -> mlua::Result<Color> {
         let components: Vec<f32> = match self.values.get(ix) {
             Some(Value::String(s)) => {
                 return parse_hex(&s.to_string_lossy())
@@ -434,6 +470,7 @@ pub(super) const FUNCTIONS: &[&str] = &[
     "translate",
     "rotate",
     "scale",
+    "newScene",
 ];
 
 fn color_table(lua: &Lua, color: Color) -> mlua::Result<Table> {
@@ -676,6 +713,17 @@ pub(super) fn create(lua: &Lua, recorder: Rc<RefCell<Recorder>>) -> mlua::Result
         rec.transform = rec.transform.then([sx, 0.0, 0.0, sy, 0.0, 0.0]);
         Ok(MultiValue::new())
     });
+
+    // 3차원 장면([`super::scene`]).
+    {
+        let recorder = recorder.clone();
+        g.raw_set(
+            "newScene",
+            lua.create_function(move |lua, values: MultiValue| {
+                super::scene::create(lua, recorder.clone(), Args::new("newScene", values))
+            })?,
+        )?;
+    }
 
     // 없는 함수를 부르면 쓸 수 있는 목록을 알린다.
     let meta = lua.create_table()?;
