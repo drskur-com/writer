@@ -54,7 +54,7 @@ fn cache_path(library_root: &Path) -> Option<PathBuf> {
 }
 
 /// 경로의 안정적인 키(FNV-1a 64비트, 16진수). 표준 해셔는 Rust 버전마다 달라질 수 있어 쓰지 않는다.
-fn library_key(root: &Path) -> String {
+pub(crate) fn library_key(root: &Path) -> String {
     let hash = root
         .to_string_lossy()
         .bytes()

@@ -43,6 +43,7 @@
 | [0028](./0028-agent-web-fetch.md) | 어시스턴트는 web_fetch로 웹 페이지를 읽고, 처음 보는 사이트는 사용자가 허락한다 | Proposed | 2026-10-23 |
 | [0029](./0029-extension-drafts.md) | 어시스턴트가 고친 확장은 답 동안 초안에 두고, 답이 끝나면 확장마다 한 번 승인받는다 | Proposed | 2026-10-23 |
 | [0030](./0030-extension-drawing-review.md) | 확장 그림은 대화 맥락 없는 검토자가 점수를 매기고, 통과하지 못하면 답을 끝내기 전에 돌려보낸다 | Proposed | 2026-10-23 |
+| [0031](./0031-assistant-conversation-history.md) | 어시스턴트 대화 기록은 라이브러리마다 하나로 모아 redb에 두고, 말마다 그때 열린 시트를 적는다 | Proposed | 2026-10-23 |
 
 ## 작성 규칙
 

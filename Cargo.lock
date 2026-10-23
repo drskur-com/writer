@@ -9682,6 +9682,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-bedrock",
  "block2 0.6.2",
+ "chrono",
  "dirs 5.0.1",
  "encoding_rs",
  "fontdb",

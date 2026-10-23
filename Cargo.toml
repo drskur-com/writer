@@ -37,6 +37,8 @@ i_overlay = "9"
 # 어시스턴트가 확장의 그림을 보도록 모양 목록을 PNG로 그린다. 버전은 gpui(resvg)와 맞춘다.
 tiny-skia = "0.11"
 dirs = "5"
+# 대화 기록을 오늘·어제·지난 7일로 묶을 때 지역 날짜를 구한다.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 ulid = "3"

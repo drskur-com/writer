@@ -5,6 +5,7 @@
 
 use std::ops::Range;
 
+use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, InlineChangeMode, InlineChangeOptions, TextDiff};
 
 /// 바뀌지 않은 줄을 보일 때 이보다 길면 자른다(좁은 패널).
@@ -13,7 +14,7 @@ const MAX_CONTEXT_CHARS: usize = 60;
 /// 바뀐 곳 앞뒤로 보일 바뀌지 않은 줄 수.
 const CONTEXT_LINES: usize = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LineKind {
     /// 바뀌지 않은 줄.
     Context,
@@ -24,7 +25,7 @@ pub enum LineKind {
 }
 
 /// diff 한 줄.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffLine {
     pub kind: LineKind,
     /// 줄 끝 줄바꿈을 뺀 글.

@@ -81,10 +81,12 @@ pub(crate) struct WriterApp {
     sidebar_visible: bool,
     /// 오른쪽 어시스턴트 패널 표시 여부.
     assistant_visible: bool,
-    /// 어시스턴트 패널에서 고른 대화(샘플 대화 목록의 위치). `None`이면 새(빈) 대화.
-    assistant_conversation: Option<usize>,
     /// 어시스턴트 패널에 대화 대신 대화 기록을 보이는지.
     assistant_history: bool,
+    /// 대화 기록에서 열린 시트의 대화만 보이는지.
+    assistant_sheet_only: bool,
+    /// 대화 기록 저장소와 그 라이브러리 루트(ADR-0031). 처음 쓸 때 연다. 열지 못했으면 `None`을 둔다.
+    assistant_store: Option<(PathBuf, Option<std::sync::Arc<crate::agent::History>>)>,
     /// 어시스턴트 새 대화(실제 모델과 주고받는 대화).
     assistant_chat: assistant_panel::LiveChat,
     library: Option<library::Library>,
@@ -166,8 +168,9 @@ impl WriterApp {
         let mut app = WriterApp {
             sidebar_visible: true,
             assistant_visible: false,
-            assistant_conversation: None,
             assistant_history: false,
+            assistant_sheet_only: false,
+            assistant_store: None,
             assistant_chat: assistant_panel::LiveChat::new(window, cx),
             library,
             notice,

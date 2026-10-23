@@ -4,6 +4,7 @@
 mod bedrock;
 mod diff;
 mod edit;
+mod history;
 mod prompt;
 mod review;
 pub mod skills;
@@ -12,6 +13,7 @@ mod web;
 
 pub use bedrock::{BedrockModel, ChatRequest, DEFAULT_MODEL, available_models, stream};
 pub use diff::{DiffLine, LineKind};
+pub use history::{History, Summary, now_millis};
 pub use prompt::{Sheet, system_prompt};
 pub use tools::Workspace;
 
@@ -19,22 +21,28 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use futures::channel::oneshot;
+use serde::{Deserialize, Serialize};
 
 use crate::settings::{AiProvider, Prefs};
 
 /// 대화의 말 한 마디.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Turn {
     /// 사용자가 한 말이면 `true`, 어시스턴트 답이면 `false`.
     pub user: bool,
     pub text: String,
     /// 어시스턴트가 이 답을 쓰며 한 일(부른 도구, 파일 변경). 화면에만 보이고 모델에는 다시
     /// 보내지 않는다.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub activity: Vec<Activity>,
+    /// 사용자가 이 말을 할 때 열려 있던 시트(라이브러리 루트 기준). 시트가 없었으면 `None`.
+    /// 대화 기록을 시트로 거르고, 시트가 바뀐 것을 모델에 알리는 데 쓴다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
 }
 
 /// 답 하나에서 어시스턴트가 한 일.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Activity {
     /// 도구를 불렀다. 화면에 보일 한 줄.
     Tool(String),
@@ -45,7 +53,7 @@ pub enum Activity {
 }
 
 /// 웹 페이지 읽기 허락 카드. 허락하면 그 사이트는 이 대화에서 다시 묻지 않는다.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FetchCard {
     pub id: u64,
     pub url: String,
@@ -56,7 +64,7 @@ pub struct FetchCard {
 }
 
 /// 승인 카드: 바꿀 파일과 변경 내용.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangeCard {
     /// 대화 안에서 카드를 가리키는 번호.
     pub id: u64,
@@ -68,7 +76,7 @@ pub struct ChangeCard {
     pub state: ChangeState,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChangeState {
     /// 사용자의 승인을 기다린다.
     Pending,
@@ -183,9 +191,29 @@ impl Conversation {
         self.turns.first().map(|turn| turn.text.as_str())
     }
 
-    /// 사용자 말을 더하고 받을 답 자리를 연다. 모델에 보낼 대화(이번 말이 마지막)를 돌려준다.
-    /// 답을 받는 중이거나 빈 말이면 아무것도 하지 않고 `None`.
-    pub fn send(&mut self, text: &str) -> Option<Vec<Turn>> {
+    /// 저장해 둔 대화를 다시 연다.
+    pub fn restore(turns: Vec<Turn>, sites: Vec<String>) -> Self {
+        Self {
+            turns,
+            allowed_sites: Arc::new(Mutex::new(sites.into_iter().collect())),
+            ..Self::default()
+        }
+    }
+
+    /// 읽기를 허락한 사이트(저장용, 이름 순).
+    pub fn sites(&self) -> Vec<String> {
+        let mut sites: Vec<String> = self
+            .allowed_sites
+            .lock()
+            .map(|sites| sites.iter().cloned().collect())
+            .unwrap_or_default();
+        sites.sort();
+        sites
+    }
+
+    /// 사용자 말을 더하고 받을 답 자리를 연다. `sheet`는 지금 열린 시트다. 모델에 보낼
+    /// 대화(이번 말이 마지막)를 돌려준다. 답을 받는 중이거나 빈 말이면 아무것도 하지 않고 `None`.
+    pub fn send(&mut self, text: &str, sheet: Option<&str>) -> Option<Vec<Turn>> {
         let text = text.trim();
         if text.is_empty() || self.streaming {
             return None;
@@ -193,6 +221,7 @@ impl Conversation {
         self.turns.push(Turn {
             user: true,
             text: text.to_string(),
+            sheet: sheet.map(ToString::to_string),
             ..Turn::default()
         });
         let turns = request_turns(&self.turns);
@@ -335,7 +364,22 @@ impl Conversation {
 /// 합친다(Bedrock Converse는 사용자와 어시스턴트가 번갈아 말해야 받는다).
 fn request_turns(turns: &[Turn]) -> Vec<Turn> {
     let mut merged: Vec<Turn> = Vec::new();
+    // 직전 사용자 말의 시트. 시트가 바뀌었으면 사용자 말 앞에 적는다(앞의 말은 다른 시트를 두고 한 것이다).
+    let mut sheet: Option<Option<&str>> = None;
     for turn in turns.iter() {
+        let moved = if turn.user {
+            let now = turn.sheet.as_deref();
+            let moved = sheet
+                .is_some_and(|before| before != now)
+                .then(|| match now {
+                    Some(path) => format!("[The user switched to the sheet {path}.]"),
+                    None => "[The user closed the sheet; no sheet is open now.]".to_string(),
+                });
+            sheet = Some(now);
+            moved
+        } else {
+            None
+        };
         // 거절했거나 쓰지 못한 변경은 다음 답에서도 알도록 답 끝에 적는다(도구 결과는 다시 보내지 않는다).
         let notes: Vec<String> = turn
             .activity
@@ -351,7 +395,10 @@ fn request_turns(turns: &[Turn]) -> Vec<Turn> {
                 _ => None,
             })
             .collect();
-        let text = std::iter::once(turn.text.trim_end())
+        let text = moved
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(turn.text.trim_end()))
             .chain(notes.iter().map(String::as_str))
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
@@ -390,17 +437,17 @@ mod tests {
     #[test]
     fn send_opens_reply_and_returns_history() {
         let mut chat = Conversation::default();
-        assert_eq!(chat.send("  안녕  "), Some(vec![turn(true, "안녕")]));
+        assert_eq!(chat.send("  안녕  ", None), Some(vec![turn(true, "안녕")]));
         assert_eq!(chat.turns(), [turn(true, "안녕"), turn(false, "")]);
         assert!(chat.is_streaming());
         // 받는 중이거나 빈 말이면 보내지 않는다.
-        assert_eq!(chat.send("또"), None);
+        assert_eq!(chat.send("또", None), None);
         chat.apply(ChatEvent::Text("반가".into()));
         chat.apply(ChatEvent::Text("워요".into()));
         chat.apply(ChatEvent::Done);
-        assert_eq!(chat.send("   "), None);
+        assert_eq!(chat.send("   ", None), None);
         assert_eq!(
-            chat.send("다음"),
+            chat.send("다음", None),
             Some(vec![
                 turn(true, "안녕"),
                 turn(false, "반가워요"),
@@ -412,7 +459,7 @@ mod tests {
     #[test]
     fn failure_before_any_text_gives_back_sent_text() {
         let mut chat = Conversation::default();
-        chat.send("질문");
+        chat.send("질문", None);
         assert_eq!(
             chat.apply(ChatEvent::Failed("권한 없음".into())),
             Some("질문".into())
@@ -421,14 +468,14 @@ mod tests {
         assert_eq!(chat.error(), Some("권한 없음"));
         assert!(!chat.is_streaming());
         // 다시 보내면 실패를 지운다.
-        chat.send("질문");
+        chat.send("질문", None);
         assert_eq!(chat.error(), None);
     }
 
     #[test]
     fn failure_after_text_keeps_partial_reply() {
         let mut chat = Conversation::default();
-        chat.send("질문");
+        chat.send("질문", None);
         chat.apply(ChatEvent::Text("답의 앞".into()));
         assert_eq!(chat.apply(ChatEvent::Failed("끊김".into())), None);
         assert_eq!(chat.turns(), [turn(true, "질문"), turn(false, "답의 앞")]);
@@ -437,7 +484,7 @@ mod tests {
     #[test]
     fn tool_calls_stay_on_reply_and_split_paragraphs() {
         let mut chat = Conversation::default();
-        chat.send("1장 고쳐 줘");
+        chat.send("1장 고쳐 줘", None);
         chat.apply(ChatEvent::Text("읽어 볼게요.".into()));
         chat.apply(ChatEvent::Tool("읽음 · 1장.md".into()));
         chat.apply(ChatEvent::Tool("고침 · 1장.md".into()));
@@ -453,7 +500,7 @@ mod tests {
             ]
         );
         // 도구만 부르고 실패하면(파일은 이미 바뀌었을 수 있다) 보낸 말을 되돌리지 않는다.
-        chat.send("또");
+        chat.send("또", None);
         chat.apply(ChatEvent::Tool("고침 · 2장.md".into()));
         assert_eq!(chat.apply(ChatEvent::Failed("끊김".into())), None);
         assert_eq!(
@@ -487,7 +534,7 @@ mod tests {
     #[test]
     fn fetch_approval_waits_and_updates_card() {
         let mut chat = Conversation::default();
-        chat.send("이 링크 요약해 줘").unwrap();
+        chat.send("이 링크 요약해 줘", None).unwrap();
         let (reply, answer) = oneshot::channel();
         chat.apply(ChatEvent::ApproveFetch(FetchApproval {
             card: FetchCard {
@@ -514,7 +561,7 @@ mod tests {
     #[test]
     fn approval_sends_answer_and_updates_card() {
         let mut chat = Conversation::default();
-        chat.send("고쳐 줘");
+        chat.send("고쳐 줘", None);
         let (reply, mut answer) = oneshot::channel();
         chat.apply(ChatEvent::Approve(Approval {
             card: card(1),
@@ -544,13 +591,52 @@ mod tests {
     }
 
     #[test]
+    fn tells_the_model_when_the_sheet_changes() {
+        let mut chat = Conversation::default();
+        chat.send("하나", Some("Projects/소설/1장.md"));
+        chat.apply(ChatEvent::Done);
+        chat.send("둘", Some("Projects/소설/1장.md"));
+        chat.apply(ChatEvent::Text("답".into()));
+        chat.apply(ChatEvent::Done);
+        let sent = chat.send("셋", Some("Projects/소설/2장.md")).unwrap();
+        assert_eq!(
+            sent.last().unwrap().text,
+            "[The user switched to the sheet Projects/소설/2장.md.]\n\n셋"
+        );
+        chat.apply(ChatEvent::Text("답".into()));
+        chat.apply(ChatEvent::Done);
+        let sent = chat.send("넷", None).unwrap();
+        assert!(
+            sent.last()
+                .unwrap()
+                .text
+                .starts_with("[The user closed the sheet")
+        );
+        assert_eq!(
+            chat.turns()[0].sheet.as_deref(),
+            Some("Projects/소설/1장.md")
+        );
+    }
+
+    #[test]
+    fn restores_turns_and_sites() {
+        let chat = Conversation::restore(
+            vec![turn(true, "질문"), turn(false, "답")],
+            vec!["b.com".into(), "a.com".into()],
+        );
+        assert_eq!(chat.title(), Some("질문"));
+        assert_eq!(chat.sites(), ["a.com", "b.com"]);
+        assert!(!chat.is_streaming());
+    }
+
+    #[test]
     fn stop_drops_empty_reply_only() {
         let mut chat = Conversation::default();
-        chat.send("하나");
+        chat.send("하나", None);
         chat.stop();
         assert_eq!(chat.turns(), [turn(true, "하나")]);
         // 답 없이 멈춘 말은 다음 말과 합쳐 보낸다.
-        assert_eq!(chat.send("둘"), Some(vec![turn(true, "하나\n\n둘")]));
+        assert_eq!(chat.send("둘", None), Some(vec![turn(true, "하나\n\n둘")]));
         chat.apply(ChatEvent::Text("받은 데까지".into()));
         chat.stop();
         assert_eq!(chat.turns().last(), Some(&turn(false, "받은 데까지")));

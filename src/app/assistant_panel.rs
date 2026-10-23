@@ -1,11 +1,14 @@
 //! 오른쪽 어시스턴트(LLM) 패널. 에디터 툴바 오른쪽 끝 버튼으로 열고 닫는다.
 //!
 //! 새 대화는 설정의 Bedrock 프로필로 실제 모델과 주고받고, 답을 받는 대로 조금씩 그린다
-//! ([`crate::agent`]). 대화 상태와 프롬프트는 에이전트가 맡고, 여기서는 그리기만 한다. 기록의 지난 대화는 아직 저장하지 않아 샘플을 보여 준다.
+//! ([`crate::agent`]). 대화 상태와 프롬프트는 에이전트가 맡고, 여기서는 그리기만 한다. 답이 끝날 때마다 대화를
+//! 라이브러리의 대화 기록(redb, ADR-0031)에 쓰고, 기록 화면에서 지난 대화를 다시 열어 이어 간다.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use chrono::{DateTime, Datelike as _, Local, NaiveDate, TimeZone as _};
 use futures::StreamExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
@@ -24,6 +27,12 @@ pub(super) struct LiveChat {
     /// 입력창. Enter로 보내고 Shift+Enter로 줄을 바꾼다.
     input: Entity<TextareaState>,
     conversation: agent::Conversation,
+    /// 기록에 쓴 대화의 요약과 쓴 말 수. 아직 쓰지 않은 새 대화면 `None`.
+    saved: Option<Saved>,
+    /// 기록 화면에 보일 대화 요약(최근 것부터). 기록을 열 때 읽는다.
+    summaries: Vec<agent::Summary>,
+    /// 마지막으로 시작한 기록 쓰기. 앞의 쓰기가 끝난 뒤에 쓴다(늦게 끝난 옛 쓰기가 새 말을 지우지 않게).
+    save_task: Option<Task<()>>,
     /// 답을 받는 태스크. 버리면 받기를 멈춘다.
     reply: Option<Task<()>>,
     /// 답이 자랄 때 맨 아래로 따라가는 스크롤.
@@ -115,6 +124,9 @@ impl LiveChat {
         Self {
             input,
             conversation: agent::Conversation::default(),
+            saved: None,
+            summaries: Vec::new(),
+            save_task: None,
             reply: None,
             scroll: ScrollHandle::new(),
             change_scrolls: RefCell::default(),
@@ -127,16 +139,11 @@ impl LiveChat {
     }
 }
 
-/// 말한 쪽.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Role {
-    User,
-    Agent,
-}
-
-struct Message {
-    role: Role,
-    text: &'static str,
+/// 기록에 쓴 대화.
+struct Saved {
+    summary: agent::Summary,
+    /// 기록에 쓴 말 수. 다음에는 그 뒤의 말만 쓴다.
+    persisted: usize,
 }
 
 /// 대화 기록에서 묶는 기간.
@@ -145,128 +152,53 @@ enum Period {
     Today,
     Yesterday,
     ThisWeek,
+    Earlier,
 }
 
 impl Period {
+    /// `at`이 `today`(지역 날짜)에서 며칠 전인지로 묶는다.
+    fn of(at: DateTime<Local>, today: NaiveDate) -> Self {
+        match (today - at.date_naive()).num_days() {
+            ..=0 => Period::Today,
+            1 => Period::Yesterday,
+            2..=6 => Period::ThisWeek,
+            _ => Period::Earlier,
+        }
+    }
+
     fn label(self) -> std::borrow::Cow<'static, str> {
         match self {
             Period::Today => t!("assistant.history.today"),
             Period::Yesterday => t!("assistant.history.yesterday"),
             Period::ThisWeek => t!("assistant.history.last_7_days"),
+            Period::Earlier => t!("assistant.history.earlier"),
         }
     }
 }
 
-struct Conversation {
-    title: &'static str,
-    /// 마지막 메시지를 주고받은 때. 기록 화면에서 기간으로 묶고, 줄 오른쪽에 시각을 적는다.
-    period: Period,
-    time: &'static str,
-    messages: &'static [Message],
+/// 유닉스 밀리초를 지역 시각으로.
+fn local_time(millis: u64) -> Option<DateTime<Local>> {
+    Local
+        .timestamp_millis_opt(i64::try_from(millis).ok()?)
+        .single()
 }
 
-impl Conversation {
-    /// 기록 화면에 보일 마지막 메시지 한 줄.
-    fn preview(&self) -> &'static str {
-        self.messages
-            .last()
-            .map(|message| {
-                message
-                    .text
-                    .lines()
-                    .find(|line| !line.is_empty())
-                    .unwrap_or("")
-            })
-            .unwrap_or("")
+/// 기록 줄 오른쪽에 적을 때. 오늘이면 시각, 올해면 월·일, 아니면 연·월·일.
+fn time_label(at: DateTime<Local>, today: NaiveDate) -> String {
+    if at.date_naive() == today {
+        at.format("%H:%M").to_string()
+    } else if at.year() == today.year() {
+        t!("assistant.history.date", month = at.month(), day = at.day()).into()
+    } else {
+        t!(
+            "assistant.history.date_year",
+            year = at.year(),
+            month = at.month(),
+            day = at.day()
+        )
+        .into()
     }
 }
-
-const fn user(text: &'static str) -> Message {
-    Message {
-        role: Role::User,
-        text,
-    }
-}
-
-const fn agent(text: &'static str) -> Message {
-    Message {
-        role: Role::Agent,
-        text,
-    }
-}
-
-/// 샘플 대화. 모델을 붙이면 대화 저장소로 바꾼다.
-const SAMPLE_CONVERSATIONS: &[Conversation] = &[
-    Conversation {
-        title: "3장 첫 문단 다듬기",
-        period: Period::Today,
-        time: "오후 9:12",
-        messages: &[
-            user("3장 첫 문단이 너무 늘어져. 뜻은 그대로 두고 짧게 줄여 줄래?"),
-            agent(
-                "세 문장이 같은 내용(비 오는 저녁의 정류장)을 되풀이하고 있어요. \
-                 하나로 묶으면 이렇게 됩니다.\n\n\
-                 \"비가 그치지 않는 저녁, 정류장에는 우산 없는 사람들만 남았다.\"",
-            ),
-            user("좋아. 그런데 '남았다'보다 덜 쓸쓸한 말은 없을까?"),
-            agent(
-                "'모여 있었다'나 '서성였다'를 권해요. 다음 문단에서 인물들이 \
-                 말을 주고받으니 '모여 있었다'가 흐름에 더 맞습니다.",
-            ),
-        ],
-    },
-    Conversation {
-        title: "등장인물 이름 점검",
-        period: Period::Today,
-        time: "오후 2:40",
-        messages: &[
-            user("원고 전체에서 등장인물 이름이 섞여 쓰인 곳이 있는지 봐 줘."),
-            agent(
-                "두 곳을 찾았어요.\n\n\
-                 • 2장 「귀갓길」: '윤서'와 '윤아'가 같은 인물로 쓰였어요.\n\
-                 • 5장 「편지」: '박 선생'이 앞에서는 '박 교수'였어요.\n\n\
-                 어느 쪽으로 맞출지 알려 주시면 고칠 문장을 보여 드릴게요.",
-            ),
-            user("'윤서', '박 선생'으로 맞추자."),
-            agent(
-                "알겠어요. 2장 3곳, 5장 1곳을 바꾸면 됩니다. 바꾸기 전에 문장마다 확인해 드릴게요.",
-            ),
-        ],
-    },
-    Conversation {
-        title: "목차 구성 제안",
-        period: Period::Yesterday,
-        time: "어제",
-        messages: &[
-            user("지금 장 순서가 어색한 것 같아. 어떻게 생각해?"),
-            agent(
-                "4장 「겨울 바다」가 시간상 2장보다 앞선 일이에요. 회상으로 두려는 게 \
-                 아니라면 2장 앞으로 옮기는 걸 권해요. 그러면 1부가 계절 순서(가을 → 겨울)로 \
-                 이어집니다.",
-            ),
-        ],
-    },
-    Conversation {
-        title: "맞춤법 한 번에 보기",
-        period: Period::ThisWeek,
-        time: "10월 19일",
-        messages: &[
-            user("1장에서 띄어쓰기 틀린 곳만 골라 줘."),
-            agent("'할수 있다' → '할 수 있다' 등 7곳이에요. 문장마다 바꿀 모양을 붙여 드릴게요."),
-        ],
-    },
-    Conversation {
-        title: "책 소개 문구 초안",
-        period: Period::ThisWeek,
-        time: "10월 17일",
-        messages: &[
-            user("뒤표지에 넣을 소개 문구를 세 문장으로 써 줘."),
-            agent(
-                "\"비 오는 정류장에서 시작된 한 계절의 이야기.\" 처럼 장면으로 여는 안과,                  인물로 여는 안을 하나씩 준비했어요.",
-            ),
-        ],
-    },
-];
 
 /// 빈 대화에서 보여 줄 질문 예시(번역 키). 누르면 그 언어의 글을 보낸다.
 const SUGGESTIONS: &[&str] = &[
@@ -308,10 +240,6 @@ impl WriterApp {
         cx: &mut Context<Self>,
         pal: Palette,
     ) -> impl IntoElement {
-        let current = self
-            .assistant_conversation
-            .filter(|&ix| ix < SAMPLE_CONVERSATIONS.len());
-        let conversation = current.map(|ix| &SAMPLE_CONVERSATIONS[ix]);
         let configured = ai_configured(cx);
         let live = &self.assistant_chat;
 
@@ -338,8 +266,11 @@ impl WriterApp {
                     true,
                     pal,
                 )
-                .on_click(cx.listener(|this, _, _, cx| {
+                .on_click(cx.listener(|this, _, window, cx| {
                     this.assistant_history = !this.assistant_history;
+                    if this.assistant_history {
+                        this.load_assistant_history(window, cx);
+                    }
                     cx.notify();
                 })),
             ),
@@ -348,58 +279,27 @@ impl WriterApp {
             if self.assistant_history {
                 SharedString::from(t!("assistant.history.title"))
             } else {
-                conversation.map_or_else(
-                    || {
-                        live.conversation
-                            .title()
-                            .map(|title| SharedString::from(title.to_string()))
-                            .unwrap_or_else(|| t!("assistant.new_conversation").into())
-                    },
-                    |conversation| conversation.title.into(),
-                )
+                live.conversation
+                    .title()
+                    .map(|title| SharedString::from(title.to_string()))
+                    .unwrap_or_else(|| t!("assistant.new_conversation").into())
             },
         ))
         .child(tool_group(pal).child(
             icon_button("assistant-new", icons::compose(), true, pal).on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.assistant_conversation = None;
+                |this, _, window, cx| {
                     this.assistant_history = false;
-                    this.reset_live_chat(cx);
+                    this.reset_live_chat(window, cx);
                 },
             )),
         ))
         .child(self.assistant_toggle(cx, pal));
 
-        let messages: AnyElement = match conversation {
-            Some(conversation) => div()
-                .id("assistant-messages")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .px_4()
-                .py_3()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .children(
-                    conversation
-                        .messages
-                        .iter()
-                        .enumerate()
-                        .map(|(ix, message)| {
-                            message_bubble(
-                                ("assistant-sample-message", ix),
-                                message.role == Role::User,
-                                message.text.into(),
-                                pal,
-                            )
-                        }),
-                )
-                .into_any_element(),
-            None if live.conversation.is_empty() => self
+        let messages: AnyElement = match () {
+            () if live.conversation.is_empty() => self
                 .render_assistant_empty(configured, cx, pal)
                 .into_any_element(),
-            None => {
+            () => {
                 let turns = live.conversation.turns();
                 let streaming = live.conversation.is_streaming();
                 let last = turns.len().saturating_sub(1);
@@ -444,14 +344,14 @@ impl WriterApp {
             }
         };
 
-        // 입력창. 새 대화에서만 쓰고(샘플 대화는 읽기 전용), AI를 설정하지 않았으면 두지 않는다.
+        // 입력창. AI를 설정하지 않았으면 두지 않는다.
         // 답을 받는 중에는 보내기 대신 멈추기 버튼을 둔다.
         let can_send = !live.conversation.is_streaming()
             && self.assistant_model_usable(cx)
             && !live.input.read(cx).value().trim().is_empty();
         let send_button = if live.conversation.is_streaming() {
             icon_button("assistant-stop", icons::stop(), true, pal)
-                .on_click(cx.listener(|this, _, _, cx| this.stop_assistant_reply(cx)))
+                .on_click(cx.listener(|this, _, window, cx| this.stop_assistant_reply(window, cx)))
         } else {
             icon_button("assistant-send", icons::send(), can_send, pal).when(can_send, |this| {
                 this.on_click(cx.listener(|this, _, window, cx| {
@@ -460,44 +360,40 @@ impl WriterApp {
                 }))
             })
         };
-        let composer =
-            div()
-                .flex_shrink_0()
-                .p_3()
-                .when(configured && conversation.is_none(), |this| {
-                    this.child(
+        let composer = div().flex_shrink_0().p_3().when(configured, |this| {
+            this.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .pl_1()
+                    .pr_2()
+                    .py_1()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(pal.panel_border)
+                    .bg(pal.panel)
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(Textarea::new(&live.input).appearance(false)),
+                    )
+                    // 아래 줄: 모델 고르기와 보내기(멈추기) 버튼.
+                    .child(
                         div()
                             .flex()
-                            .flex_col()
-                            .gap_1()
-                            .pl_1()
-                            .pr_2()
-                            .py_1()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(pal.panel_border)
-                            .bg(pal.panel)
+                            .items_center()
+                            .gap_2()
                             .child(
                                 div()
-                                    .text_sm()
-                                    .child(Textarea::new(&live.input).appearance(false)),
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(self.render_model_picker(pal)),
                             )
-                            // 아래 줄: 모델 고르기와 보내기(멈추기) 버튼.
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(self.render_model_picker(pal)),
-                                    )
-                                    .child(send_button),
-                            ),
-                    )
-                });
+                            .child(send_button),
+                    ),
+            )
+        });
 
         let panel = div()
             .w(px(ASSISTANT_PANEL_WIDTH))
@@ -510,7 +406,7 @@ impl WriterApp {
             .child(toolbar)
             .map(|this| {
                 if self.assistant_history {
-                    this.child(self.render_assistant_history(current, cx, pal))
+                    this.child(self.render_assistant_history(cx, pal))
                 } else {
                     this.child(messages).child(composer)
                 }
@@ -534,19 +430,93 @@ impl WriterApp {
 }
 
 impl WriterApp {
-    /// 대화 기록 화면. 기간(오늘·어제·지난 7일)으로 묶고, 줄마다 제목·시각·마지막 메시지를 보인다.
-    /// 줄을 누르면 그 대화로 돌아간다.
-    fn render_assistant_history(
-        &self,
-        current: Option<usize>,
-        cx: &mut Context<Self>,
-        pal: Palette,
-    ) -> impl IntoElement {
+    /// 대화 기록 화면. 기간(오늘·어제·지난 7일·이전)으로 묶고, 줄마다 제목·시각·마지막 말을 보인다.
+    /// 줄을 누르면 그 대화를 다시 열어 이어 간다. 시트를 열었으면 그 시트의 대화만 볼 수 있다.
+    fn render_assistant_history(&self, cx: &mut Context<Self>, pal: Palette) -> impl IntoElement {
+        let live = &self.assistant_chat;
+        let current = live.saved.as_ref().map(|saved| saved.summary.id);
+        let sheet = self.open_sheet_path();
+        let sheet_only = self.assistant_sheet_only && sheet.is_some();
+        let today = Local::now().date_naive();
+
         let mut rows: Vec<AnyElement> = Vec::new();
+        if sheet.is_some() {
+            let chip = |id: &'static str, label: std::borrow::Cow<'static, str>, on: bool| {
+                div()
+                    .id(id)
+                    .px_2()
+                    .py(px(2.0))
+                    .rounded_md()
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(on, |this| this.bg(pal.active).font_medium())
+                    .when(!on, |this| {
+                        this.text_color(pal.muted)
+                            .hover(move |style| style.bg(pal.hover))
+                    })
+                    .child(label)
+            };
+            rows.push(
+                div()
+                    .px_2()
+                    .pt_2()
+                    .flex()
+                    .gap_1()
+                    .child(
+                        chip(
+                            "assistant-history-all",
+                            t!("assistant.history.all"),
+                            !sheet_only,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.assistant_sheet_only = false;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        chip(
+                            "assistant-history-sheet",
+                            t!("assistant.history.this_sheet"),
+                            sheet_only,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.assistant_sheet_only = true;
+                            cx.notify();
+                        })),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        let shown: Vec<&agent::Summary> = live
+            .summaries
+            .iter()
+            .filter(|summary| {
+                !sheet_only
+                    || sheet
+                        .as_ref()
+                        .is_some_and(|path| summary.sheets.contains(path))
+            })
+            .collect();
+        if shown.is_empty() {
+            rows.push(
+                div()
+                    .px_2()
+                    .pt_6()
+                    .text_sm()
+                    .text_center()
+                    .text_color(pal.muted)
+                    .child(t!("assistant.history.empty"))
+                    .into_any_element(),
+            );
+        }
+
         let mut last_period = None;
-        for (ix, item) in SAMPLE_CONVERSATIONS.iter().enumerate() {
-            if last_period != Some(item.period) {
-                last_period = Some(item.period);
+        for summary in shown {
+            let at = local_time(summary.updated);
+            let period = at.map_or(Period::Earlier, |at| Period::of(at, today));
+            if last_period != Some(period) {
+                last_period = Some(period);
                 rows.push(
                     div()
                         .px_2()
@@ -555,14 +525,20 @@ impl WriterApp {
                         .text_xs()
                         .font_semibold()
                         .text_color(pal.muted)
-                        .child(item.period.label())
+                        .child(period.label())
                         .into_any_element(),
                 );
             }
-            let selected = Some(ix) == current;
+            let id = summary.id;
+            let selected = Some(id) == current;
+            let row_id =
+                ElementId::from(SharedString::from(format!("assistant-conversation-{id}")));
+            let delete_id = ElementId::from(SharedString::from(format!("assistant-delete-{id}")));
+            let group = SharedString::from(format!("assistant-row-{id}"));
             rows.push(
                 div()
-                    .id(("assistant-conversation", ix))
+                    .id(row_id)
+                    .group(group.clone())
                     .px_2()
                     .py_2()
                     .rounded_md()
@@ -574,10 +550,8 @@ impl WriterApp {
                     .when(!selected, |this| {
                         this.hover(move |style| style.bg(pal.hover))
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.assistant_conversation = Some(ix);
-                        this.assistant_history = false;
-                        cx.notify();
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_assistant_conversation(id, window, cx);
                     }))
                     .child(
                         div()
@@ -591,14 +565,29 @@ impl WriterApp {
                                     .truncate()
                                     .text_sm()
                                     .font_medium()
-                                    .child(item.title),
+                                    .child(summary.title.clone()),
                             )
                             .child(
                                 div()
                                     .flex_shrink_0()
                                     .text_xs()
                                     .text_color(pal.muted)
-                                    .child(item.time),
+                                    .child(at.map(|at| time_label(at, today)).unwrap_or_default()),
+                            )
+                            // 지우기는 줄 위에 있을 때만 보인다.
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .invisible()
+                                    .group_hover(group, |style| style.visible())
+                                    .child(
+                                        icon_button(delete_id, icons::trash(), true, pal).on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.delete_assistant_conversation(id, window, cx);
+                                            }),
+                                        ),
+                                    ),
                             ),
                     )
                     .child(
@@ -606,7 +595,7 @@ impl WriterApp {
                             .truncate()
                             .text_xs()
                             .text_color(pal.muted)
-                            .child(item.preview()),
+                            .child(summary.preview.clone()),
                     )
                     .into_any_element(),
             );
@@ -784,13 +773,13 @@ impl WriterApp {
             .as_ref()
             .map(|library| agent::Workspace::new(&library.root));
         let system = self.assistant_system_prompt(workspace.as_ref(), cx);
+        let sheet = self.open_sheet_path();
         let chat = &mut self.assistant_chat;
-        let Some(turns) = chat.conversation.send(&text) else {
+        let Some(turns) = chat.conversation.send(&text, sheet.as_deref()) else {
             return;
         };
 
-        // 샘플 대화를 보고 있었어도 새 대화로 돌아와 보낸다.
-        self.assistant_conversation = None;
+        // 기록을 보고 있었어도 대화로 돌아와 보낸다.
         self.assistant_history = false;
         let chat = &mut self.assistant_chat;
         chat.input
@@ -955,30 +944,204 @@ impl WriterApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let finished = matches!(event, agent::ChatEvent::Done | agent::ChatEvent::Failed(_));
         let chat = &mut self.assistant_chat;
         if let Some(sent) = chat.conversation.apply(event) {
             chat.input
                 .update(cx, |input, cx| input.set_value(sent, window, cx));
         }
         chat.scroll.scroll_to_bottom();
+        if finished {
+            self.save_assistant_chat(window, cx);
+        }
         cx.notify();
     }
 
-    /// 받는 중인 답을 멈춘다. 받은 데까지는 남긴다.
-    fn stop_assistant_reply(&mut self, cx: &mut Context<Self>) {
+    /// 받는 중인 답을 멈춘다. 받은 데까지는 남기고 기록에 쓴다.
+    fn stop_assistant_reply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let chat = &mut self.assistant_chat;
         chat.reply = None;
         chat.conversation.stop();
+        self.save_assistant_chat(window, cx);
         cx.notify();
     }
 
-    /// 새 대화를 비운다(받는 중인 답도 멈춘다).
-    fn reset_live_chat(&mut self, cx: &mut Context<Self>) {
+    /// 새 대화로 비운다. 받는 중인 답은 멈추고 받은 데까지 기록에 쓴다.
+    fn reset_live_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.assistant_chat.conversation.is_streaming() {
+            self.stop_assistant_reply(window, cx);
+        }
         let chat = &mut self.assistant_chat;
         chat.reply = None;
         chat.conversation.clear();
+        chat.saved = None;
         chat.change_scrolls.get_mut().clear();
         cx.notify();
+    }
+
+    /// 이 라이브러리의 대화 기록. 처음 부를 때(라이브러리가 바뀌었으면 다시) 연다. 열지 못하면 한 번
+    /// 알리고 기록 없이 쓴다.
+    fn assistant_store(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<agent::History>> {
+        let root = self.library.as_ref()?.root.clone();
+        if self
+            .assistant_store
+            .as_ref()
+            .is_none_or(|(opened, _)| *opened != root)
+        {
+            // 다른 라이브러리의 대화를 이어 가면 이 라이브러리에는 새 대화로 쓴다.
+            if self.assistant_store.is_some() {
+                self.assistant_chat.saved = None;
+                self.assistant_chat.summaries.clear();
+            }
+            let store = match agent::History::open(&root) {
+                Ok(store) => Some(Arc::new(store)),
+                Err(err) => {
+                    self.notify(t!("assistant.error.history_open", err = err), window, cx);
+                    None
+                }
+            };
+            self.assistant_store = Some((root, store));
+        }
+        self.assistant_store.as_ref()?.1.clone()
+    }
+
+    /// 기록 화면에 보일 요약을 읽는다.
+    fn load_assistant_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let summaries = self
+            .assistant_store(window, cx)
+            .map(|store| store.list())
+            .unwrap_or_default();
+        self.assistant_chat.summaries = summaries;
+    }
+
+    /// 지금 대화를 기록에 쓴다. 지난번에 쓴 뒤의 말만 백그라운드에서 쓴다.
+    fn save_assistant_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.assistant_chat.conversation.turns().is_empty() {
+            return;
+        }
+        let Some(store) = self.assistant_store(window, cx) else {
+            return;
+        };
+        let chat = &mut self.assistant_chat;
+        let turns = chat.conversation.turns().to_vec();
+        let now = agent::now_millis();
+        let saved = chat.saved.get_or_insert_with(|| Saved {
+            summary: agent::Summary {
+                id: store.next_id(),
+                created: now,
+                ..agent::Summary::default()
+            },
+            persisted: 0,
+        });
+        saved.summary.updated = now;
+        saved.summary.describe(&turns);
+        saved.summary.sites = chat.conversation.sites();
+        let from = saved.persisted.min(turns.len());
+        saved.persisted = turns.len();
+        let summary = saved.summary.clone();
+        chat.summaries.retain(|item| item.id != summary.id);
+        chat.summaries.insert(0, summary.clone());
+
+        let previous = chat.save_task.take();
+        chat.save_task = Some(cx.spawn_in(window, async move |this, cx| {
+            if let Some(previous) = previous {
+                previous.await;
+            }
+            let id = summary.id;
+            let result = cx
+                .background_executor()
+                .spawn(async move { store.save(&summary, &turns, from) })
+                .await;
+            if let Err(err) = result {
+                this.update_in(cx, |this, window, cx| {
+                    // 다음에 대화 전체를 다시 쓴다.
+                    if let Some(saved) = &mut this.assistant_chat.saved
+                        && saved.summary.id == id
+                    {
+                        saved.persisted = 0;
+                    }
+                    this.notify(t!("assistant.error.history_save", err = err), window, cx);
+                })
+                .ok();
+            }
+        }));
+    }
+
+    /// 기록의 대화를 다시 연다. 받는 중인 답은 멈추고 기록에 쓴다.
+    fn open_assistant_conversation(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = self.assistant_store(window, cx) else {
+            return;
+        };
+        let Some(summary) = self
+            .assistant_chat
+            .summaries
+            .iter()
+            .find(|summary| summary.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(turns) = store.load(id) else {
+            self.notify(t!("assistant.error.history_missing"), window, cx);
+            return;
+        };
+        self.reset_live_chat(window, cx);
+        let chat = &mut self.assistant_chat;
+        chat.saved = Some(Saved {
+            summary: summary.clone(),
+            persisted: turns.len(),
+        });
+        chat.conversation = agent::Conversation::restore(turns, summary.sites);
+        chat.scroll.scroll_to_bottom();
+        self.assistant_history = false;
+        cx.notify();
+    }
+
+    /// 기록에서 대화를 지운다. 보고 있던 대화면 새 대화로 비운다.
+    fn delete_assistant_conversation(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = self.assistant_store(window, cx) else {
+            return;
+        };
+        if let Err(err) = store.delete(id) {
+            self.notify(t!("assistant.error.history_delete", err = err), window, cx);
+            return;
+        }
+        let current = self
+            .assistant_chat
+            .saved
+            .as_ref()
+            .map(|saved| saved.summary.id);
+        if current == Some(id) {
+            self.reset_live_chat(window, cx);
+        }
+        self.assistant_chat
+            .summaries
+            .retain(|summary| summary.id != id);
+        cx.notify();
+    }
+
+    /// 열린 시트의 라이브러리 루트 기준 경로(파일 도구가 쓰는 경로).
+    fn open_sheet_path(&self) -> Option<String> {
+        let editor = self.editor.as_ref()?;
+        let relative = editor
+            .path()
+            .strip_prefix(&self.library.as_ref()?.root)
+            .ok()?;
+        Some(relative.to_string_lossy().into_owned())
     }
 
     /// 열린 시트를 넣은 시스템 프롬프트.
@@ -989,10 +1152,7 @@ impl WriterApp {
         let Some(editor) = &self.editor else {
             return agent::system_prompt(None, tools, skills, extensions);
         };
-        let path = self.library.as_ref().and_then(|library| {
-            let relative = editor.path().strip_prefix(&library.root).ok()?;
-            Some(relative.to_string_lossy().into_owned())
-        });
+        let path = self.open_sheet_path();
         let title = self
             .previews
             .get(editor.path())
