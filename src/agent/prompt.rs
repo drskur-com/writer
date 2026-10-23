@@ -89,7 +89,7 @@ pub fn system_prompt(
             body = sheet.body.replace("</sheet", "&lt;/sheet"),
         ),
         None => format!(
-            "You are the writing assistant in Writer, a writing app. No sheet is open right now.\n\n{RULES}"
+            "You are the writing assistant in Writer, a writing app. No sheet is open right now, so help with the library as a whole.\n\n{RULES}"
         ),
     };
     if !tools {

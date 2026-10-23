@@ -280,29 +280,25 @@ const SUGGESTIONS: &[&str] = &[
 const ASSISTANT_PANEL_WIDTH: f32 = 360.0;
 
 impl WriterApp {
-    /// 어시스턴트 패널이 보이는지. 시트를 연 때만 열 수 있다.
+    /// 어시스턴트 패널이 보이는지.
     pub(super) fn assistant_open(&self) -> bool {
-        self.assistant_visible && self.editor.is_some()
+        self.assistant_visible
     }
 
     /// 어시스턴트 패널 토글 버튼. 닫혀 있으면 에디터 툴바 오른쪽 끝에, 열려 있으면 패널 툴바
     /// 오른쪽 끝에 둔다(좁은 창에서 에디터 툴바가 잘려도 닫을 수 있게).
-    /// 시트를 열지 않았으면 흐리게 두고 누를 수 없다.
     pub(super) fn assistant_toggle(
         &self,
         cx: &mut Context<Self>,
         pal: Palette,
     ) -> impl IntoElement {
-        let enabled = self.editor.is_some();
         tool_group(pal).child(
-            icon_button("toggle-assistant", icons::assistant(), enabled, pal)
+            icon_button("toggle-assistant", icons::assistant(), true, pal)
                 .when(self.assistant_open(), |this| this.bg(pal.active))
-                .when(enabled, |this| {
-                    this.on_click(cx.listener(|this, _, _, cx| {
-                        this.assistant_visible = !this.assistant_visible;
-                        cx.notify();
-                    }))
-                }),
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.assistant_visible = !this.assistant_visible;
+                    cx.notify();
+                })),
         )
     }
 
@@ -639,13 +635,24 @@ impl WriterApp {
         cx: &mut Context<Self>,
         pal: Palette,
     ) -> impl IntoElement {
-        let sheet_title = self
-            .editor
-            .as_ref()
-            .and_then(|editor| self.previews.get(editor.path()))
-            .map(|(_, preview)| preview.title.trim().to_string())
-            .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| t!("assistant.untitled_sheet").to_string());
+        // 시트를 열지 않았으면 라이브러리 전체를 두고 묻는다. 질문 예시는 시트를 두고 묻는 말이라 숨긴다.
+        let about = match &self.editor {
+            Some(editor) => {
+                let title = self
+                    .previews
+                    .get(editor.path())
+                    .map(|(_, preview)| preview.title.trim().to_string())
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| t!("assistant.untitled_sheet").to_string());
+                t!("assistant.empty.about_sheet", title = title)
+            }
+            None => t!("assistant.empty.about_library"),
+        };
+        let suggestions = if self.editor.is_some() {
+            SUGGESTIONS
+        } else {
+            &[]
+        };
 
         let badge = div()
             .size(px(48.0))
@@ -677,10 +684,10 @@ impl WriterApp {
                         .text_sm()
                         .text_color(pal.muted)
                         .text_center()
-                        .child(t!("assistant.empty.about_sheet", title = sheet_title)),
+                        .child(about),
                 )
                 .child(div().w_full().mt_5().flex().flex_col().gap_2().children(
-                    SUGGESTIONS.iter().enumerate().map(|(ix, key)| {
+                    suggestions.iter().enumerate().map(|(ix, key)| {
                         let text = t!(*key).to_string();
                         div()
                             .id(("assistant-suggestion", ix))

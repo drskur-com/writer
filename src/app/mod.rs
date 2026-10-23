@@ -129,6 +129,8 @@ pub(crate) struct WriterApp {
     _prefs_subscription: Subscription,
     /// 라이브러리 폴더 감시(watcher + 변경 시 다시 스캔하는 태스크). 버리면 멈춘다.
     watcher: Option<(notify::RecommendedWatcher, Task<()>)>,
+    /// 앱 루트의 포커스. 시트를 열지 않아 포커스된 요소가 없어도 메뉴 액션이 이 뷰로 오게 한다.
+    focus: FocusHandle,
     #[cfg(not(target_os = "macos"))]
     menu_bar: Entity<AppMenuBar>,
 }
@@ -188,9 +190,11 @@ impl WriterApp {
             _quit_subscription: quit_subscription,
             _prefs_subscription: prefs_subscription,
             watcher: None,
+            focus: cx.focus_handle(),
             #[cfg(not(target_os = "macos"))]
             menu_bar: AppMenuBar::new(cx),
         };
+        window.focus(&app.focus, cx);
         app.start_watching(window, cx);
         app.refresh_assistant_models(window, cx);
         app.load_previews(cx);
@@ -608,11 +612,16 @@ impl WriterApp {
 }
 
 impl Render for WriterApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 테마 토큰을 값(Copy)으로 읽어 둔다. 이후 `cx.listener`와 대여 충돌이 없다.
         let pal = Palette::from_theme(cx.theme());
+        // 포커스가 없으면(시트를 닫았거나 연 적이 없으면) 메뉴 액션이 이 뷰까지 오지 않아 꺼진다.
+        if window.focused(cx).is_none() {
+            window.focus(&self.focus, cx);
+        }
 
         let root = div()
+            .track_focus(&self.focus)
             .flex()
             .flex_col()
             .size_full()
