@@ -23,6 +23,9 @@ pub struct LineStyle {
     /// With [`Self::collapsed`]: a selection touching any line of a run of adjacent lines that
     /// all set this reveals the whole run, e.g. every row of a Markdown table.
     pub reveal_run: bool,
+    /// With [`Self::reveal_run`]: this line starts a new run, so a run above it does not
+    /// continue into it, e.g. the first row of a table right after another block.
+    pub run_start: bool,
     /// Empty space below the line (after its block), e.g. the gap between paragraphs.
     pub space_after: Pixels,
     /// Height of a block painted above the line. Only the first buffer line's is used: it is
@@ -58,6 +61,7 @@ impl Default for LineStyle {
             block_height: px(0.),
             collapsed: false,
             reveal_run: false,
+            run_start: false,
             space_after: px(0.),
             block_before: px(0.),
             first_indent: px(0.),
@@ -180,14 +184,15 @@ impl TextWrapper {
             self.line(row)
                 .is_some_and(|item| item.style.collapsed && item.style.reveal_run)
         };
+        let starts_run = |row: usize| self.line(row).is_some_and(|item| item.style.run_start);
         let (mut start, mut end) = (rows.start, rows.end);
         if in_run(start) {
-            while start > 0 && in_run(start - 1) {
+            while start > 0 && !starts_run(start) && in_run(start - 1) {
                 start -= 1;
             }
         }
         if end > start && in_run(end - 1) {
-            while in_run(end) {
+            while in_run(end) && !starts_run(end) {
                 end += 1;
             }
         }

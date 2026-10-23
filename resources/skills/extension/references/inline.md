@@ -1,10 +1,10 @@
 # Inline extensions (`{{name key=value}}`)
 
-An extension can also appear inside a paragraph or heading: `오늘은 {{today}}입니다.` The editor shows the call as one object (the caret steps over it, Backspace deletes it whole, copying copies the source), and the book preview and exports show its text. Users edit its arguments by double-clicking it. Example: `examples/today.md`.
+An extension can also appear inside a paragraph or heading: `오늘은 {{today}}입니다.` The editor shows the call as one object; when the caret touches it, the source `{{today}}` appears for editing, with the result shown faded right after it. Copying copies the source, and the book preview and exports show its text. Users can also edit its arguments in a dialog by double-clicking it. Example: `examples/today.md`.
 
 ## Writing a call
 
-`{{name key=value key="value with spaces"}}`: the extension's file name (starting with a letter), then arguments as `key=value`. Quote values that contain spaces, `"` (as `\"`), `{`, or `}`. Calls inside inline code (`` `{{x}}` ``) stay plain text. The reserved `export=false` leaves it out of exports, as for blocks; `scale` and `align` do not apply inline.
+`{{name key=value key="value with spaces"}}`: the extension's file name (starting with a letter), then arguments as `key=value`. Quote values that contain spaces, `"` (as `\"`), `{`, or `}`. Calls inside inline code (`` `{{x}}` ``) stay plain text. The reserved `export=false` leaves it out of exports, as for blocks. `scale=2` makes the object twice the line height (and its line's rows taller to fit; `0.5` makes it smaller); inside a heading objects grow with the heading. `align` does not apply inline.
 
 ## Text: `value(args, ctx)`
 
@@ -23,7 +23,7 @@ return {
 
 ## Small pictures: `draw` inline
 
-An extension with `draw` (and no `value`) appears inline as its canvas, scaled to the line height: design it for a small square or a wide strip (for example `size = { 20, 20 }` or `{ 60, 16 }`), with shapes that read at text size. Regions and `click` work inline too (`interactive.md`); a click's `args` are written back into the call. Inline pictures are not exported yet: the book preview and exports leave them out.
+An extension with `draw` (and no `value`) appears inline as its canvas, scaled to the line height (times `scale`): design it for a small square or a wide strip (for example `size = { 20, 20 }` or `{ 60, 16 }`), with shapes that read at text size. Regions and `click` work inline too (`interactive.md`); a click's `args` are written back into the call. Inline pictures are not exported yet: the book preview and exports leave them out.
 
 ## Testing
 

@@ -119,9 +119,16 @@ fn line_style(
         if tables.contains(row) || extensions.contains(row) {
             style.collapsed = true;
             style.reveal_run = true;
+            // 붙어 있는 다른 표·블록까지 함께 펼치지 않는다.
+            style.run_start = tables.starts(row) || extensions.starts(row);
         }
         if let Some(marker) = markdown::task_marker(line.text) {
             style.first_indent += if marker.checked { checked } else { unchecked };
+        }
+        // `scale`이 큰 인라인 확장이 들어가도록 행을 키운다(ADR-0036).
+        let inline = super::editor_extension::inline_scale(line.text);
+        if inline > style.height_scale {
+            style.height_scale = inline;
         }
         style
     }

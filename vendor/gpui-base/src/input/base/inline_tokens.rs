@@ -270,9 +270,26 @@ impl<M: InputModeKind> InputBaseState<M> {
             .as_ref()
             .map_or(&self.derived_tokens, |store| &store.spans)
     }
-    /// Derive the inline objects from the text again if it changed since the last time (Writer
-    /// patch). Ranges that split a character, overlap, span lines, or touch an IME composition
-    /// are skipped.
+    /// The height an object starting at `start` gets: the row height of its line (Writer patch),
+    /// so objects grow with taller rows (a heading, or a line style that makes room for them).
+    pub(super) fn object_line_height(&self, start: usize, line_height: gpui::Pixels) -> gpui::Pixels {
+        use super::rope_ext::RopeExt as _;
+        if !M::CODE_EDITOR {
+            return line_height;
+        }
+        let row = self.text.offset_to_point(start.min(self.text.len())).row;
+        let scale = self
+            .display_map
+            .line(row)
+            .map_or(1., |line| line.style.height_scale);
+        line_height * scale.max(0.1)
+    }
+
+    /// Derive the inline objects from the text again if it or the selections changed since the
+    /// last time (Writer patch). Ranges that split a character, overlap, span lines, or touch an
+    /// IME composition are skipped. An object a selection touches (its ends included) is shown as
+    /// its source text, followed by its element as an empty-range decoration, so the caret can
+    /// enter it and edit the source.
     pub(crate) fn refresh_derived_tokens(&mut self) {
         use super::rope_ext::RopeExt as _;
         let Some(provider) = self.inline_object_ranges.clone() else {
@@ -281,10 +298,20 @@ impl<M: InputModeKind> InputBaseState<M> {
             }
             return;
         };
-        if self.derived_revision == Some(self.document_revision) {
+        let selections: Vec<(usize, usize)> = self
+            .selections
+            .iter()
+            .map(|selection| (selection.start.min(selection.end), selection.start.max(selection.end)))
+            .collect();
+        let key = (self.document_revision, selections);
+        if self.derived_revision.as_ref() == Some(&key) {
             return;
         }
-        self.derived_revision = Some(self.document_revision);
+        let touched = |range: &Range<usize>| {
+            key.1
+                .iter()
+                .any(|&(start, end)| start <= range.end && range.start <= end)
+        };
         let mut spans = Vec::new();
         for row in 0..self.text.lines_len() {
             let line_start = self.text.line_start_offset(row);
@@ -309,10 +336,22 @@ impl<M: InputModeKind> InputBaseState<M> {
                     continue;
                 }
                 end = range.end - line_start;
-                spans.push(InlineTokenSpan { range, token });
+                if touched(&range) {
+                    spans.push(InlineTokenSpan {
+                        range: range.end..range.end,
+                        token,
+                    });
+                } else {
+                    spans.push(InlineTokenSpan { range, token });
+                }
             }
         }
-        self.derived_tokens = spans;
+        if spans != self.derived_tokens {
+            self.derived_tokens = spans;
+            // Which objects are shown changed: measure and wrap them again.
+            self.token_layout_cache = None;
+        }
+        self.derived_revision = Some(key);
     }
     pub(super) fn token_boundary(&self, offset: usize, bias: sum_tree::Bias) -> usize {
         let spans = self.token_spans();

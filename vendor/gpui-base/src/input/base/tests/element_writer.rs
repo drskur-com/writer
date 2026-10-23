@@ -377,6 +377,38 @@ fn a_selection_reveals_the_whole_run_of_collapsed_lines(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn a_run_start_keeps_adjacent_runs_apart(cx: &mut TestAppContext) {
+    // Two runs of collapsed lines with no line between them: `|a|` `|b|` and `|c|` `|d|`.
+    let text = "body\n|a|\n|b|\n|c|\n|d|\nmore";
+    let (editor, window) = decoration_editor(cx, text, false);
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        editor.update(cx, |state, cx| {
+            state.set_line_style(
+                Some(
+                    |line: crate::input::LineContext<'_>| crate::input::LineStyle {
+                        collapsed: line.text.starts_with('|'),
+                        reveal_run: true,
+                        run_start: line.text == "|a|" || line.text == "|c|",
+                        ..Default::default()
+                    },
+                ),
+                cx,
+            );
+            state.set_selected_range(0..0, cx);
+        });
+        window.draw(cx).clear(cx);
+        let lh = editor.read(cx).last_layout.as_ref().unwrap().line_height;
+        assert_eq!(editor.read(cx).display_map.display_row_top(5, lh), lh);
+
+        // The caret in the second run shows only its two lines.
+        editor.update(cx, |state, cx| state.set_selected_range(14..14, cx));
+        window.draw(cx).clear(cx);
+        assert_eq!(editor.read(cx).display_map.display_row_top(5, lh), lh * 3.);
+    });
+}
+
+#[gpui::test]
 fn clicking_a_collapsed_block_reveals_its_line(cx: &mut TestAppContext) {
     let text = "body\n![img](a.png)\nmore";
     let (editor, window) = decoration_editor(cx, text, false);
@@ -681,5 +713,56 @@ fn secondary_click_goes_to_the_host_before_placing_the_caret(cx: &mut TestAppCon
     cx.update(|_, cx| {
         assert_eq!(clicks.borrow().len(), 1);
         assert!(editor.read(cx).cursor() >= 11);
+    });
+}
+
+#[gpui::test]
+fn inline_objects_stay_atomic_until_the_caret_touches_them(cx: &mut TestAppContext) {
+    let text = "a {{x}} b";
+    let (editor, window) = decoration_editor(cx, text, true);
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        editor.update(cx, |state, cx| {
+            state.set_inline_objects(
+                |_, line: &str| {
+                    line.find("{{x}}")
+                        .map(|at| {
+                            (
+                                at..at + 5,
+                                crate::input::InlineToken::new("x", "{{x}}").with_label("X"),
+                            )
+                        })
+                        .into_iter()
+                        .collect()
+                },
+                |_, _, _| gpui::div().w(px(30.)).h(px(10.)).into_any_element(),
+                None,
+                cx,
+            );
+            state.set_selected_range(0..0, cx);
+        });
+        window.draw(cx).clear(cx);
+        let ranges = |cx: &App| -> Vec<std::ops::Range<usize>> {
+            editor
+                .read(cx)
+                .token_spans()
+                .iter()
+                .map(|span| span.range())
+                .collect()
+        };
+        assert_eq!(ranges(cx), vec![2..7]);
+        // Away from the caret the object is one unit.
+        assert_eq!(editor.read(cx).token_boundary(4, sum_tree::Bias::Right), 7);
+
+        // The caret at its edge shows the source, followed by the element as a decoration.
+        editor.update(cx, |state, cx| state.set_selected_range(2..2, cx));
+        window.draw(cx).clear(cx);
+        assert_eq!(ranges(cx), vec![7..7]);
+        assert_eq!(editor.read(cx).token_boundary(4, sum_tree::Bias::Right), 4);
+
+        // Leaving it makes it an object again.
+        editor.update(cx, |state, cx| state.set_selected_range(9..9, cx));
+        window.draw(cx).clear(cx);
+        assert_eq!(ranges(cx), vec![2..7]);
     });
 }

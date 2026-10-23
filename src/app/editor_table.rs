@@ -145,6 +145,12 @@ impl TableBlocks {
         self.table_at(row).is_some()
     }
 
+    /// 줄이 표의 첫 행인지.
+    pub(super) fn starts(&self, row: usize) -> bool {
+        self.table_at(row)
+            .is_some_and(|table| table.rows.start == row)
+    }
+
     /// 줄 아래 격자 높이. 표의 마지막 행이 아니면 0이다.
     pub(super) fn measure(&self, row: usize, wrap_width: Option<Pixels>) -> Pixels {
         let Some(table) = self.table_at(row).filter(|table| table.rows.end == row + 1) else {

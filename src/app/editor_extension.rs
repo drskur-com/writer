@@ -313,15 +313,20 @@ impl ExtensionBlocks {
     }
 
     /// 줄의 인라인 확장과 그 토큰(에디터의 인라인 객체). 토큰의 원문은 `{{…}}`, 보이는 글(`label`)은 글을
-    /// 보이는 확장이면 그 글, 그림이면 이름이다(글 폭이 바뀌면 다시 잰다).
+    /// 보이는 확장이면 그 글, 그림이면 이름이다(글 폭이 바뀌면 다시 잰다). 토큰 id에는 그 줄에서 가장 큰
+    /// `scale:`을 담는다(그린 크기가 줄의 행 높이에 대한 비율이라, 바뀌면 다시 재야 한다).
     pub(super) fn inline_tokens(&self, line: &str) -> Vec<(Range<usize>, InlineToken)> {
-        extension::inline_calls(line)
+        let calls = extension::inline_calls(line);
+        let row_scale = row_scale(&calls);
+        calls
             .into_iter()
             .map(|call| {
                 let label = self.inline_label(&call);
-                let token =
-                    InlineToken::new(call.name.clone(), line[call.range.clone()].to_string())
-                        .with_label(label);
+                let token = InlineToken::new(
+                    format!("{}@{row_scale}", call.name),
+                    line[call.range.clone()].to_string(),
+                )
+                .with_label(label);
                 (call.range, token)
             })
             .collect()
@@ -378,9 +383,29 @@ impl ExtensionBlocks {
     ) -> AnyElement {
         let pal = Palette::from_theme(cx.theme());
         let source = token.token().text().to_string();
-        let range = token.range();
-        let height = token.line_height();
+        // 커서가 닿아 원문이 펼쳐진 객체는 원문 바로 뒤에 빈 범위의 미리보기로 온다. 그 원문의 범위를 가리킨다.
+        let preview = token.range().is_empty();
+        let range = if preview {
+            token.range().start.saturating_sub(source.len())..token.range().start
+        } else {
+            token.range()
+        };
         let call = extension::inline_calls(&source).into_iter().next();
+        // 행 높이(제목이면 크고, 큰 `scale:`이 있으면 그만큼 크다)에서 이 객체의 몫.
+        let row_scale = token
+            .token()
+            .id()
+            .rsplit_once('@')
+            .and_then(|(_, scale)| scale.parse::<f32>().ok())
+            .unwrap_or(1.)
+            .max(1.);
+        let own_scale = call
+            .as_ref()
+            .map_or(1., |call| extension::scale_of(&call.args));
+        let height = token.line_height() * (own_scale / row_scale);
+        // 글은 행 높이에 비례한 크기로 쓴다(제목 안에서는 제목만큼).
+        let text_size = window.text_style().font_size.to_pixels(window.rem_size())
+            * (f32::from(height) / f32::from(window.line_height()).max(1.));
         let loaded = call.as_ref().map(|call| self.host.get(&call.name));
         let chip = |label: SharedString, color: Hsla| {
             div()
@@ -388,6 +413,7 @@ impl ExtensionBlocks {
                 .rounded(px(3.))
                 .bg(pal.tint)
                 .text_color(color)
+                .text_size(text_size)
                 .whitespace_nowrap()
                 .child(label)
                 .into_any_element()
@@ -419,11 +445,12 @@ impl ExtensionBlocks {
         };
         let (app, opened) = (app.clone(), source.clone());
         div()
-            .h(height)
+            .h(token.line_height())
             .flex()
             .items_center()
             .rounded(px(3.))
-            .when(token.is_selected(), |this| this.bg(pal.active))
+            .when(preview, |this| this.ml_1().opacity(0.6))
+            .when(token.is_selected() && !preview, |this| this.bg(pal.active))
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 if event.click_count >= 2 || event.modifiers.secondary() {
                     window.prevent_default();
@@ -600,6 +627,12 @@ impl ExtensionBlocks {
     /// 줄이 확장 블록(펜스 포함)인지.
     pub(super) fn contains(&self, row: usize) -> bool {
         self.block_at(row).is_some()
+    }
+
+    /// 줄이 확장 블록의 여는 줄인지.
+    pub(super) fn starts(&self, row: usize) -> bool {
+        self.block_at(row)
+            .is_some_and(|block| block.block.rows.start == row)
     }
 
     /// 줄 아래 캔버스 높이. 블록의 닫는 줄이 아니면 0이다.
@@ -909,6 +942,18 @@ fn write_block_args(
         return;
     };
     state.replace_range_keeping_selections(span, &replacement, window, cx);
+}
+
+/// 줄의 인라인 확장 중 가장 큰 `scale:`(1 이상). 그 줄의 행을 이만큼 키운다.
+pub(super) fn inline_scale(line: &str) -> f32 {
+    row_scale(&extension::inline_calls(line))
+}
+
+fn row_scale(calls: &[extension::InlineCall]) -> f32 {
+    calls
+        .iter()
+        .map(|call| extension::scale_of(&call.args))
+        .fold(1., f32::max)
 }
 
 /// 시트에서 원문이 `original`인 인라인 확장들의 인자를 바꾼다(ADR-0036). 커서는 그대로 둔다.

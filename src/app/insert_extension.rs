@@ -52,7 +52,7 @@ struct EditBlock {
     state: Entity<EditorState>,
     range: Range<usize>,
     original: String,
-    /// 문단 안의 인라인 확장(`{{…}}`, ADR-0036)이면 `true`. 배율·자리는 없다.
+    /// 문단 안의 인라인 확장(`{{…}}`, ADR-0036)이면 `true`. 자리는 없고, 배율은 줄 높이에 대한 것이다.
     inline: bool,
 }
 
@@ -186,19 +186,18 @@ impl ExtensionPicker {
                 extra.push((key.clone(), String::new()));
             }
         }
-        // 배율은 앱이 처리하므로 어느 블록에나 있다(인라인 확장은 줄 높이에 맞춘다).
+        // 배율은 앱이 처리하므로 어느 확장에나 있다(인라인 확장은 줄 높이에 대한 배율).
         let scale = (
             extension::SCALE_ARG.to_string(),
             t!("extensions.scale_arg").to_string(),
         );
-        let inline = self.edit.as_ref().is_some_and(|edit| edit.inline);
         let fields = meta
             .args
             .iter()
             .filter(|(key, _)| !extension::RESERVED_ARGS.contains(&key.as_str()))
             .cloned()
             .chain(extra)
-            .chain((!inline).then_some(scale));
+            .chain(std::iter::once(scale));
         for (key, description) in fields {
             let value = initial(&key);
             self.add_field(key, description, value, window, cx);

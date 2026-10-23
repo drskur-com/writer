@@ -438,7 +438,8 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(crate) inline_object_click: Option<super::InlineTokenClickListener>,
     /// The spans `inline_object_ranges` found, and the document revision they were found for.
     pub(super) derived_tokens: Vec<super::InlineTokenSpan>,
-    pub(super) derived_revision: Option<u64>,
+    /// The document revision and selections the spans were derived for.
+    pub(super) derived_revision: Option<(u64, Vec<(usize, usize)>)>,
     pub(super) pending_token: Option<super::InlineToken>,
     pub(super) replaying_history: bool,
     pub(super) validated_token_edit: bool,

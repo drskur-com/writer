@@ -1791,7 +1791,10 @@ impl<M: InputModeKind> TextElement<M> {
                         cache.key.as_ref() != Some(&key) || !cache.widths.contains_key(span.token())
                     })
             })
-            .map(|span| state.token_context(span, line_height, width))
+            .map(|span| {
+                let height = state.object_line_height(span.range().start, line_height);
+                state.token_context(span, height, width)
+            })
             .collect();
         let mut elements = std::collections::HashMap::new();
         let mut measured = Vec::new();
@@ -1800,7 +1803,7 @@ impl<M: InputModeKind> TextElement<M> {
             let size = element.layout_as_root(
                 size(
                     gpui::AvailableSpace::MaxContent,
-                    gpui::AvailableSpace::Definite(line_height),
+                    gpui::AvailableSpace::Definite(token.line_height()),
                 ),
                 window,
                 cx,
@@ -2048,8 +2051,9 @@ impl<M: InputModeKind> TextElement<M> {
                 if let Some(position) =
                     layout.lines[ix].position_for_index(span.range().start - start, layout, false)
                 {
+                    let height = state.object_line_height(span.range().start, layout.line_height);
                     placements.push((
-                        state.token_context(span, layout.line_height, width),
+                        state.token_context(span, height, width),
                         bounds.origin + position + point(layout.line_number_width, y),
                     ));
                 }
@@ -2066,7 +2070,7 @@ impl<M: InputModeKind> TextElement<M> {
                     let element_size = element.layout_as_root(
                         size(
                             gpui::AvailableSpace::MaxContent,
-                            gpui::AvailableSpace::Definite(layout.line_height),
+                            gpui::AvailableSpace::Definite(token.line_height()),
                         ),
                         window,
                         cx,

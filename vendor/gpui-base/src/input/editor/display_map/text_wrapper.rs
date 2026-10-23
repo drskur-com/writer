@@ -65,7 +65,13 @@ fn measured_wrap_boundaries_with(
         let mut total = px(0.);
         let mut at = start;
         for (range, object) in objects {
-            if range.end <= start || range.start >= end {
+            // An empty-range decoration counts with the text before it.
+            let outside = if range.is_empty() {
+                range.start <= start && !(start == 0 && range.start == 0) || range.start > end
+            } else {
+                range.end <= start || range.start >= end
+            };
+            if outside {
                 continue;
             }
             if at < range.start {

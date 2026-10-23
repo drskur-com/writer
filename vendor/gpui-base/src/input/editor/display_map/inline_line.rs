@@ -62,8 +62,15 @@ impl InputLine {
         match &self.content {
             Content::Text(line) => line.x_for_index(ix),
             Content::Inline(fragments) => {
-                for f in fragments {
-                    if ix < f.range.end {
+                for (at, f) in fragments.iter().enumerate() {
+                    // A caret at the start of an empty-range decoration (Writer patch) stays
+                    // before it, right after the text it follows.
+                    let before_decoration = ix == f.range.end
+                        && f.text.is_some()
+                        && fragments.get(at + 1).is_some_and(|next| {
+                            next.text.is_none() && next.range.is_empty()
+                        });
+                    if ix < f.range.end || before_decoration {
                         return f.x
                             + f.text.as_ref().map_or(
                                 if ix <= f.range.start { px(0.) } else { f.width },

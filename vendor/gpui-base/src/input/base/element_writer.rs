@@ -220,7 +220,15 @@ pub(super) fn object_row(
     let objects: Vec<(Range<usize>, Pixels)> = spans[first..]
         .iter()
         .take_while(|span| span.range().start < row_end)
-        .filter(|span| span.range().start >= row_start && span.range().end <= row_end)
+        .filter(|span| {
+            let range = span.range();
+            if range.is_empty() {
+                // A decoration follows the text before it, so it belongs to that row.
+                (row_start < range.start || range.start == 0) && range.start <= row_end
+            } else {
+                range.start >= row_start && range.end <= row_end
+            }
+        })
         .map(|span| {
             let range = span.range();
             let width = cache.widths.get(span.token()).copied().unwrap_or_default();
