@@ -11,8 +11,12 @@ use gpui_kit::gpui::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Instant;
 
 use super::editor::EDITOR_MAX_WIDTH;
+use super::gif_player::GifPlayer;
 use super::style::Palette;
 use crate::markdown::{self, ImageAlign, ImageOptions};
 use crate::{icons, library};
@@ -38,6 +42,12 @@ const CAPTION_HEIGHT: f32 = 24.0;
 /// 이미지를 찾지 못했을 때 안내 줄 높이.
 const MISSING_HEIGHT: f32 = 28.0;
 
+/// 이보다 큰 GIF는 움직이지 않고 첫 프레임 썸네일만 보인다(원본을 메모리에 들고 있으므로).
+const MAX_GIF_BYTES: u64 = 64 * 1024 * 1024;
+
+/// 이미지 모서리 반경.
+const CORNER_RADIUS: f32 = 4.0;
+
 /// 로컬 이미지 파일 정보. 헤더만 읽는다.
 #[derive(Clone, Copy)]
 struct ImageFile {
@@ -50,6 +60,8 @@ struct ImageFile {
 enum Source {
     /// 파일, 수정 시각, 썸네일 긴 변.
     File(PathBuf, u128, Pixels),
+    /// 움직이는 GIF(ADR-0049)와 표시 크기의 긴 변.
+    Animated(Rc<RefCell<GifPlayer>>, Pixels),
     Url(SharedUri),
     /// 파일이 없거나 이미지로 읽을 수 없다. 적힌 경로를 보여 준다.
     Missing(String),
@@ -71,6 +83,8 @@ pub(super) struct ImageBlocks {
     /// 읽은 이미지 헤더. 키 입력마다 같은 줄을 다시 재므로 파일을 매번 열지 않게 한다.
     /// 없는 파일은 남기지 않는다(나중에 생기면 바로 보이도록).
     files: RefCell<HashMap<PathBuf, ImageFile>>,
+    /// 프레임이 여럿인 GIF의 재생기. 헤더를 읽을 때 함께 만들고, 스레드는 처음 그릴 때 띄운다.
+    gifs: RefCell<HashMap<PathBuf, Rc<RefCell<GifPlayer>>>>,
 }
 
 impl ImageBlocks {
@@ -78,6 +92,7 @@ impl ImageBlocks {
         Self {
             dir: sheet.parent().map(Path::to_path_buf).unwrap_or_default(),
             files: RefCell::default(),
+            gifs: RefCell::default(),
         }
     }
 
@@ -102,6 +117,10 @@ impl ImageBlocks {
         let Some(placement) = self.place(line, size.width) else {
             return Empty.into_any_element();
         };
+        let now = Instant::now();
+        for player in self.gifs.borrow().values() {
+            player.borrow_mut().sleep_if_idle(now);
+        }
         let pal = Palette::from_theme(cx.theme());
         let image = match placement.source {
             Source::Missing(destination) => div()
@@ -113,6 +132,36 @@ impl ImageBlocks {
                 .child(Icon::new(icons::image()).small())
                 .child(t!("editor.image.not_found", path = destination))
                 .into_any_element(),
+            Source::Animated(player, long_side) => {
+                let bleed = px(EDGE_BLEED);
+                div()
+                    .relative()
+                    .flex_shrink_0()
+                    .w(placement.size.width)
+                    .h(placement.size.height)
+                    .overflow_hidden()
+                    .rounded(px(CORNER_RADIUS))
+                    .child(
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, cx| {
+                                player.borrow_mut().paint(
+                                    bounds,
+                                    long_side,
+                                    Corners::all(px(CORNER_RADIUS)),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )
+                        .absolute()
+                        .left(-bleed)
+                        .top(-bleed)
+                        .w(placement.size.width + bleed * 2.)
+                        .h(placement.size.height + bleed * 2.),
+                    )
+                    .into_any_element()
+            }
             source => {
                 // 파일은 칸 비율이 이미지 비율과 같아 가장자리까지 채우고, 웹 이미지는 비율을 몰라
                 // 칸 안에 맞춘다.
@@ -122,7 +171,7 @@ impl ImageBlocks {
                         ObjectFit::Cover,
                     ),
                     Source::Url(uri) => (uri.into(), ObjectFit::Contain),
-                    Source::Missing(_) => unreachable!(),
+                    Source::Animated(..) | Source::Missing(_) => unreachable!(),
                 };
                 // gpui는 아틀라스에서 이미지를 선형 보간으로 읽는데 타일 경계에서 멈추지 않는다.
                 // 그래서 줄이거나 소수 픽셀 위치(줄 높이 25.6px)에 그리면 오른쪽·아래 가장자리에
@@ -135,7 +184,7 @@ impl ImageBlocks {
                     .w(placement.size.width)
                     .h(placement.size.height)
                     .overflow_hidden()
-                    .rounded(px(4.))
+                    .rounded(px(CORNER_RADIUS))
                     .child(
                         img(source)
                             .absolute()
@@ -144,7 +193,7 @@ impl ImageBlocks {
                             .w(placement.size.width + bleed * 2.)
                             .h(placement.size.height + bleed * 2.)
                             .object_fit(fit)
-                            .rounded(px(4.))
+                            .rounded(px(CORNER_RADIUS))
                             .with_fallback(move || {
                                 Icon::new(icons::image())
                                     .text_color(pal.muted)
@@ -209,12 +258,32 @@ impl ImageBlocks {
         // 화면에 그릴 크기로 줄인 썸네일을 쓴다(큰 사진을 통째로 디코딩하지 않음).
         // 크기는 본문 최대 폭 기준으로 고정해 창 폭이 바뀔 때마다 새로 만들지 않는다.
         let largest = image_size(Some(natural), &image.options, px(EDITOR_MAX_WIDTH));
+        let long_side = largest.width.max(largest.height);
+        let source = match self.gifs.borrow().get(&path) {
+            Some(player) => Source::Animated(player.clone(), long_side),
+            None => Source::File(path, file.modified, long_side),
+        };
         Some(Placement {
             size: image_size(Some(natural), &image.options, width),
-            source: Source::File(path, file.modified, largest.width.max(largest.height)),
+            source,
             align: image.options.align,
             caption,
         })
+    }
+
+    /// 프레임이 여럿인 GIF면 재생기를 만들어 둔다. 아니면(한 장, 너무 큼, 못 읽음) 썸네일로 보인다.
+    fn add_gif(&self, path: &Path) {
+        let small = std::fs::metadata(path).is_ok_and(|meta| meta.len() <= MAX_GIF_BYTES);
+        let Some(data) = small.then(|| std::fs::read(path).ok()).flatten() else {
+            return;
+        };
+        let Some(info) = crate::gif::scan(&data).filter(|info| info.frames() > 1) else {
+            return;
+        };
+        let player = GifPlayer::new(Arc::new(data), info.repeat);
+        self.gifs
+            .borrow_mut()
+            .insert(path.to_path_buf(), Rc::new(RefCell::new(player)));
     }
 
     fn file(&self, path: &Path) -> Option<ImageFile> {
@@ -230,9 +299,18 @@ impl ImageBlocks {
             height: size.height as f32,
             modified: library::modified_nanos(path),
         };
+        if is_gif(path) {
+            self.add_gif(path);
+        }
         self.files.borrow_mut().insert(path.to_path_buf(), file);
         Some(file)
     }
+}
+
+/// 확장자가 `.gif`인지.
+fn is_gif(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gif"))
 }
 
 /// 그릴 크기. `natural`은 원본 크기(모르면 `None`), `max_width`는 본문 폭.

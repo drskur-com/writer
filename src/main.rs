@@ -21,6 +21,7 @@ mod config;
 mod dock_icon;
 pub mod export;
 mod extension;
+mod gif;
 mod i18n;
 mod icons;
 mod library;

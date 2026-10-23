@@ -60,6 +60,7 @@
 | [0046](./0046-extension-render-threads.md) | 확장 그림은 렌더 스레드들이 그리고, UI는 지난 이미지를 보이다가 다음 프레임에 바꾼다 | Proposed | 2026-10-23 |
 | [0047](./0047-library-themes.md) | 시스템 테마 4개는 바이너리에 두고, 라이브러리 `Themes/*.json`의 테마를 더한다 | Proposed | 2026-10-23 |
 | [0048](./0048-alibaba-token-plan.md) | 어시스턴트 제공자에 Alibaba Token Plan을 더하고, OpenAI 호환 Chat 와이어로 같은 도구 루프를 돈다 | Proposed | 2026-10-23 |
+| [0049](./0049-editor-animated-gif.md) | 움직이는 GIF는 원본을 압축된 채 들고 필요한 프레임만 푼다(에디터 재생, 확장의 `img:frameAt(t)`) | Proposed | 2026-10-24 |
 
 ## 작성 규칙
 

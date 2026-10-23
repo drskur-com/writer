@@ -1681,6 +1681,80 @@ return {
 "#;
 
     #[test]
+    fn draws_gif_frames_by_time() {
+        use ::image::codecs::gif::{GifEncoder, Repeat};
+        let root = std::env::temp_dir().join(format!("writer-gif-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("Notes")).unwrap();
+        std::fs::create_dir_all(root.join(EXTENSIONS_DIR)).unwrap();
+        // 빨강(0.1초) → 초록(0.2초) → 파랑(0.3초), 무한 반복.
+        let mut gif = Vec::new();
+        {
+            let mut encoder = GifEncoder::new(&mut gif);
+            encoder.set_repeat(Repeat::Infinite).unwrap();
+            for (color, ms) in [
+                ([255, 0, 0, 255], 100),
+                ([0, 255, 0, 255], 200),
+                ([0, 0, 255, 255], 300),
+            ] {
+                let frame = ::image::Frame::from_parts(
+                    ::image::RgbaImage::from_pixel(2, 2, ::image::Rgba(color)),
+                    0,
+                    0,
+                    ::image::Delay::from_numer_denom_ms(ms, 1),
+                );
+                encoder.encode_frame(frame).unwrap();
+            }
+        }
+        std::fs::write(root.join("Notes/spin.gif"), gif).unwrap();
+        std::fs::write(
+            root.join(EXTENSIONS_DIR).join("spin.lua"),
+            r#"
+local gif = g.newImage("Notes/spin.gif")
+return {
+  size = { 2, 2 },
+  draw = function(g, t, args)
+    if args.n then
+      g.draw(gif:frame(tonumber(args.n)), 0, 0)
+    else
+      g.draw(gif:frameAt(t), 0, 0)
+    end
+    g.print(gif:getFrameCount() .. " " .. gif:getDuration(), 9, 9)
+  end,
+}"#,
+        )
+        .unwrap();
+        let extension = Extension::open(&root, "spin").unwrap();
+        let color = |t: f32, args: &[(String, String)]| {
+            let shapes = extension.draw(t, args, &Theme::default()).unwrap();
+            let pixmap = render::Renderer::new().render(&shapes, 1.0, 2, 2, None);
+            let p = pixmap.sample(1, 1);
+            ([p.r, p.g, p.b], shapes)
+        };
+        let (first, shapes) = color(0.0, &[]);
+        assert_eq!(first, [255, 0, 0]);
+        assert!(matches!(&shapes[1], Shape::Text { text, .. } if text == "3 0.6"));
+        assert_eq!(color(0.15, &[]).0, [0, 255, 0]);
+        assert_eq!(color(0.45, &[]).0, [0, 0, 255]);
+        // 반복하고, 뒤로 가도 처음부터 다시 푼다.
+        assert_eq!(color(0.65, &[]).0, [255, 0, 0]);
+        assert_eq!(color(0.25, &[]).0, [0, 255, 0]);
+        assert_eq!(color(0.0, &[("n".into(), "3".into())]).0, [0, 0, 255]);
+        let err = extension
+            .draw(0.0, &[("n".into(), "4".into())], &Theme::default())
+            .unwrap_err();
+        assert!(err.contains("frame must be 1 to 3"), "{err}");
+        // 내보내기는 그 프레임을 PNG로 넣는다(움직이는 GIF 원본이 아니다).
+        let still = Still {
+            canvas: (2., 2.),
+            scale: 1.,
+            align: Align::Center,
+            shapes: std::sync::Arc::new(color(0.15, &[]).1),
+        };
+        assert!(svg::to_svg(&still).contains("data:image/png;base64,"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn draws_library_images_with_quads() {
         let root = std::env::temp_dir().join(format!("writer-images-{}", std::process::id()));
         std::fs::create_dir_all(root.join("Notes/Attachments")).unwrap();

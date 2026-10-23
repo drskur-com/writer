@@ -516,7 +516,7 @@ fn draw_shapes(
                 ..
             } => {
                 // 원래 파일을 그대로 넣는다(인쇄 해상도). `src` 밖은 자른다.
-                let data: krilla::Data = image.encoded.clone().into();
+                let data: krilla::Data = image.encoded().clone().into();
                 let pdf_image = match image.format {
                     "png" => Image::from_png(data, true),
                     "jpeg" => Image::from_jpeg(data, true),

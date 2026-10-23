@@ -5,7 +5,10 @@
 //!   뿐 내용을 밖으로 보낼 길이 없다(네트워크·파일 쓰기가 없다).
 //! - 한 번 읽은 그림은 (경로, 바뀐 때, 크기)로 캐시한다. 화면용 픽셀은 긴 변 [`MAX_SIDE`]px까지 줄이고,
 //!   PDF·SVG는 원래 파일(`encoded`)을 넣는다.
+//! - 움직이는 GIF는 첫 프레임으로 그리고, `img:frame(n)`·`img:frameAt(t)`가 그 프레임을 낸다(ADR-0049). 프레임은
+//!   스레드마다 둔 디코더로 앞에서부터 차례로 풀고(차례로 재생하면 프레임마다 하나만 푼다), 최근 몇 장만 남긴다.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -21,6 +24,12 @@ pub const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// 캐시에 두는 그림 수.
 const CACHE_LIMIT: usize = 32;
+
+/// 그림마다 남기는 최근 프레임 수.
+const FRAME_CACHE: usize = 4;
+
+/// 스레드마다 두는 GIF 디코더 수.
+const CURSOR_LIMIT: usize = 8;
 
 /// 읽을 수 있는 확장자.
 pub const EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
@@ -40,11 +49,108 @@ pub struct ImageData {
     pub height: u32,
     /// 화면용 픽셀(곱하지 않은 RGBA). 크면 줄였으므로 크기가 `width`·`height`와 다를 수 있다.
     pub rgba: image::RgbaImage,
-    /// 원래 파일(PDF·SVG에 넣는다)과 그 형식(`png`, `jpeg`, …).
-    pub encoded: Arc<Vec<u8>>,
+    /// 원래 파일(PDF·SVG에 넣는다)과 그 형식(`png`, `jpeg`, …). GIF의 프레임은 처음 쓸 때 PNG로 만든다.
+    encoded: OnceLock<Arc<Vec<u8>>>,
     pub format: &'static str,
     /// 그리는 쪽이 만들어 두는 것(vello 픽셀 등).
     pub(super) prepared: OnceLock<Arc<vello_cpu::Pixmap>>,
+    /// 프레임이 여럿인 GIF의 프레임 수·표시 시간·반복.
+    pub animation: Option<crate::gif::Info>,
+    /// 최근에 푼 프레임(번호, 그림).
+    frames: Mutex<Vec<(usize, Arc<ImageData>)>>,
+}
+
+impl ImageData {
+    /// PDF·SVG에 넣을 파일.
+    pub fn encoded(&self) -> &Arc<Vec<u8>> {
+        self.encoded.get_or_init(|| {
+            let mut png = Vec::new();
+            self.rgba
+                .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                .ok();
+            Arc::new(png)
+        })
+    }
+
+    /// 움직이는 GIF의 `index`번(0부터) 프레임. 움직이지 않는 그림은 자기 자신이다.
+    pub fn frame(self: &Arc<Self>, index: usize) -> Result<Arc<ImageData>, String> {
+        let Some(info) = &self.animation else {
+            return Ok(self.clone());
+        };
+        let index = index.min(info.frames() - 1);
+        let mut frames = self.frames.lock().unwrap_or_else(|err| err.into_inner());
+        if let Some((_, frame)) = frames.iter().find(|(ix, _)| *ix == index) {
+            return Ok(frame.clone());
+        }
+        let rgba = decode_frame(self, index)
+            .ok_or_else(|| format!("frame {} of the GIF cannot be read", index + 1))?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (self.id, index).hash(&mut hasher);
+        let frame = Arc::new(ImageData {
+            id: hasher.finish(),
+            width: self.width,
+            height: self.height,
+            rgba: shrink(rgba),
+            encoded: OnceLock::new(),
+            format: "png",
+            prepared: OnceLock::new(),
+            animation: None,
+            frames: Mutex::default(),
+        });
+        if frames.len() >= FRAME_CACHE {
+            frames.remove(0);
+        }
+        frames.push((index, frame.clone()));
+        Ok(frame)
+    }
+}
+
+/// 이 스레드의 GIF 디코더: 다음에 낼 프레임 번호와 프레임들.
+struct FrameCursor {
+    next: usize,
+    frames: crate::gif::Frames,
+}
+
+thread_local! {
+    /// 그림 `id`별 디코더. 프레임 반복자는 스레드를 넘지 못해 스레드마다 둔다.
+    static CURSORS: RefCell<HashMap<u64, FrameCursor>> = RefCell::default();
+}
+
+/// `index`번 프레임을 합성해 푼다. 앞으로 가면 이어서 풀고, 뒤로 가면 처음부터 푼다.
+fn decode_frame(image: &ImageData, index: usize) -> Option<image::RgbaImage> {
+    CURSORS.with(|cursors| {
+        let mut cursors = cursors.borrow_mut();
+        let mut cursor = cursors
+            .remove(&image.id)
+            .filter(|cursor| cursor.next <= index)
+            .unwrap_or_else(|| FrameCursor {
+                next: 0,
+                frames: crate::gif::Frames::new(image.encoded().clone(), crate::gif::Repeat::Once),
+            });
+        while cursor.next < index {
+            cursor.frames.next()?;
+            cursor.next += 1;
+        }
+        let frame = cursor.frames.next()?;
+        cursor.next += 1;
+        if cursors.len() >= CURSOR_LIMIT {
+            cursors.clear();
+        }
+        cursors.insert(image.id, cursor);
+        Some(frame.into_buffer())
+    })
+}
+
+/// 화면용 픽셀: 긴 변을 [`MAX_SIDE`] 안으로 줄인다.
+fn shrink(rgba: image::RgbaImage) -> image::RgbaImage {
+    let (width, height) = rgba.dimensions();
+    if width.max(height) <= MAX_SIDE {
+        return rgba;
+    }
+    let fit = MAX_SIDE as f32 / width.max(height) as f32;
+    let w = ((width as f32 * fit).round() as u32).max(1);
+    let h = ((height as f32 * fit).round() as u32).max(1);
+    image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle)
 }
 
 impl PartialEq for ImageData {
@@ -153,13 +259,11 @@ fn decode(path: &Path, stamp: (SystemTime, u64), encoded: Vec<u8>) -> Result<Ima
     if width == 0 || height == 0 {
         return Err("the image is empty".into());
     }
-    let rgba = if width.max(height) > MAX_SIDE {
-        decoded
-            .resize(MAX_SIDE, MAX_SIDE, image::imageops::FilterType::Triangle)
-            .into_rgba8()
-    } else {
-        decoded.into_rgba8()
-    };
+    let rgba = shrink(decoded.into_rgba8());
+    let animation = (format == image::ImageFormat::Gif)
+        .then(|| crate::gif::scan(&encoded))
+        .flatten()
+        .filter(|info| info.frames() > 1);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (path, stamp).hash(&mut hasher);
     Ok(ImageData {
@@ -167,9 +271,11 @@ fn decode(path: &Path, stamp: (SystemTime, u64), encoded: Vec<u8>) -> Result<Ima
         width,
         height,
         rgba,
-        encoded: Arc::new(encoded),
+        encoded: OnceLock::from(Arc::new(encoded)),
         format: name,
         prepared: OnceLock::new(),
+        animation,
+        frames: Mutex::default(),
     })
 }
 

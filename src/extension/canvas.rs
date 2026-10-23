@@ -1268,6 +1268,7 @@ pub(super) fn create(
                 Ok(LuaImage {
                     image: image?,
                     smooth: true,
+                    deadline: deadline.clone(),
                 })
             })?,
         )?;
@@ -1551,6 +1552,21 @@ fn print(
 struct LuaImage {
     image: std::sync::Arc<super::image::ImageData>,
     smooth: bool,
+    /// 호출 시간 제한. GIF 프레임을 푸는 시간은 뺀다.
+    deadline: Rc<std::cell::Cell<std::time::Instant>>,
+}
+
+impl LuaImage {
+    /// 움직이는 GIF의 `index`번(0부터) 프레임. 같은 필터를 쓴다.
+    fn frame(&self, index: usize) -> mlua::Result<LuaImage> {
+        let started = std::time::Instant::now();
+        let frame = self.image.frame(index);
+        self.deadline.set(self.deadline.get() + started.elapsed());
+        Ok(LuaImage {
+            image: frame.map_err(mlua::Error::runtime)?,
+            ..self.clone()
+        })
+    }
 }
 
 impl mlua::UserData for LuaImage {
@@ -1559,6 +1575,40 @@ impl mlua::UserData for LuaImage {
         methods.add_method("getHeight", |_, this, ()| Ok(this.image.height));
         methods.add_method("getDimensions", |_, this, ()| {
             Ok((this.image.width, this.image.height))
+        });
+        // 움직이는 GIF(ADR-0049). 움직이지 않는 그림은 프레임 1개, 길이 0이고 frame·frameAt은 자기 자신이다.
+        methods.add_method("getFrameCount", |_, this, ()| {
+            Ok(this
+                .image
+                .animation
+                .as_ref()
+                .map_or(1, |info| info.frames()))
+        });
+        methods.add_method("getDuration", |_, this, ()| {
+            Ok(this
+                .image
+                .animation
+                .as_ref()
+                .map_or(0.0, |info| info.duration().as_secs_f64()))
+        });
+        // frame(n): n번째(1부터) 프레임.
+        methods.add_method("frame", |_, this, n: i64| {
+            let count = this
+                .image
+                .animation
+                .as_ref()
+                .map_or(1, |info| info.frames());
+            if n < 1 || n as usize > count {
+                return Err(mlua::Error::runtime(format!(
+                    "image:frame: frame must be 1 to {count}, got {n}"
+                )));
+            }
+            this.frame(n as usize - 1)
+        });
+        // frameAt(t): 재생을 시작한 지 t초의 프레임. GIF의 표시 시간과 반복 횟수를 따른다.
+        methods.add_method("frameAt", |_, this, t: f64| match &this.image.animation {
+            Some(info) => this.frame(crate::gif::frame_at(info, t)),
+            None => Ok(this.clone()),
         });
         // setFilter(min[, mag]): "linear"(기본) 또는 "nearest". 키울 때(mag)를 따른다.
         methods.add_method_mut("setFilter", |_, this, (min, mag): (String, Option<String>)| {

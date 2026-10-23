@@ -148,6 +148,9 @@ Extensions can draw image files from the library: photos the user attached, or p
 |---|---|
 | `g.newImage(path)` | Load a PNG, JPEG, GIF, or WebP. `path` is relative to the library, like `"Notes/Attachments/photo.jpg"` (the path the user writes in the block, e.g. `src:`); a folder extension looks in its own folder first (`"sprite.png"`). Paths outside the library or with `..` fail. Loading at the top of the file is fine for fixed pictures; inside `draw` it is cached. |
 | `img:getWidth()`, `img:getHeight()`, `img:getDimensions()` | The image's size in pixels. |
+| `img:getFrameCount()`, `img:getDuration()` | An animated GIF's number of frames and the length of one loop in seconds. A still image has 1 frame and duration 0. |
+| `img:frameAt(t)` | The GIF frame shown `t` seconds after it starts, following the GIF's own frame times and loop count; draw it with `g.draw`. Pass the `t` of `draw` and set `animated = true` to play the GIF in a block (and `period = img:getDuration()` if at most 10 s). A still image returns itself. |
+| `img:frame(n)` | The `n`th frame (from 1). |
 | `img:setFilter("nearest")` | Enlarge pixel art without smoothing (`"linear"` is the default). |
 | `g.newQuad(x, y, w, h, sw, sh)` | A part of an image in its pixels (a cell of a sprite sheet). |
 | `g.draw(img[, quad], x, y[, r, sx, sy, ox, oy])` | Draw the image (or the quad) with its top-left at `x, y`, as in LÖVE: turned by `r` around `x, y`, scaled by `sx, sy` (default 1; `sy` defaults to `sx`), with `ox, oy` (image pixels) as the point placed at `x, y`. It follows the transform, clipping, shadows, and blend modes; the current color's alpha sets its opacity (its color is not mixed in). |

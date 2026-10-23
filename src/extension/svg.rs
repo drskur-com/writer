@@ -57,7 +57,7 @@ pub fn to_svg(still: &Still) -> String {
                 use base64::Engine as _;
                 // 원래 파일을 data URI로 넣는다. 안쪽 <svg>가 `src` 밖을 자른다.
                 let data =
-                    base64::engine::general_purpose::STANDARD.encode(image.encoded.as_slice());
+                    base64::engine::general_purpose::STANDARD.encode(image.encoded().as_slice());
                 let matrix: Vec<String> = transform.iter().map(|v| num(*v)).collect();
                 let _ = writeln!(
                     body,

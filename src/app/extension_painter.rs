@@ -207,8 +207,13 @@ fn render(renderer: &mut Renderer, job: &Job) -> Option<RenderImage> {
     Some(RenderImage::new([image::Frame::new(buffer)]))
 }
 
+/// `window` 창에 그렸던 `image`를 다음에 그 창에서 그릴 때 아틀라스에서 지운다.
+pub(super) fn retire(window: WindowId, image: Arc<RenderImage>) {
+    STALE.with(|stale| stale.borrow_mut().push((window, image)));
+}
+
 /// 이 창의 지울 이미지를 지우고, 닫힌 창의 것은 버린다(아틀라스도 함께 사라졌다).
-fn drop_stale(window_id: WindowId, window: &mut Window, cx: &App) {
+pub(super) fn drop_stale(window_id: WindowId, window: &mut Window, cx: &App) {
     let stale = STALE.with(|stale| std::mem::take(&mut *stale.borrow_mut()));
     if stale.is_empty() {
         return;

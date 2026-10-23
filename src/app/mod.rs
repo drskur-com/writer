@@ -18,6 +18,7 @@ mod extension_actions;
 mod extension_commands;
 mod extension_painter;
 mod file_view;
+mod gif_player;
 mod insert_extension;
 mod insert_footnote;
 mod insert_image;
