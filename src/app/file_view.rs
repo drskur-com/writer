@@ -1,7 +1,8 @@
 //! 파일 그룹(첨부파일 등): 사이드바 2단의 파일 목록과, 에디터 자리의 간단한 뷰어.
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogButtonProps;
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tooltip::Tooltip;
@@ -14,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use super::WriterApp;
 use super::editor::EDITOR_MAX_WIDTH;
+use super::library_panel::menu_row;
 use super::sheet_list::DraggedSheet;
 use super::style::*;
 use crate::{icons, library};
@@ -121,6 +123,59 @@ impl WriterApp {
         cx.notify();
     }
 
+    /// 확인을 받은 뒤 파일 그룹의 파일을 운영체제 휴지통으로 옮긴다.
+    fn confirm_trash_file(
+        &mut self,
+        path: PathBuf,
+        label: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let app = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (app, path) = (app.clone(), path.clone());
+            alert
+                .confirm()
+                .title(t!("library.file.delete_title"))
+                .description(t!("library.file.delete_one", label = label))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(t!("common.delete"))
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text(t!("common.cancel")),
+                )
+                .on_ok(move |_, window, cx| {
+                    app.update(cx, |app, cx| app.trash_file(&path, window, cx))
+                        .ok();
+                    true
+                })
+        });
+    }
+
+    /// 파일을 휴지통으로 옮기고 라이브러리를 다시 읽는다. 열어 둔 파일이면 닫는다.
+    /// 그룹 메타의 파일 순서(`files`)에 남은 이름은 읽을 때 건너뛴다.
+    fn trash_file(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.library.as_ref().map(|lib| lib.root.clone()) else {
+            return;
+        };
+        if let Err(err) = library::move_to_trash(path) {
+            self.notify(t!("library.file.delete_failed", err = err), window, cx);
+            return;
+        }
+        if self
+            .open_file
+            .as_ref()
+            .is_some_and(|file| file.path == path)
+        {
+            self.open_file = None;
+        }
+        match library::scan(&root) {
+            Ok(scanned) => self.library = Some(scanned),
+            Err(err) => self.notify(t!("library.file.delete_failed", err = err), window, cx),
+        }
+        cx.notify();
+    }
+
     /// 경로로 파일 그룹의 파일을 찾는다.
     fn find_file(&self, path: &Path) -> Option<library::FileItem> {
         let group = self.library.as_ref()?.find_group(path.parent()?)?;
@@ -221,6 +276,8 @@ impl WriterApp {
                 );
             let path = file.path.clone();
             let label = SharedString::from(file.name());
+            let app = cx.entity().downgrade();
+            let (trash_path, trash_label) = (file.path.clone(), label.clone());
             let row = div()
                 .id(SharedString::from(format!("file-{}", file.path.display())))
                 .h(px(FILE_ROW_HEIGHT))
@@ -242,7 +299,7 @@ impl WriterApp {
                         .child(text),
                 );
             // 끌어다 놓을 자리는 줄의 위/아래 선으로 보여 준다(시트 목록과 같다).
-            match &manual_group {
+            let row = match &manual_group {
                 Some(group_path) => {
                     let group_path = group_path.clone();
                     let dragged = DraggedSheet {
@@ -274,7 +331,22 @@ impl WriterApp {
                         )
                 }
                 None => row,
-            }
+            };
+            row.context_menu(move |menu, _, cx| {
+                let danger = cx.theme().danger;
+                let (app, path, label) = (app.clone(), trash_path.clone(), trash_label.clone());
+                menu.min_w(px(200.0)).item(
+                    PopupMenuItem::element(move |_, _| {
+                        menu_row(icons::trash(), t!("common.move_to_trash"), Some(danger))
+                    })
+                    .on_click(move |_, window, cx| {
+                        app.update(cx, |app, cx| {
+                            app.confirm_trash_file(path.clone(), label.clone(), window, cx)
+                        })
+                        .ok();
+                    }),
+                )
+            })
         });
         div()
             .id("file-list")

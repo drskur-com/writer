@@ -77,6 +77,9 @@ pub const TEMPLATES_GROUP: &str = "Templates";
 /// 첨부파일(표지 등) 추가자료 그룹. 처음 첨부할 때 만든다. 메모는 `Notes/` 바로 아래에 같은 이름으로 둔다.
 pub const ATTACHMENTS_GROUP: &str = "Attachments";
 
+/// 첨부파일 그룹의 기본 색 이름(`project_color`). 메타에 색을 고르면 그 색을 쓴다.
+const ATTACHMENTS_COLOR: &str = "cyan";
+
 /// 라이브러리의 메모 섹션 폴더(`<라이브러리>/Notes`)인지.
 pub(crate) fn is_notes_dir(dir: &Path) -> bool {
     dir.ends_with(SectionKind::Notes.dir()) && dir.parent().is_some_and(has_marker)
@@ -253,6 +256,18 @@ pub struct Group {
 }
 
 impl Group {
+    /// 사이드바에 쓸 색 이름. 메타에 색이 없으면 첨부파일 그룹은 다른 그룹과 구별되게 청록색이다.
+    pub fn display_color(&self) -> Option<&str> {
+        self.color.as_deref().or_else(|| {
+            (self
+                .path
+                .file_name()
+                .is_some_and(|name| name == ATTACHMENTS_GROUP)
+                && is_reserved_group(&self.path))
+            .then_some(ATTACHMENTS_COLOR)
+        })
+    }
+
     /// 이 그룹과 모든 하위·추가자료 그룹(깊이 우선).
     pub fn descendants(&self) -> Vec<&Group> {
         let mut out = Vec::new();

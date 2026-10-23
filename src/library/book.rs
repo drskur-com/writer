@@ -358,6 +358,10 @@ mod tests {
         assert_eq!(group.kind, GroupKind::Files);
         assert_eq!(group.name, "첨부파일");
         assert_eq!(group.files.len(), 2);
+        // 첨부파일 그룹은 색을 고르지 않아도 다른 그룹과 다른 색으로 보인다.
+        assert_eq!(group.display_color(), Some("cyan"));
+        let inbox = library.find_group(&notes.join("Inbox")).unwrap();
+        assert_eq!(inbox.display_color(), None);
 
         std::fs::remove_dir_all(&root).ok();
     }

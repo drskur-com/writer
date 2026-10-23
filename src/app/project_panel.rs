@@ -391,8 +391,7 @@ impl WriterApp {
             icons::group_icon(Some(group.icon.as_deref().unwrap_or(default_icon))),
             group.name.clone().into(),
             group
-                .color
-                .as_deref()
+                .display_color()
                 .and_then(|color| project_color(color, cx.theme())),
             self.group_is_selected(&group.path, current),
             selection,
