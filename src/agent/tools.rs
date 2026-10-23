@@ -10,8 +10,9 @@
 //! - TOML 파일은 쓰기 전에 문법을, 그룹 메타는 앱이 읽는 모양까지 검사한다. 깨진 글은 쓰지 않는다.
 //!
 //! 라이브러리에 스킬(`Skills/`)이 있으면 스킬 본문을 읽는 `load_skill`도 준다([`super::skills`]).
-//! `run_extension`은 확장(`Extensions/<이름>.lua`, ADR-0026)을 실행해 오류와 그린 결과를 알려 준다.
-//! 모델이 쓴 확장을 스스로 확인하고 고치게 한다.
+//! `run_extension`은 확장(`Extensions/<이름>.lua` 또는 폴더 `Extensions/<이름>/`, ADR-0026·0039)을 실행해 오류와
+//! 그린 결과를 알려 준다. 모델이 쓴 확장을 스스로 확인하고 고치게 한다. 확장 파일의 변경은 초안으로 모았다가
+//! 답이 끝나면 확장마다(폴더면 그 안의 파일을 함께) 한 번 승인받는다(ADR-0029).
 //!
 //! 도구 설명과 결과(오류 포함)는 모델이 읽으므로 영어로 쓴다. 화면에 보이는 요약 줄(`summary`)만
 //! 사용자 언어다.
@@ -76,6 +77,8 @@ pub struct PendingChange {
 #[derive(Clone, Debug)]
 enum Target {
     File(PathBuf),
+    /// 폴더 확장 하나의 파일들(ADR-0039). 함께 승인하고 함께 쓴다.
+    Files(Vec<FileChange>),
     /// `dir`에 새 시트를 만든다. `group`은 루트 기준 그룹 경로.
     NewSheet {
         dir: PathBuf,
@@ -83,18 +86,45 @@ enum Target {
     },
 }
 
+/// 폴더 확장의 파일 하나의 변경. `after`가 `None`이면 휴지통으로 옮긴다(파일 하나 확장을 폴더로 바꿀 때).
+#[derive(Clone, Debug)]
+struct FileChange {
+    /// 라이브러리 루트 기준 경로.
+    path: String,
+    file: PathBuf,
+    before: Option<String>,
+    after: Option<String>,
+}
+
 impl PendingChange {
-    /// 승인 카드에 보일 변경 내용.
+    /// 승인 카드에 보일 변경 내용. 파일이 여럿이면 파일마다 머리줄을 둔다.
     pub fn diff(&self) -> Vec<DiffLine> {
+        if let Target::Files(files) = &self.target {
+            return files
+                .iter()
+                .flat_map(|change| {
+                    let lines = match (&change.before, &change.after) {
+                        (Some(before), Some(after)) => diff::diff(before, after),
+                        (None, Some(after)) => diff::added(after),
+                        (Some(before), None) => diff::removed(before),
+                        (None, None) => Vec::new(),
+                    };
+                    std::iter::once(diff::file(&change.path)).chain(lines)
+                })
+                .collect();
+        }
         match &self.before {
             Some(before) => diff::diff(before, &self.after),
             None => diff::added(&self.after),
         }
     }
 
-    /// 새 파일(새 시트 포함)을 만드는지.
+    /// 새 파일(새 시트·새 폴더 확장 포함)을 만드는지.
     pub fn is_new(&self) -> bool {
-        self.before.is_none()
+        match &self.target {
+            Target::Files(files) => files.iter().all(|change| change.before.is_none()),
+            _ => self.before.is_none(),
+        }
     }
 }
 
@@ -124,7 +154,7 @@ pub struct Drawing {
     pub canvas: (f32, f32),
     /// 격자에 넣은 프레임 수.
     pub frames: usize,
-    /// 그린 소스. 그 뒤에 초안을 고쳤는지 알아보는 데 쓴다.
+    /// 그린 소스(폴더면 모든 파일, [`fingerprint`]). 그 뒤에 초안을 고쳤는지 알아보는 데 쓴다.
     pub source: String,
 }
 
@@ -236,7 +266,8 @@ impl Workspace {
             ),
             (
                 RUN_EXTENSION,
-                "Test an extension (Extensions/<name>.lua). Without command, calls draw(g, t, args) and reports \
+                "Test an extension (Extensions/<name>.lua, or the folder Extensions/<name>/ with init.lua and its modules), \
+                 using your drafts. Without command, calls draw(g, t, args) and reports \
                  errors, the number of shapes, and the bounds of what was drawn compared with the canvas, and attaches \
                  a picture of the canvas so you can see the drawing. Pass times to see several animation frames in one \
                  picture. For an extension with value(args, ctx) (inline {{name ...}} text), also reports the text it returns. \
@@ -247,7 +278,7 @@ impl Workspace {
                 json!({
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string", "description": "Extension name (the file name without .lua)." },
+                        "name": { "type": "string", "description": "Extension name (the file name without .lua, or the folder name)." },
                         "t": { "type": "number", "description": "Time in seconds for draw. Default 0." },
                         "times": {
                             "type": "array",
@@ -277,8 +308,8 @@ impl Workspace {
             (
                 WRITE,
                 "Write one file that is not a sheet (settings, skills, scripts, and so on) in the library with the \
-                 given content. An existing file is replaced entirely. The folder must already exist. Create new \
-                 sheets with create_sheet, and change part of an existing file with edit_file.",
+                 given content. An existing file is replaced entirely. The folder must already exist, except inside a folder \
+                 extension (Extensions/<name>/...), whose folders are made on approval. Create new sheets with create_sheet, and change part of an existing file with edit_file.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -313,7 +344,7 @@ impl Workspace {
     pub fn plan(&self, name: &str, arguments: &Map<String, Value>) -> Planned {
         if name == RUN_EXTENSION {
             let extension = arguments.get("name").and_then(Value::as_str).unwrap_or("");
-            let path = format!("{}/{extension}.lua", crate::extension::EXTENSIONS_DIR);
+            let path = self.extension_shown(extension);
             let (result, image) = match self.run_extension(arguments) {
                 Ok((report, image)) => (Ok(report), image),
                 Err(err) => (Err(err), None),
@@ -345,6 +376,9 @@ impl Workspace {
                 self.plan_sheet(path, content)
             }
             WRITE => match arguments.get("content").and_then(Value::as_str) {
+                Some(content) if draft_key(path).is_some() => {
+                    self.plan_extension_write(path, content)
+                }
                 Some(content) => self.plan_write(path, content),
                 None => Err("content is missing.".into()),
             },
@@ -406,22 +440,31 @@ impl Workspace {
         &self,
         reviews: &std::collections::HashMap<String, (String, Option<u8>)>,
     ) -> Vec<String> {
-        let Ok(drafts) = self.drafts.lock() else {
-            return Vec::new();
+        let names: std::collections::BTreeSet<String> = match self.drafts.lock() {
+            Ok(drafts) => drafts
+                .keys()
+                .filter_map(|key| draft_extension(key))
+                .map(ToString::to_string)
+                .collect(),
+            Err(_) => return Vec::new(),
         };
-        drafts
+        names
             .iter()
-            .filter_map(|(key, draft)| {
-                let name = key.rsplit('/').next()?.strip_suffix(".lua")?;
-                let extension = match crate::extension::Extension::load(name, &draft.after) {
+            .filter_map(|name| {
+                let key = self.extension_shown(name);
+                let source = match self.extension_source(name) {
+                    Ok(source) => source,
+                    Err(err) => return Some(format!("{key} does not load: {err}")),
+                };
+                let extension = match crate::extension::Extension::load_package(name, &source) {
                     Ok(extension) => extension,
                     Err(err) => return Some(format!("{key} does not load: {err}")),
                 };
                 if !extension.draws {
                     return None;
                 }
-                match reviews.get(name) {
-                    Some((source, _)) if *source != draft.after => Some(format!(
+                match reviews.get(name.as_str()) {
+                    Some((reviewed, _)) if *reviewed != fingerprint(&source) => Some(format!(
                         "{key} changed after its last run_extension, so nobody has looked at the current picture."
                     )),
                     None => Some(format!(
@@ -437,12 +480,75 @@ impl Workspace {
             .collect()
     }
 
-    /// 이번 답의 확장 초안을 꺼낸다(답이 끝날 때 승인받는다).
+    /// 이번 답의 확장 초안을 확장마다 하나의 변경으로 꺼낸다(답이 끝날 때 승인받는다). 폴더 확장은 그 안의
+    /// 파일들을 함께 담고, 파일 하나 확장을 폴더로 바꿨으면 옛 파일을 휴지통으로 옮기는 것도 담는다.
     pub fn take_drafts(&self) -> Vec<PendingChange> {
-        self.drafts
+        let drafts = self
+            .drafts
             .lock()
-            .map(|mut drafts| std::mem::take(&mut *drafts).into_values().collect())
-            .unwrap_or_default()
+            .map(|mut drafts| std::mem::take(&mut *drafts))
+            .unwrap_or_default();
+        let mut by_extension: BTreeMap<String, Vec<PendingChange>> = BTreeMap::new();
+        for (key, draft) in drafts {
+            if let Some(name) = draft_extension(&key) {
+                by_extension.entry(name.to_string()).or_default().push(draft);
+            }
+        }
+        by_extension
+            .into_iter()
+            .map(|(name, mut drafts)| {
+                let single = format!("{}/{name}.lua", crate::extension::EXTENSIONS_DIR);
+                let folder = drafts.iter().any(|draft| draft.path != single)
+                    || crate::extension::package::is_folder(&self.root, &name);
+                if !folder {
+                    return drafts.remove(0);
+                }
+                let mut files: Vec<FileChange> = drafts
+                    .into_iter()
+                    .filter(|draft| draft.path != single)
+                    .filter_map(|draft| match draft.target {
+                        Target::File(file) => Some(FileChange {
+                            path: draft.path,
+                            file,
+                            before: draft.before,
+                            after: Some(draft.after),
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                let old = crate::extension::package::single_file(&self.root, &name);
+                if let Ok(before) = crate::library::read_sheet(&old) {
+                    files.push(FileChange {
+                        path: single.clone(),
+                        file: old,
+                        before: Some(before),
+                        after: None,
+                    });
+                }
+                PendingChange {
+                    path: format!("{}/{name}/", crate::extension::EXTENSIONS_DIR),
+                    before: None,
+                    after: String::new(),
+                    target: Target::Files(files),
+                    done: format!("Wrote the extension folder {name}/."),
+                    verb: "assistant.tool.wrote",
+                }
+            })
+            .collect()
+    }
+
+    /// 화면과 모델에 보일 확장 자리: 폴더 확장(디스크 또는 초안)이면 `Extensions/<이름>/`.
+    pub fn extension_shown(&self, name: &str) -> String {
+        let prefix = format!("{}/{name}/", crate::extension::EXTENSIONS_DIR);
+        let drafted = self
+            .drafts
+            .lock()
+            .is_ok_and(|drafts| drafts.keys().any(|key| key.starts_with(&prefix)));
+        if drafted || crate::extension::package::is_folder(&self.root, name) {
+            prefix
+        } else {
+            format!("{}/{name}.lua", crate::extension::EXTENSIONS_DIR)
+        }
     }
 
     fn draft(&self, path: &str) -> Option<PendingChange> {
@@ -450,13 +556,42 @@ impl Workspace {
         self.drafts.lock().ok()?.get(&key).cloned()
     }
 
-    /// 확장 소스: 초안이 있으면 초안, 없으면 파일.
-    fn extension_source(&self, name: &str) -> Result<String, String> {
-        let key = format!("{}/{name}.lua", crate::extension::EXTENSIONS_DIR);
-        match self.draft(&key) {
-            Some(draft) if crate::extension::valid_name(name) => Ok(draft.after),
-            _ => crate::extension::read_source(&self.root, name),
+    /// 확장 소스: 파일(폴더면 그 안의 파일들) 위에 초안을 덮은 것.
+    fn extension_source(&self, name: &str) -> Result<crate::extension::Package, String> {
+        use crate::extension::{EXTENSIONS_DIR, Package, package};
+        if !crate::extension::valid_name(name) {
+            return crate::extension::read_source(&self.root, name);
         }
+        let prefix = format!("{EXTENSIONS_DIR}/{name}/");
+        let drafted: Vec<(String, String)> = self
+            .drafts
+            .lock()
+            .map(|drafts| {
+                drafts
+                    .iter()
+                    .filter_map(|(key, draft)| {
+                        Some((key.strip_prefix(&prefix)?.to_string(), draft.after.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let on_disk = package::is_folder(&self.root, name);
+        if drafted.is_empty() && !on_disk {
+            return match self.draft(&format!("{EXTENSIONS_DIR}/{name}.lua")) {
+                Some(draft) => Ok(draft.after.into()),
+                None => crate::extension::read_source(&self.root, name),
+            };
+        }
+        let mut files: BTreeMap<String, String> = BTreeMap::new();
+        if on_disk {
+            let disk = package::read_folder(&package::folder(&self.root, name))
+                .map_err(|err| format!("{prefix}: {err}"))?;
+            files.insert(package::ENTRY_FILE.to_string(), disk.main);
+            files.extend(disk.modules.into_values());
+        }
+        files.extend(drafted);
+        Package::from_files(files.iter().map(|(path, source)| (path.as_str(), source.as_str())))
+            .map_err(|err| format!("{prefix}: {err}"))
     }
 
     /// 승인한 변경을 쓴다. 기다리는 동안 파일이 바뀌었으면 쓰지 않는다.
@@ -485,6 +620,32 @@ impl Workspace {
                 Ok(change.done)
             }
             Target::NewSheet { dir, group } => self.create_sheet(&dir, &group, &change.after),
+            Target::Files(files) => {
+                // 하나라도 그사이 바뀌었으면 아무것도 쓰지 않는다.
+                for file in &files {
+                    let current = crate::library::read_sheet(&file.file).ok();
+                    if current != file.before {
+                        return Err(format!(
+                            "{} changed while waiting for approval. Read it again before retrying.",
+                            file.path
+                        ));
+                    }
+                }
+                for file in &files {
+                    match &file.after {
+                        Some(after) => {
+                            if let Some(parent) = file.file.parent() {
+                                std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+                            }
+                            crate::library::write_sheet(&file.file, after)
+                                .map_err(|err| format!("{}: {err}", file.path))?;
+                        }
+                        None => crate::library::move_to_trash(&file.file)
+                            .map_err(|err| format!("{}: {err}", file.path))?,
+                    }
+                }
+                Ok(change.done)
+            }
         }
     }
 
@@ -512,10 +673,10 @@ impl Workspace {
         let name = arguments.get("name").and_then(Value::as_str).unwrap_or("");
         let source = self.extension_source(name).ok();
         let draws = source
-            .as_deref()
-            .and_then(|source| crate::extension::Extension::load(name, source).ok())
+            .as_ref()
+            .and_then(|source| crate::extension::Extension::load_package(name, source).ok())
             .is_some_and(|ext| ext.draws);
-        let meta = source.and_then(|source| crate::extension::parse_meta(name, &source));
+        let meta = source.and_then(|source| crate::extension::parse_meta(name, &source.main));
         let mut notes = Vec::new();
         match &meta {
             None => notes.push(
@@ -580,7 +741,7 @@ impl Workspace {
         use crate::extension::{CommandContext, Extension, Theme, Ui};
         let name = arguments.get("name").and_then(Value::as_str).unwrap_or("");
         let source = self.extension_source(name)?;
-        let extension = Extension::load(name, &source)?;
+        let extension = Extension::load_package(name, &source)?;
         let commands = if extension.commands.is_empty() {
             "none".to_string()
         } else {
@@ -749,7 +910,7 @@ impl Workspace {
                         png,
                         canvas: (width, height),
                         frames: frames.len(),
-                        source,
+                        source: fingerprint(&source),
                     })
                 }
                 Err(err) => {
@@ -762,7 +923,37 @@ impl Workspace {
     }
 
     fn list(&self, path: &str) -> Result<String, String> {
-        let dir = self.resolve_existing(path)?;
+        let relative = relative_path(path)?;
+        // 아직 파일이 없는 확장 초안(폴더 확장의 새 폴더 포함)도 보인다.
+        let drafted: Vec<String> = self
+            .drafts
+            .lock()
+            .map(|drafts| {
+                drafts
+                    .keys()
+                    .filter_map(|key| {
+                        let rest = Path::new(key).strip_prefix(&relative).ok()?;
+                        let mut parts = rest.components();
+                        let first = parts.next()?.as_os_str().to_str()?.to_string();
+                        Some(if parts.next().is_some() {
+                            format!("{first}/")
+                        } else {
+                            first
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let dir = match self.resolve_existing(path) {
+            Ok(dir) => dir,
+            Err(_) if !drafted.is_empty() => {
+                let mut entries = drafted;
+                entries.sort();
+                entries.dedup();
+                return Ok(entries.join("\n"));
+            }
+            Err(err) => return Err(err),
+        };
         if !dir.is_dir() {
             return Err("Not a folder.".into());
         }
@@ -778,15 +969,9 @@ impl Workspace {
                 Some(if is_dir { format!("{name}/") } else { name })
             })
             .collect();
-        // 아직 파일이 없는 확장 초안도 보인다.
-        if relative_path(path).is_ok_and(|dir| dir == Path::new(crate::extension::EXTENSIONS_DIR))
-            && let Ok(drafts) = self.drafts.lock()
-        {
-            for key in drafts.keys() {
-                let name = key.rsplit('/').next().unwrap_or(key).to_string();
-                if !entries.contains(&name) {
-                    entries.push(name);
-                }
+        for name in drafted {
+            if !entries.contains(&name) {
+                entries.push(name);
             }
         }
         entries.sort();
@@ -870,6 +1055,59 @@ impl Workspace {
             after: content.to_string(),
             target: Target::File(file),
             done: format!("Wrote {} characters.", content.chars().count()),
+            verb: "assistant.tool.wrote",
+        })
+    }
+
+    /// 확장 파일 쓰기(초안이 된다). 폴더 확장의 파일은 폴더가 아직 없어도 된다(승인하면 만든다).
+    fn plan_extension_write(&self, path: &str, content: &str) -> Result<PendingChange, String> {
+        use crate::extension::{EXTENSIONS_DIR, package};
+        let relative = relative_path(path)?;
+        check_content(&relative, content)?;
+        let key = draft_key(path).ok_or("Not an extension file.")?;
+        let name = draft_extension(&key).ok_or("Not an extension file.")?;
+        let in_folder = key.starts_with(&format!("{EXTENSIONS_DIR}/{name}/"));
+        if !in_folder && package::folder(&self.root, name).is_dir() {
+            return Err(format!(
+                "{name} is a folder extension: write {EXTENSIONS_DIR}/{name}/{} and its modules instead.",
+                package::ENTRY_FILE
+            ));
+        }
+        if !self.root.join(EXTENSIONS_DIR).is_dir() {
+            return Err(format!("The {EXTENSIONS_DIR} folder does not exist."));
+        }
+        // 길 위의 심볼릭 링크는 루트 밖을 가리킬 수 있다.
+        let mut at = self.root.clone();
+        for part in relative.components() {
+            at.push(part);
+            if at.is_symlink() {
+                return Err("Cannot write through a symbolic link.".into());
+            }
+        }
+        let file = self.root.join(&relative);
+        if file.is_dir() {
+            return Err("The path is a folder.".into());
+        }
+        let before = match std::fs::symlink_metadata(&file) {
+            Ok(_) => Some(
+                crate::library::read_sheet(&file)
+                    .map_err(|_| "The existing file is not a text file (not UTF-8).".to_string())?,
+            ),
+            Err(_) => None,
+        };
+        let mut done = format!("Wrote {} characters.", content.chars().count());
+        if in_folder && package::single_file(&self.root, name).is_file() {
+            done.push_str(&format!(
+                " When the user approves, the folder replaces {EXTENSIONS_DIR}/{name}.lua, which moves to the trash: \
+                 put everything the extension needs into the folder."
+            ));
+        }
+        Ok(PendingChange {
+            path: shown(path),
+            before,
+            after: content.to_string(),
+            target: Target::File(file),
+            done,
             verb: "assistant.tool.wrote",
         })
     }
@@ -999,17 +1237,49 @@ impl Workspace {
     }
 }
 
-/// 초안으로 고치는 확장 파일(`Extensions/<이름>.lua`)이면 그 경로(초안의 열쇠).
+/// 초안으로 고치는 확장 파일이면 그 경로(초안의 열쇠): `Extensions/<이름>.lua`, 또는 폴더 확장의
+/// `Extensions/<이름>/init.lua`와 모듈(`Extensions/<이름>/ui/hud.lua`, ADR-0039).
 fn draft_key(path: &str) -> Option<String> {
     let relative = relative_path(path).ok()?;
-    let mut parts = relative.components().map(|part| part.as_os_str().to_str());
-    let (Some(Some(dir)), Some(Some(file)), None) = (parts.next(), parts.next(), parts.next())
-    else {
+    let parts: Vec<&str> = relative
+        .components()
+        .map(|part| part.as_os_str().to_str())
+        .collect::<Option<_>>()?;
+    let (dir, rest) = parts.split_first()?;
+    if *dir != crate::extension::EXTENSIONS_DIR {
         return None;
-    };
-    let name = file.strip_suffix(".lua")?;
-    (dir == crate::extension::EXTENSIONS_DIR && crate::extension::valid_name(name))
-        .then(|| format!("{dir}/{file}"))
+    }
+    match rest {
+        [file] => {
+            let name = file.strip_suffix(".lua")?;
+            crate::extension::valid_name(name).then(|| format!("{dir}/{file}"))
+        }
+        [name, inner @ ..] if !inner.is_empty() => {
+            let inner = inner.join("/");
+            let module = inner == crate::extension::package::ENTRY_FILE
+                || crate::extension::package::module_name(&inner).is_some();
+            (crate::extension::valid_name(name) && module).then(|| format!("{dir}/{name}/{inner}"))
+        }
+        _ => None,
+    }
+}
+
+/// 초안 열쇠의 확장 이름.
+fn draft_extension(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix(crate::extension::EXTENSIONS_DIR)?.strip_prefix('/')?;
+    match rest.split_once('/') {
+        Some((name, _)) => Some(name),
+        None => rest.strip_suffix(".lua"),
+    }
+}
+
+/// 확장 소스 전체를 비교할 글(검토한 뒤 고쳤는지 알아본다).
+fn fingerprint(source: &crate::extension::Package) -> String {
+    let mut text = source.main.clone();
+    for (path, module) in source.modules.values() {
+        text.push_str(&format!("\n\u{0}{path}\u{0}\n{module}"));
+    }
+    text
 }
 
 /// 화면과 모델에 보일 경로. 비면 루트.
@@ -1677,6 +1947,77 @@ mod tests {
         let out = ws.commit(drafts.into_iter().next().unwrap());
         assert!(!out.text.starts_with("Error"), "{}", out.text);
         assert!(std::fs::read_to_string(&file).unwrap().contains("5, 5, 4"));
+    }
+
+    #[test]
+    fn drafts_folder_extensions_and_approves_them_together() {
+        let (ws, root) = workspace();
+        std::fs::create_dir_all(root.join("Extensions")).unwrap();
+        // 파일 하나 확장을 폴더로 바꾼다.
+        let old = "return { size = { 10, 10 }, draw = function(g) end }";
+        std::fs::write(root.join("Extensions/game.lua"), old).unwrap();
+        let call = |name: &str, arguments: Value| ws.plan(name, arguments.as_object().unwrap());
+        let init = "local hud = require('ui.hud')\nreturn { size = { 10, 10 }, draw = function(g) hud.draw(g) end }";
+        let hud = "return { draw = function(g) g.circle('fill', 5, 5, 2) end }";
+        let Planned::Done(out) = call(WRITE, json!({ "path": "Extensions/game/init.lua", "content": init })) else {
+            panic!("a folder extension file must be a draft");
+        };
+        assert!(out.text.contains("moves to the trash"), "{}", out.text);
+        assert!(matches!(
+            call(WRITE, json!({ "path": "Extensions/game/ui/hud.lua", "content": hud })),
+            Planned::Done(_)
+        ));
+        // 모듈 이름이 될 수 없는 경로는 초안이 아니다(보통 쓰기처럼 폴더가 있어야 한다).
+        assert!(draft_key("Extensions/game/my hud.lua").is_none());
+        // 목록·실행은 아직 없는 폴더도 초안으로 본다.
+        let Planned::Done(list) = call(LIST, json!({ "path": "Extensions/game" })) else {
+            panic!()
+        };
+        assert_eq!(list.text, "init.lua\nui/");
+        assert_eq!(ws.extension_shown("game"), "Extensions/game/");
+        let Planned::Done(run) = call(RUN_EXTENSION, json!({ "name": "game" })) else {
+            panic!()
+        };
+        assert!(!run.text.starts_with("Error"), "{}", run.text);
+        assert!(run.summary.ends_with("Extensions/game"), "{}", run.summary);
+        // 확장 하나의 승인 카드: 두 파일과, 휴지통으로 갈 옛 파일.
+        let drafts = ws.take_drafts();
+        assert_eq!(drafts.len(), 1);
+        let headers: Vec<String> = drafts[0]
+            .diff()
+            .into_iter()
+            .filter(|line| line.kind == diff::LineKind::File)
+            .map(|line| line.text)
+            .collect();
+        assert_eq!(
+            headers,
+            ["Extensions/game/init.lua", "Extensions/game/ui/hud.lua", "Extensions/game.lua"]
+        );
+        assert!(!drafts[0].is_new());
+    }
+
+    #[test]
+    fn commits_a_new_folder_extension() {
+        let (ws, root) = workspace();
+        std::fs::create_dir_all(root.join("Extensions")).unwrap();
+        let call = |name: &str, arguments: Value| ws.plan(name, arguments.as_object().unwrap());
+        for (path, content) in [
+            ("Extensions/kit/init.lua", "return { value = function() return require('words').hi end }"),
+            ("Extensions/kit/words.lua", "return { hi = 'hi' }"),
+        ] {
+            assert!(matches!(call(WRITE, json!({ "path": path, "content": content })), Planned::Done(_)));
+        }
+        let drafts = ws.take_drafts();
+        assert!(drafts[0].is_new());
+        let out = ws.commit(drafts.into_iter().next().unwrap());
+        assert!(!out.text.starts_with("Error"), "{}", out.text);
+        let extension = crate::extension::Extension::open(&root, "kit").unwrap();
+        assert_eq!(extension.value(&[], "a.md").unwrap().as_deref(), Some("hi"));
+        // 폴더 확장 옆에 같은 이름의 파일은 쓰지 못한다.
+        let Planned::Done(out) = call(WRITE, json!({ "path": "Extensions/kit.lua", "content": "return {}" })) else {
+            panic!()
+        };
+        assert!(out.text.contains("folder extension"), "{}", out.text);
     }
 
     #[cfg(unix)]

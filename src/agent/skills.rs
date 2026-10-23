@@ -56,6 +56,7 @@ const BUILTIN: &[Builtin] = &[
         "references/actions.md",
         "references/inline.md",
         "references/play.md",
+        "references/modules.md",
         "references/examples/archer.md",
         "references/examples/bar-chart.md",
         "references/examples/chart-remote.md",

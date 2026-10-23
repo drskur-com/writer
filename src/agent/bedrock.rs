@@ -554,7 +554,7 @@ async fn run(request: &ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Re
                                 drawing.canvas,
                                 drawing.frames,
                             );
-                            let shown = format!("{}/{name}.lua", crate::extension::EXTENSIONS_DIR);
+                            let shown = workspace.extension_shown(name);
                             match critique(&model, prompt, drawing.png.clone()).await {
                                 Ok(review) => {
                                     let score = review::score(&review);

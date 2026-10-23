@@ -104,8 +104,10 @@ impl std::fmt::Debug for Worker {
 }
 
 impl Worker {
-    /// 스레드를 띄워 `source`를 읽는다. 읽기가 끝날 때까지 기다린다(캔버스 크기가 있어야 배치한다).
-    pub fn spawn(name: &str, source: String) -> Result<Self, String> {
+    /// 스레드를 띄워 `source`(폴더면 모듈까지)를 읽는다. 읽기가 끝날 때까지 기다린다(캔버스 크기가 있어야
+    /// 배치한다).
+    pub fn spawn(name: &str, source: impl Into<super::Package>) -> Result<Self, String> {
+        let source: super::Package = source.into();
         let (request_tx, request_rx) = channel::<Request>();
         let (reply_tx, reply_rx) = channel::<Reply>();
         let (size_tx, size_rx) = channel::<SizeReply>();
@@ -116,7 +118,7 @@ impl Worker {
         std::thread::Builder::new()
             .name(format!("extension-{name}"))
             .spawn(move || {
-                let extension = match Extension::load(&thread_name, &source) {
+                let extension = match Extension::load_package(&thread_name, &source) {
                     Ok(extension) => extension,
                     Err(err) => {
                         info_tx.send(Err(err)).ok();
@@ -311,7 +313,12 @@ pub struct PlayWorker {
 
 impl PlayWorker {
     /// `source`를 읽고 `play.load(args)`를 부른다. 끝날 때까지 기다린다.
-    pub fn spawn(name: &str, source: String, args: Vec<(String, String)>) -> Result<Self, String> {
+    pub fn spawn(
+        name: &str,
+        source: impl Into<super::Package>,
+        args: Vec<(String, String)>,
+    ) -> Result<Self, String> {
+        let source: super::Package = source.into();
         let (frame_tx, frame_rx) = channel::<PlayFrame>();
         let (reply_tx, reply_rx) = channel::<Result<Vec<super::Shape>, String>>();
         let (ready_tx, ready_rx) = channel::<Result<(f32, f32), String>>();
@@ -319,9 +326,9 @@ impl PlayWorker {
         std::thread::Builder::new()
             .name(format!("play-{name}"))
             .spawn(move || {
-                let started = Extension::load(&thread_name, &source).and_then(|extension| {
+                let started = Extension::load_package(&thread_name, &source).and_then(|extension| {
                     if !extension.plays {
-                        return Err(format!("{thread_name}.lua has no play table"));
+                        return Err(format!("{thread_name} has no play table"));
                     }
                     let size = extension.play_size(&args)?;
                     extension.play_load(&args)?;
@@ -399,7 +406,7 @@ mod tests {
             "dot",
             "return { size = { 10, 20 }, animated = true, period = 2, \
              draw = function(g, t) g.circle('fill', t, 0, 1) end }"
-                .into(),
+                .to_string(),
         )
         .unwrap();
         assert_eq!(worker.info.size, Some((10.0, 20.0)));
@@ -419,7 +426,7 @@ mod tests {
                g.setColor(ui.hover == 'b' and '#ff0000' or '#000000') \
                g.rectangle('fill', 0, 0, 10, 10) g.region('b', 0, 0, 10, 10) end, \
              click = function(id, args) return { on = not args.on, n = (args.n or 0) + 1 } end }"
-                .into(),
+                .to_string(),
         )
         .unwrap();
         assert!(worker.info.clicks);
@@ -453,7 +460,7 @@ mod tests {
                keypressed = function(key) if key == 'space' then n = n + 10 end end, \
                update = function(dt) n = n + 1 end, \
                draw = function(g) for i = 1, n do g.rectangle('fill', i, 0, 1, 1) end end } }"
-                .into(),
+                .to_string(),
             vec![("start".into(), "2".into())],
         )
         .unwrap();
@@ -471,7 +478,7 @@ mod tests {
         assert_eq!(next(vec![PlayEvent::KeyPressed("space".into())]), 14);
         let err = PlayWorker::spawn(
             "none",
-            "return { draw = function() end }".into(),
+            "return { draw = function() end }".to_string(),
             Vec::new(),
         )
         .err()
@@ -484,7 +491,7 @@ mod tests {
         let worker = Worker::spawn(
             "s",
             "return { size = function(args) return { args.w or 10, 5 } end, draw = function() end }"
-                .into(),
+                .to_string(),
         )
         .unwrap();
         assert_eq!(worker.info.size, None);
@@ -495,10 +502,10 @@ mod tests {
     #[test]
     fn slow_loads_fail_without_blocking_long() {
         let started = std::time::Instant::now();
-        let err = Worker::spawn("slow", "while true do end return {}".into()).unwrap_err();
+        let err = Worker::spawn("slow", "while true do end return {}").unwrap_err();
         assert!(err.contains("took too long"), "{err}");
         assert!(started.elapsed() < LOAD_WAIT + Duration::from_millis(200));
-        let err = Worker::spawn("bad", "return 1".into()).unwrap_err();
+        let err = Worker::spawn("bad", "return 1").unwrap_err();
         assert!(err.contains("must return a table"), "{err}");
     }
 }

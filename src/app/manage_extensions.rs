@@ -166,7 +166,7 @@ impl ExtensionManager {
     }
 
     fn delete(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let result = library::move_to_trash(&extension::path(&self.root, name));
+        let result = library::move_to_trash(&extension::location(&self.root, name));
         self.reload();
         self.select(self.selected.min(self.items.len().saturating_sub(1)), cx);
         let app = self.app.clone();
@@ -313,7 +313,7 @@ impl Render for ExtensionManager {
                 None => t!("extensions.unused").to_string(),
             },
         };
-        let file = extension::path(&self.root, &name);
+        let file = extension::location(&self.root, &name);
         // 머리줄: 이름과 종류·사용처, 오른쪽 끝에 기능 버튼(아이콘, 툴팁).
         let subtitle = match item.kind() {
             kind if kind.is_empty() => usage,

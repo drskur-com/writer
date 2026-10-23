@@ -5,7 +5,7 @@ description: Write, change, or fix a Writer extension — a Lua script in Extens
 
 # Writer extensions
 
-An extension is one Lua (Luau) file, `Extensions/<name>.lua`, that returns a table. What the table holds decides what kind of extension it is; one file can combine kinds.
+An extension is one Lua (Luau) file, `Extensions/<name>.lua`, that returns a table. What the table holds decides what kind of extension it is; one file can combine kinds. A large extension can instead be a folder, `Extensions/<name>/init.lua` with modules it loads with `require` (`references/modules.md`).
 
 | Kind | Entry point | Read before writing |
 |---|---|---|
@@ -15,6 +15,7 @@ An extension is one Lua (Luau) file, `Extensions/<name>.lua`, that returns a tab
 | Command in the Extensions menu | `commands` | `references/commands.md` |
 | Game or anything with running state, keyboard, or dragging, in its own window | `play = { load, update, draw, keypressed, … }` | `references/draw.md`, then `references/play.md` |
 | Inline text or a small picture inside a paragraph (`{{today}}`) | `value(args, ctx)`, or `draw` inline | `references/inline.md` |
+| Large extension split into several files (a game with levels, shared helpers) | `Extensions/<name>/init.lua` and `require` | also `references/modules.md` |
 
 Read only the references for the kinds you are writing; this file has what they all share. Paths are relative to this skill's folder.
 
@@ -24,9 +25,9 @@ Answer in the user's language. Write code, comments, and file names in English u
 
 1. **Decide what to build** and which kinds it needs (the table above). If the request is ambiguous (for example "a date": insert it once, or draw it), pick the reading that fits best and say which one you chose. Ask only when the choice changes the result a lot. Then read the references for those kinds.
 2. **Check what exists.** The `<extensions>` list in your instructions shows the existing extensions with their descriptions. If one already does what the user wants, use it (add its block, step 5) instead of writing a new one. If one is close, `read_file` it and change it with `edit_file`. Name a new extension with short lowercase English words joined by `-` (for example `archer`, `bar-chart`, `insert-date`).
-3. **Write the file** with `write_file` at `Extensions/<name>.lua`, in one file. Start it with the header (below): `description`, `args` with each argument's meaning and default, and `example` values that show it well. The user picks extensions by this header in Insert → Extension…, so keep it accurate whenever you change the code.
+3. **Write the file** with `write_file` at `Extensions/<name>.lua`, in one file (or, for a large extension, as a folder: `references/modules.md`). Start it with the header (below): `description`, `args` with each argument's meaning and default, and `example` values that show it well. The user picks extensions by this header in Insert → Extension…, so keep it accurate whenever you change the code.
 4. **Test it with `run_extension`. Never skip this step.** Each reference says how to test its kind.
-   - Your changes to `Extensions/*.lua` are a draft until your reply ends; `read_file` and `run_extension` use the draft, and the user approves each extension once afterwards. So edit and test as many times as it needs.
+   - Your changes to extension files (`Extensions/<name>.lua`, or the files of `Extensions/<name>/`) are a draft until your reply ends; `read_file` and `run_extension` use the draft, and the user approves each extension once afterwards. So edit and test as many times as it needs.
    - If there is an error, fix the file with `edit_file` and test again. The user sees the error in the sheet otherwise. Also fix any `Note:` about the header.
 5. **Place the block** if the user wants it in a sheet. Add the ```` ```ext ```` block with `edit_file`, with a blank line before and after it, where the user asked (by default at the end of the open sheet). Put arguments one per line as `key: value`. If the user did not ask for it in a sheet, tell them they can insert it with Insert → Extension…. Users change a block's arguments by double-clicking its canvas (or ⌘-clicking it), which shows the header's `args` descriptions next to the fields, so keep them clear.
 6. **Reply briefly**: what the extension does, how to use it (the block, **Insert → Extension…**, or the menu item **Extensions → title**), and how to change it. Do not paste the whole script; it is in the file.
@@ -98,7 +99,7 @@ other: value
 
 Available: `string` (including Luau's `string.split`), `table`, `math`, `utf8`, `bit32`, `os.date`, `os.time`, `os.clock`, `os.difftime`, `print` (ignored), `pcall`, `error`, `tostring`, `tonumber`, `pairs`, `ipairs`, `select`, `type`, `setmetatable`.
 
-Not available: files (`io`), processes (`os.execute`), the network, other modules (`require`), changing globals of the app. Memory is limited to 64 MB.
+Not available: files (`io`), processes (`os.execute`), the network, changing globals of the app. `require` loads only the modules of a folder extension (`references/modules.md`). Memory is limited to 64 MB.
 
 `math.random` restarts from the same seed before every `draw`, so the same `t` always gives the same picture.
 
@@ -120,7 +121,7 @@ local first3 = s:sub(1, (utf8.offset(s, 4) or #s + 1) - 1)   -- first 3 characte
 ## Shared rules
 
 - **Arguments.** Every argument needs a default (`local power = args.power or 1`). Numbers, `true`, and `false` arrive as numbers and booleans; everything else as strings. Split lists with `string.split(args.values or "", ",")` and convert each item with `tonumber`.
-- **Limits.** Each draw call has 0.1 s (an animation frame at most 2,000 shapes), loading the file 0.1 s, and each command 2 s; the script has no files, network, `io`, `os.execute`, or `require`. If the user asks for something the API cannot do (images, reading other files, network, realistic 3D with textures, soft shadows or blur, text along a path, or smooth 3D shading), say so and offer the closest thing it can do.
+- **Limits.** Each draw call has 0.1 s (an animation frame at most 2,000 shapes), loading the file 0.1 s, and each command 2 s; the script has no files, network, `io`, or `os.execute` (`require` only within a folder extension). If the user asks for something the API cannot do (images, reading other files, network, realistic 3D with textures, soft shadows or blur, text along a path, or smooth 3D shading), say so and offer the closest thing it can do.
 
 ## Fixing an extension
 

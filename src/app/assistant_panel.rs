@@ -1457,6 +1457,19 @@ fn diff_line(line: &agent::DiffLine, pal: Palette) -> AnyElement {
                 .child("⋯")
                 .into_any_element();
         }
+        // 파일이 여럿인 변경(폴더 확장)의 파일 머리줄.
+        agent::LineKind::File => {
+            return div()
+                .px_2()
+                .pt_1()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(pal.foreground)
+                .border_t_1()
+                .border_color(pal.border)
+                .child(SharedString::from(line.text.clone()))
+                .into_any_element();
+        }
     };
     // 빈 줄도 한 줄 높이를 차지하게 한다.
     let text: SharedString = if line.text.is_empty() {

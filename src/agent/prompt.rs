@@ -34,13 +34,14 @@ const TOOL_RULES: &str = "\
 You can browse and change files in the library folder with the file tools (list_files, read_file, edit_file, create_sheet, write_file). \
 Paths are relative to the library root. Manuscripts are .md files under Projects/<project>/, notes are under Notes/<group>/, \
 and the .writer.toml in each group folder holds that group's settings (display name, sheet order, book info and styles). Skills are under Skills/<name>/, \
-and extensions (Lua scripts that draw in sheets or add menu commands) are Extensions/<name>.lua; test them with run_extension.
+and extensions (Lua scripts that draw in sheets or add menu commands) are Extensions/<name>.lua, or a folder Extensions/<name>/ \
+(init.lua and modules it requires) for large ones; test them with run_extension.
 - Every file change (edit_file, create_sheet, write_file) is shown to the user as a diff and applied only if they approve it. \
 So when the request calls for changes (fixing, proofreading, revising, rewriting, adding text, changing settings), propose \
 them directly with the tools instead of writing the changed text out in your reply. Put all changes to one file in a \
 single edit_file call. In your reply, briefly give the reasons; do not repeat the changed text. \
-Exception: changes to Extensions/<name>.lua are kept as a draft that read_file and run_extension use; after your reply the \
-user approves each extension once, as one change. So iterate on an extension (edit, run, look, fix) as often as it needs.
+Exception: changes to extension files (Extensions/<name>.lua, or any .lua in Extensions/<name>/) are kept as a draft that \
+read_file and run_extension use; after your reply the user approves each extension once, as one change (a folder with all its files). So iterate on an extension (edit, run, look, fix) as often as it needs.
 - When the request does not call for changes (questions, feedback, summaries, ideas), answer without proposing changes.
 - Sheet changes target the open sheet by default. If you propose a change to another sheet, say so in your reply.
 - The <sheet> above is the file's exact content, so you can edit the open sheet without read_file. For other files, \
@@ -54,7 +55,7 @@ the user's text (sheet content, notes, file names) into an address. Say which pa
 
 /// 확장이 있을 때 목록 뒤에 붙는 지시.
 const EXTENSION_RULES: &str = "\
-The extensions above are in Extensions/<name>.lua. When the user wants a drawing or chart that one of them makes, \
+The extensions above are in Extensions/<name>.lua (or the folder Extensions/<name>/ with init.lua). When the user wants a drawing or chart that one of them makes, \
 add its ```ext <name> block to the sheet instead of writing a new extension; read the file first for the block \
 arguments and the example values in its header. Descriptions are in the user's language.";
 

@@ -1,4 +1,5 @@
-//! 확장(ADR-0026): 라이브러리 `Extensions/<이름>.lua`의 Lua(Luau) 스크립트.
+//! 확장(ADR-0026): 라이브러리 `Extensions/<이름>.lua`(또는 여러 파일이면 `Extensions/<이름>/init.lua`와 모듈,
+//! ADR-0039 [`package`])의 Lua(Luau) 스크립트.
 //!
 //! 확장 파일은 표 하나를 돌려주고, 앱은 그 안의 진입점만 쓴다.
 //!
@@ -8,13 +9,14 @@
 //!   돌려준 글로 선택 영역을 바꾸거나 커서 자리에 넣는다.
 //!
 //! 스크립트는 sandbox에서 돈다. 파일·프로세스·네트워크가 없고(Luau에는 `io`가 없고 `os`는 시간
-//! 함수뿐이다), `require`는 뺐다. 메모리와 한 번 부를 때의 시간을 제한한다. `math.random`은 그릴 때마다
+//! 함수뿐이다), `require`는 확장 폴더의 모듈만 부른다. 메모리와 한 번 부를 때의 시간을 제한한다. `math.random`은 그릴 때마다
 //! 같은 seed로 되돌려, 같은 `t`에서는 늘 같은 그림이 나온다(내보내기에서도 같아야 한다).
 //!
 //! 오류 글은 모델이 읽고 고치므로 영어로 쓴다.
 
 mod boolean;
 pub mod canvas;
+pub mod package;
 pub(crate) mod path;
 pub mod raster;
 mod scene;
@@ -34,6 +36,7 @@ pub use canvas::{
     Align, Color, FillRule, LineCap, LineJoin, Paint, Region, Segment, Shape, StrokeStyle, Theme,
     region_at,
 };
+pub use package::Package;
 pub use worker::{Info, PlayEvent, PlayWorker, Worker};
 
 /// 선분 목록의 lyon 경로(화면 테셀레이션에 쓴다).
@@ -521,10 +524,22 @@ pub fn still(root: &Path, name: &str, args: &[(String, String)]) -> Result<Optio
     }))
 }
 
-/// 확장 파일 경로.
+/// 확장의 진입 파일 경로: 폴더 확장이면 `<이름>/init.lua`, 아니면 `<이름>.lua`(있든 없든).
 pub fn path(root: &Path, name: &str) -> PathBuf {
-    root.join(EXTENSIONS_DIR)
-        .join(format!("{name}.{EXTENSION_FILE}"))
+    if package::is_folder(root, name) {
+        package::folder(root, name).join(package::ENTRY_FILE)
+    } else {
+        package::single_file(root, name)
+    }
+}
+
+/// 확장이 차지하는 항목: 폴더 확장이면 폴더, 아니면 파일(지우기·이름 바꾸기에 쓴다).
+pub fn location(root: &Path, name: &str) -> PathBuf {
+    if package::is_folder(root, name) {
+        package::folder(root, name)
+    } else {
+        package::single_file(root, name)
+    }
 }
 
 /// 라이브러리를 열 때 확장 폴더를 만들어 둔다(모델이 바로 파일을 쓸 수 있게).
@@ -536,7 +551,8 @@ pub fn ensure_dir(root: &Path) -> std::io::Result<()> {
     std::fs::create_dir(dir)
 }
 
-/// 확장 폴더의 확장 이름과 수정 시각(이름순). 바뀌었는지 비교할 때 쓴다.
+/// 확장 폴더의 확장 이름과 수정 시각(이름순). 파일 하나(`<이름>.lua`)와 폴더(`<이름>/init.lua`)를 모두
+/// 센다. 바뀌었는지 비교할 때 쓴다(폴더는 안의 파일이 바뀌어도 바뀐다).
 pub fn scan(root: &Path) -> Vec<(String, Option<SystemTime>)> {
     let Ok(entries) = std::fs::read_dir(root.join(EXTENSIONS_DIR)) else {
         return Vec::new();
@@ -545,15 +561,25 @@ pub fn scan(root: &Path) -> Vec<(String, Option<SystemTime>)> {
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some(EXTENSION_FILE) {
+            let meta = std::fs::symlink_metadata(&path).ok()?;
+            let name = if meta.is_dir() {
+                path.file_name()?.to_str()?.to_string()
+            } else if meta.is_file()
+                && path.extension().and_then(|ext| ext.to_str()) == Some(EXTENSION_FILE)
+            {
+                path.file_stem()?.to_str()?.to_string()
+            } else {
+                return None;
+            };
+            if !valid_name(&name) || (meta.is_dir() && !package::is_folder(root, &name)) {
                 return None;
             }
-            let name = path.file_stem()?.to_str()?.to_string();
-            let meta = std::fs::symlink_metadata(&path).ok()?;
-            (valid_name(&name) && meta.is_file()).then(|| (name, meta.modified().ok()))
+            Some((name.clone(), package::modified(root, &name)))
         })
         .collect();
     found.sort();
+    // 파일과 폴더가 같은 이름이면 하나만 센다(읽을 때 알린다).
+    found.dedup_by(|a, b| a.0 == b.0);
     found
 }
 
@@ -856,14 +882,23 @@ impl std::fmt::Debug for Extension {
     }
 }
 
-/// 확장 파일의 소스. 이름·파일 종류·크기를 검사한다.
-pub fn read_source(root: &Path, name: &str) -> Result<String, String> {
+/// 확장의 소스(폴더면 모듈까지). 이름·파일 종류·크기를 검사한다.
+pub fn read_source(root: &Path, name: &str) -> Result<Package, String> {
     if !valid_name(name) {
         return Err(format!(
             "Invalid extension name \"{name}\" (use letters, digits, - and _)."
         ));
     }
-    let file = path(root, name);
+    if package::is_folder(root, name) {
+        if package::single_file(root, name).exists() {
+            return Err(format!(
+                "Both {EXTENSIONS_DIR}/{name}.{EXTENSION_FILE} and {EXTENSIONS_DIR}/{name}/ exist; keep one."
+            ));
+        }
+        return package::read_folder(&package::folder(root, name))
+            .map_err(|err| format!("{EXTENSIONS_DIR}/{name}/: {err}"));
+    }
+    let file = package::single_file(root, name);
     let meta = std::fs::symlink_metadata(&file).map_err(|_| {
         format!("No extension named \"{name}\" ({EXTENSIONS_DIR}/{name}.{EXTENSION_FILE}).")
     })?;
@@ -878,7 +913,7 @@ pub fn read_source(root: &Path, name: &str) -> Result<String, String> {
         ));
     }
     let source = std::fs::read_to_string(&file).map_err(|err| err.to_string())?;
-    Ok(source)
+    Ok(source.into())
 }
 
 /// Lua 오류를 모델이 읽을 한 줄로.
@@ -903,7 +938,7 @@ fn message(err: mlua::Error) -> String {
 impl Extension {
     /// `root`(라이브러리)의 확장 `name`을 읽는다.
     pub fn open(root: &Path, name: &str) -> Result<Self, String> {
-        Self::load(name, &read_source(root, name)?)
+        Self::load_package(name, &read_source(root, name)?)
     }
 
     /// 앱이 알아야 할 것(작업 스레드에서 UI 스레드로 넘긴다).
@@ -921,18 +956,28 @@ impl Extension {
         }
     }
 
-    /// 소스에서 확장을 읽는다.
+    /// 파일 하나의 소스에서 확장을 읽는다.
+    #[cfg(test)]
     pub fn load(name: &str, source: &str) -> Result<Self, String> {
-        Self::try_load(name, source).map_err(|err| format!("{name}.lua: {err}"))
+        Self::load_package(name, &Package::from(source))
     }
 
-    fn try_load(name: &str, source: &str) -> Result<Self, String> {
+    /// 소스(폴더면 모듈까지)에서 확장을 읽는다.
+    pub fn load_package(name: &str, package: &Package) -> Result<Self, String> {
+        let entry = if package.is_folder() {
+            format!("{name}/{}", package::ENTRY_FILE)
+        } else {
+            format!("{name}.{EXTENSION_FILE}")
+        };
+        Self::try_load(name, &entry, package).map_err(|err| format!("{entry}: {err}"))
+    }
+
+    fn try_load(name: &str, entry: &str, package: &Package) -> Result<Self, String> {
+        let source = package.main.as_str();
         let lua = Lua::new();
         lua.set_memory_limit(MEMORY_LIMIT).map_err(message)?;
-        // 파일에서 다른 모듈을 읽지 못하게 한다.
-        lua.globals()
-            .raw_set("require", Value::Nil)
-            .map_err(message)?;
+        // `require`는 이 확장의 모듈만 부른다(파일·다른 확장은 못 읽는다).
+        package::install_require(&lua, name, package).map_err(message)?;
         // 캔버스 `g`는 파일 맨 위에서도 쓸 수 있다(경로·그라디언트를 한 번 만들어 두고 draw에서 다시 쓴다).
         // 크기는 그릴 때마다 다시 정한다.
         let (width, height) = DEFAULT_SIZE;
@@ -954,7 +999,7 @@ impl Extension {
         });
         let value: Value = lua
             .load(source)
-            .set_name(format!("@{name}.lua"))
+            .set_name(format!("@{entry}"))
             .eval()
             .map_err(message)?;
         let Value::Table(module) = value else {
@@ -1521,11 +1566,9 @@ impl Host {
         &self.root
     }
 
-    /// 확장 `name`. 처음이거나 파일이 바뀌었으면 띄운다(읽기가 끝날 때까지 기다린다).
+    /// 확장 `name`. 처음이거나 파일(폴더면 안의 파일)이 바뀌었으면 띄운다(읽기가 끝날 때까지 기다린다).
     pub fn get(&self, name: &str) -> Rc<Loaded> {
-        let modified = std::fs::metadata(path(&self.root, name))
-            .and_then(|meta| meta.modified())
-            .ok();
+        let modified = package::modified(&self.root, name);
         if let Some((cached, loaded)) = self.cache.borrow().get(name)
             && *cached == modified
         {
@@ -1925,6 +1968,54 @@ return {
         assert_eq!(inline_calls(&text)[0].args, calls[1].args);
         let tricky = vec![("q".to_string(), "say \"hi\" }".to_string())];
         assert_eq!(inline_calls(&inline_text("x", &tricky))[0].args, tricky);
+    }
+
+    #[test]
+    fn folder_extensions_require_their_modules() {
+        let root = std::env::temp_dir().join(format!("writer-package-{}", std::process::id()));
+        let dir = root.join(EXTENSIONS_DIR).join("game");
+        std::fs::create_dir_all(dir.join("ui")).unwrap();
+        std::fs::write(
+            dir.join("init.lua"),
+            "local hud = require('ui.hud')\nlocal again = require('ui.hud')\n\
+             return { value = function() return hud.label .. tostring(hud == again) end }",
+        )
+        .unwrap();
+        std::fs::write(dir.join("ui/hud.lua"), "return { label = 'hp ' }").unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a module").unwrap();
+        assert!(scan(&root).iter().any(|(name, _)| name == "game"));
+        assert_eq!(path(&root, "game"), dir.join("init.lua"));
+        // 모듈은 한 번만 돈다.
+        let extension = Extension::open(&root, "game").unwrap();
+        assert_eq!(extension.value(&[], "a.md").unwrap().as_deref(), Some("hp true"));
+        // 모듈을 고치면 확장이 바뀐 것으로 본다.
+        let before = package::modified(&root, "game");
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(dir.join("ui/hud.lua"), "return { label = 'mp ' }").unwrap();
+        assert_ne!(package::modified(&root, "game"), before);
+        // 없는 모듈과 서로 부르는 모듈은 알린다.
+        let missing = Package::from_files([("init.lua", "require('nope') return {}")]).unwrap();
+        let err = Extension::load_package("x", &missing).unwrap_err();
+        assert!(err.contains("no module \"nope\""), "{err}");
+        let circular = Package::from_files([
+            ("init.lua", "require('a') return {}"),
+            ("a.lua", "require('b') return {}"),
+            ("b.lua", "require('a') return {}"),
+        ])
+        .unwrap();
+        let err = Extension::load_package("x", &circular).unwrap_err();
+        assert!(err.contains("circular require: a -> b -> a"), "{err}");
+        // 오류는 모듈 파일을 가리킨다.
+        let broken = Package::from_files([("init.lua", "require('a') return {}"), ("a.lua", "error('boom')")]).unwrap();
+        let err = Extension::load_package("x", &broken).unwrap_err();
+        assert!(err.contains("x/a.lua"), "{err}");
+        // 파일 하나 확장에는 모듈이 없다.
+        let err = Extension::load("solo", "require('a') return {}").unwrap_err();
+        assert!(err.contains("this extension is one file"), "{err}");
+        // 같은 이름의 파일과 폴더가 함께 있으면 읽지 않는다.
+        std::fs::write(root.join(EXTENSIONS_DIR).join("game.lua"), "return {}").unwrap();
+        assert!(Extension::open(&root, "game").unwrap_err().contains("keep one"));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

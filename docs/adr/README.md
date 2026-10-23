@@ -50,6 +50,7 @@
 | [0035](./0035-extension-actions.md) | 확장의 `click`은 앱이 실행할 동작 목록을 돌려주고, 블록끼리는 `id:`와 `set` 동작으로 말한다 | Proposed | 2026-10-23 |
 | [0036](./0036-inline-extensions.md) | 문단 안의 `{{name key=value}}`는 에디터에서 원자 단위 인라인 객체로 보이고, 내보내기에서는 확장의 글로 바뀐다 | Proposed | 2026-10-23 |
 | [0038](./0038-extension-play-window.md) | 상태·키보드·게임 루프가 필요한 확장은 `play` 표로 두고 따로 연 창에서 실행한다 | Proposed | 2026-10-23 |
+| [0039](./0039-folder-extensions.md) | 큰 확장은 `Extensions/<이름>/init.lua`와 모듈 폴더로 두고, `require`는 그 폴더 안만 부른다 | Proposed | 2026-10-23 |
 
 ## 작성 규칙
 

@@ -22,6 +22,8 @@ pub enum LineKind {
     Added,
     /// 생략한 바뀌지 않은 줄들.
     Gap,
+    /// 파일이 여럿인 변경에서 다음 줄들의 파일(`text`가 경로).
+    File,
 }
 
 /// diff 한 줄.
@@ -83,6 +85,20 @@ pub fn diff(before: &str, after: &str) -> Vec<DiffLine> {
 /// 새 파일의 diff: 모든 줄이 더해진 줄이다.
 pub fn added(text: &str) -> Vec<DiffLine> {
     diff("", text)
+}
+
+/// 지운 파일의 내용.
+pub fn removed(text: &str) -> Vec<DiffLine> {
+    diff(text, "")
+}
+
+/// 파일 머리줄(파일이 여럿인 변경).
+pub fn file(path: &str) -> DiffLine {
+    DiffLine {
+        kind: LineKind::File,
+        text: path.to_string(),
+        emphasis: Vec::new(),
+    }
 }
 
 fn gap() -> DiffLine {
