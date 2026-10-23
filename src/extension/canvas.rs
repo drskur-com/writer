@@ -190,6 +190,34 @@ impl Transform {
     }
 }
 
+/// 한 프레임에 둘 수 있는 영역 수.
+pub(super) const REGION_LIMIT: usize = 256;
+
+/// 누를 수 있는 영역(`g.region`, ADR-0032): 확장이 정한 이름과 캔버스 좌표의 사각형 `[x, y, w, h]`
+/// (그때의 변환을 적용한 테두리 상자).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Region {
+    pub id: String,
+    pub rect: [f32; 4],
+}
+
+impl Region {
+    /// 캔버스 좌표의 점이 영역 안인지.
+    pub fn contains(&self, [x, y]: Point) -> bool {
+        let [rx, ry, rw, rh] = self.rect;
+        x >= rx && x < rx + rw && y >= ry && y < ry + rh
+    }
+}
+
+/// 점 위의 영역 이름. 겹치면 나중에 선언한 것(위에 그린 것)이다.
+pub fn region_at(regions: &[Region], point: Point) -> Option<&str> {
+    regions
+        .iter()
+        .rev()
+        .find(|region| region.contains(point))
+        .map(|region| region.id.as_str())
+}
+
 /// 그리기 상태와 모은 모양.
 #[derive(Debug)]
 pub(super) struct Recorder {
@@ -209,6 +237,7 @@ pub(super) struct Recorder {
     transform: Transform,
     stack: Vec<Transform>,
     pub(super) shapes: Vec<Shape>,
+    pub(super) regions: Vec<Region>,
     limit: usize,
 }
 
@@ -229,6 +258,7 @@ impl Recorder {
             transform: Transform::IDENTITY,
             stack: Vec::new(),
             shapes: Vec::new(),
+            regions: Vec::new(),
             limit: STILL_SHAPE_LIMIT,
         }
     }
@@ -630,6 +660,7 @@ pub(super) const FUNCTIONS: &[&str] = &[
     "setFillRule",
     "setScissor",
     "setClip",
+    "region",
     "lerpPath",
     "lerp",
     "lerpColor",
@@ -1020,6 +1051,37 @@ pub(super) fn create(lua: &Lua, recorder: Rc<RefCell<Recorder>>) -> mlua::Result
             Some([x, y, w.max(0.0), h.max(0.0)])
         };
         rec.push(Shape::Clip(rect))?;
+        Ok(MultiValue::new())
+    });
+
+    // region(id, x, y, w, h): 누를 수 있는 영역을 둔다(그리지 않는다). 변환을 적용한 테두리 상자로 모은다.
+    function!("region", |rec, args| {
+        let id = args.string(0)?;
+        if id.is_empty() {
+            return Err(args.error("the region name must not be empty"));
+        }
+        let (x, y, w, h) = (
+            args.number(1)?,
+            args.number(2)?,
+            args.number(3)?,
+            args.number(4)?,
+        );
+        if rec.regions.len() >= REGION_LIMIT {
+            return Err(args.error(format!(
+                "too many regions in one frame (limit {REGION_LIMIT})"
+            )));
+        }
+        let corners = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+            .map(|corner| rec.transform.apply(corner));
+        let (mut min, mut max) = (corners[0], corners[0]);
+        for [cx, cy] in corners {
+            min = [min[0].min(cx), min[1].min(cy)];
+            max = [max[0].max(cx), max[1].max(cy)];
+        }
+        rec.regions.push(Region {
+            id,
+            rect: [min[0], min[1], max[0] - min[0], max[1] - min[1]],
+        });
         Ok(MultiValue::new())
     });
 

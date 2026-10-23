@@ -47,7 +47,27 @@ const BUILTIN: &[Builtin] = &[
     builtin!("brainstorm": "SKILL.md"),
     builtin!("settings": "SKILL.md"),
     builtin!("sheet-format": "SKILL.md"),
-    builtin!("extension": "SKILL.md", "references/api.md", "references/examples.md"),
+    builtin!(
+        "extension": "SKILL.md",
+        "references/draw.md",
+        "references/draw-3d.md",
+        "references/commands.md",
+        "references/interactive.md",
+        "references/examples/archer.md",
+        "references/examples/bar-chart.md",
+        "references/examples/night-sky.md",
+        "references/examples/pick-chart.md",
+        "references/examples/route.md",
+        "references/examples/seedling.md",
+        "references/examples/text-tools.md",
+        "references/examples/turntable.md"
+    ),
+];
+
+/// 예전 빌트인에 있다가 빠진 파일(`<스킬>/<파일>`). 사용자가 고치지 않았으면 지운다(남겨 두면 모델이 옛 내용을 읽는다).
+const RETIRED: &[&str] = &[
+    "extension/references/api.md",
+    "extension/references/examples.md",
 ];
 
 /// 깐 빌트인 스킬의 기록(`.writer/skills.toml`).
@@ -113,6 +133,7 @@ pub fn load(root: &Path) -> Vec<Skill> {
 /// | 있음 | 기록과 다름 | 사용자가 고쳤다. 그대로 둔다 |
 ///
 /// 스킬의 `SKILL.md`를 사용자가 지웠거나 사용자 것이면, 그 스킬의 다른 파일도 깔지 않는다.
+/// 빌트인에서 빠진 파일([`RETIRED`])은 고치지 않았으면 지운다.
 pub fn sync_builtin(root: &Path) -> io::Result<()> {
     let skills_dir = root.join(SKILLS_DIR);
     if skills_dir.exists() && !is_real_dir(&skills_dir) {
@@ -159,6 +180,16 @@ pub fn sync_builtin(root: &Path) -> io::Result<()> {
                 // 사용자가 스킬을 지웠다.
                 break;
             }
+        }
+    }
+    // 고치지 않은 옛 빌트인 파일은 지운다. 사용자가 고쳤으면 사용자 파일로 두고 기록만 지운다.
+    for key in RETIRED {
+        let Some(installed) = record.remove(*key) else {
+            continue;
+        };
+        let file = skills_dir.join(key);
+        if std::fs::read_to_string(&file).is_ok_and(|current| hash(&current) == installed) {
+            std::fs::remove_file(&file)?;
         }
     }
     if record != before {
@@ -282,9 +313,15 @@ mod tests {
             let parsed = parse(text, Some(skill.name), None).unwrap();
             assert_eq!(parsed.name, skill.name);
             assert!(!parsed.description.is_empty() && !parsed.body.is_empty());
-            // 본문이 가리키는 참고 파일은 함께 깐다.
+            // 함께 까는 참고 파일은 본문이나 다른 참고 파일이 가리킨다(참고 파일 안에서는 `references/` 기준).
             for (file, _) in &skill.files[1..] {
-                assert!(parsed.body.contains(file), "{}: {file}", skill.name);
+                let relative = file.trim_start_matches("references/");
+                let mentioned = parsed.body.contains(file)
+                    || skill
+                        .files
+                        .iter()
+                        .any(|(other, text)| other != file && text.contains(relative));
+                assert!(mentioned, "{}: {file}", skill.name);
             }
         }
     }
@@ -412,6 +449,38 @@ mod tests {
             std::fs::read_to_string(file("revise")).unwrap(),
             builtin("revise").files[0].1
         );
+    }
+
+    #[test]
+    fn sync_removes_retired_files_unless_changed() {
+        let root = library("retired");
+        let references = root.join(SKILLS_DIR).join("extension/references");
+        std::fs::create_dir_all(&references).unwrap();
+        // 옛 버전이 깐 두 파일 중 하나는 사용자가 고쳤다.
+        let (old, mine) = ("old api", "my examples");
+        std::fs::write(references.join("api.md"), old).unwrap();
+        std::fs::write(references.join("examples.md"), mine).unwrap();
+        let record_path = root.join(crate::library::MARKER_DIR).join(RECORD_FILE);
+        std::fs::create_dir_all(record_path.parent().unwrap()).unwrap();
+        let record: BTreeMap<String, String> = [
+            ("extension/references/api.md".into(), hash(old)),
+            ("extension/references/examples.md".into(), hash("installed")),
+        ]
+        .into();
+        std::fs::write(
+            &record_path,
+            toml::to_string(&Record { installed: record }).unwrap(),
+        )
+        .unwrap();
+        sync_builtin(&root).unwrap();
+        assert!(!references.join("api.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(references.join("examples.md")).unwrap(),
+            mine
+        );
+        assert!(references.join("draw.md").exists());
+        let record = read_record(&record_path);
+        assert!(!record.keys().any(|key| RETIRED.contains(&key.as_str())));
     }
 
     #[test]

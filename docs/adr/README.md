@@ -44,6 +44,7 @@
 | [0029](./0029-extension-drafts.md) | 어시스턴트가 고친 확장은 답 동안 초안에 두고, 답이 끝나면 확장마다 한 번 승인받는다 | Proposed | 2026-10-23 |
 | [0030](./0030-extension-drawing-review.md) | 확장 그림은 대화 맥락 없는 검토자가 점수를 매기고, 통과하지 못하면 답을 끝내기 전에 돌려보낸다 | Proposed | 2026-10-23 |
 | [0031](./0031-assistant-conversation-history.md) | 어시스턴트 대화 기록은 라이브러리마다 하나로 모아 redb에 두고, 말마다 그때 열린 시트를 적는다 | Proposed | 2026-10-23 |
+| [0032](./0032-interactive-extension-blocks.md) | 확장 블록의 호버·클릭은 확장이 선언한 영역으로 앱이 판정하고, 누른 결과는 블록 인자에 쓴다 | Proposed | 2026-10-23 |
 
 ## 작성 규칙
 

@@ -11,6 +11,8 @@
 //! - `period`가 있는 애니메이션은 한 주기의 프레임을 캐시해, 한 바퀴 돈 뒤에는 Lua를 부르지 않는다.
 
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::input::EditorState;
+use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -21,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use super::extension_painter::{TessCache, paint};
 use super::style::Palette;
-use crate::extension::{self, Host, Loaded, Shape};
+use crate::extension::{self, Host, Loaded, Region, Shape, Ui};
 
 /// 캔버스 위·아래 여백(이미지 블록과 같다).
 const PADDING_TOP: f32 = 4.0;
@@ -49,6 +51,12 @@ pub(super) struct Player {
     /// 모양별 삼각형 캐시. 같은 프레임·같은 모양을 다시 나누지 않는다.
     cache: Rc<RefCell<TessCache>>,
     state: RefCell<PlayerState>,
+    /// 마우스 상태(ADR-0032). 바뀌면 그 상태로 다시 그린다.
+    ui: RefCell<Ui>,
+    /// 마지막으로 그린 캔버스 자리. 마우스 위치를 캔버스 좌표로 바꾸는 데 쓴다.
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// 마지막 `click`이 실패한 까닭과 그때의 확장. 확장이 다시 읽히면(고치면) 지운 것으로 본다.
+    click_error: RefCell<Option<(Rc<Loaded>, String)>>,
 }
 
 #[derive(Default)]
@@ -57,19 +65,22 @@ struct PlayerState {
     source: Option<Source>,
     /// 작업 스레드에 보내는 요청 번호. `source`가 바뀔 때마다 새 번호를 써서 옛 결과와 섞이지 않는다.
     request: u64,
-    /// 기다리는 요청의 프레임 번호.
-    pending: Option<u64>,
-    /// 마지막으로 받은 프레임 번호와 결과.
-    shown: Option<(u64, Drawn)>,
-    /// `period`가 있는 애니메이션의 한 주기 프레임(프레임 번호 → 모양).
-    frames: HashMap<u64, Rc<Vec<Shape>>>,
+    /// 기다리는 요청의 프레임 번호와 마우스 상태.
+    pending: Option<(u64, Ui)>,
+    /// 마지막으로 받은 프레임 번호·마우스 상태와 결과.
+    shown: Option<((u64, Ui), Drawn)>,
+    /// `period`가 있는 애니메이션의 한 주기 프레임(프레임 번호 → 그림). 마우스 상태가 없는 프레임만 둔다.
+    frames: HashMap<u64, Shown>,
 }
+
+/// 받은 그림: 모양과 누를 수 있는 영역.
+type Shown = (Rc<Vec<Shape>>, Rc<Vec<Region>>);
 
 /// 결과를 만든 확장·테마·인자.
 type Source = (Rc<Loaded>, Theme, Vec<(String, String)>);
 
-/// 받은 결과: 모양, 또는 실패한 까닭.
-type Drawn = Result<Rc<Vec<Shape>>, String>;
+/// 받은 결과: 그림, 또는 실패한 까닭.
+type Drawn = Result<Shown, String>;
 
 /// 요청 번호(앱 전체에서 겹치지 않는다).
 fn next_request() -> u64 {
@@ -83,7 +94,40 @@ impl Player {
             started: Instant::now(),
             cache: Rc::default(),
             state: RefCell::default(),
+            ui: RefCell::default(),
+            bounds: Rc::default(),
+            click_error: RefCell::default(),
         }
+    }
+
+    /// 마지막으로 받은 그림의 영역.
+    fn regions(&self) -> Rc<Vec<Region>> {
+        match &self.state.borrow().shown {
+            Some((_, Ok((_, regions)))) => regions.clone(),
+            _ => Rc::default(),
+        }
+    }
+
+    /// 창 좌표 `position` 위의 영역.
+    fn region_at(&self, position: Point<Pixels>, canvas_width: f32) -> Option<String> {
+        let bounds = self.bounds.get()?;
+        if !bounds.contains(&position) {
+            return None;
+        }
+        let scale = f32::from(bounds.size.width) / canvas_width.max(1.0);
+        let local = position - bounds.origin;
+        let point = [f32::from(local.x) / scale, f32::from(local.y) / scale];
+        extension::region_at(&self.regions(), point).map(ToString::to_string)
+    }
+
+    /// 마우스 상태를 바꾼다. 바뀌었으면 `true`(다시 그려야 한다).
+    fn set_ui(&self, ui: Ui) -> bool {
+        let mut current = self.ui.borrow_mut();
+        if *current == ui {
+            return false;
+        }
+        *current = ui;
+        true
     }
 
     pub(super) fn cache(&self) -> Rc<RefCell<TessCache>> {
@@ -111,20 +155,29 @@ impl Player {
                 Rc::ptr_eq(drawn, loaded) && *drawn_theme == theme && drawn_args == args
             });
         if !same {
+            // 받은 그림은 새 그림이 올 때까지 그대로 보인다(누르기로 인자가 바뀔 때 깜빡이지 않게).
+            // 다시 요청하도록 프레임 번호는 지운다.
+            let shown = state
+                .shown
+                .take()
+                .map(|(_, drawn)| ((u64::MAX, Ui::default()), drawn));
             *state = PlayerState {
                 source: Some((loaded.clone(), theme, args.to_vec())),
                 request: next_request(),
+                shown,
                 ..PlayerState::default()
             };
         }
         // 받은 결과를 들인다.
-        if let Some(pending) = state.pending
+        if state.pending.is_some()
             && let Some(result) = worker.take(state.request)
+            && let Some(pending) = state.pending.take()
         {
-            state.pending = None;
-            let result = result.map(Rc::new);
-            if let (Some(_), Ok(shapes)) = (worker.info.period, &result) {
-                state.frames.insert(pending, shapes.clone());
+            let result = result.map(|(shapes, regions)| (Rc::new(shapes), Rc::new(regions)));
+            if let (Some(_), Ok(drawn)) = (worker.info.period, &result)
+                && pending.1.is_empty()
+            {
+                state.frames.insert(pending.0, drawn.clone());
             }
             state.shown = Some((pending, result));
         }
@@ -137,17 +190,26 @@ impl Player {
                 frame %= ((period * FPS).round() as u64).max(1);
             }
         }
-        let cached = state.frames.get(&frame).cloned();
-        if let Some(shapes) = cached {
-            state.shown = Some((frame, Ok(shapes)));
+        let ui = self.ui.borrow().clone();
+        let key = (frame, ui);
+        let cached = key
+            .1
+            .is_empty()
+            .then(|| state.frames.get(&frame).cloned())
+            .flatten();
+        if let Some(drawn) = cached {
+            state.shown = Some((key, Ok(drawn)));
         } else if state.pending.is_none()
-            && state
-                .shown
-                .as_ref()
-                .is_none_or(|(shown, _)| *shown != frame)
+            && state.shown.as_ref().is_none_or(|(shown, _)| *shown != key)
         {
-            worker.request(state.request, frame as f32 / FPS, args, theme);
-            state.pending = Some(frame);
+            worker.request(
+                state.request,
+                frame as f32 / FPS,
+                args,
+                theme,
+                key.1.clone(),
+            );
+            state.pending = Some(key);
         }
         // 기다리는 결과가 있으면 다음 화면 갱신 때 다시 본다. 애니메이션은 다음 프레임 시각에 다시 그린다.
         if state.pending.is_some() {
@@ -157,7 +219,7 @@ impl Player {
         }
         match &state.shown {
             None => Frame::Pending,
-            Some((_, Ok(shapes))) => Frame::Shapes(shapes.clone()),
+            Some((_, Ok((shapes, _)))) => Frame::Shapes(shapes.clone()),
             Some((_, Err(err))) => Frame::Error(err.clone()),
         }
     }
@@ -193,7 +255,8 @@ struct EditorBlock {
     /// 확장에 넘길 인자(`scale` 뺌)와 앱이 적용할 배율.
     args: Vec<(String, String)>,
     scale: f32,
-    player: Player,
+    /// 같은 자리의 블록이 고쳐져도(누르기로 인자가 바뀌어도) 이어 쓴다.
+    player: Rc<Player>,
 }
 
 /// 열린 시트의 확장 블록 목록. 줄 스타일·줄 블록의 측정·그리기에서 함께 쓴다.
@@ -228,11 +291,18 @@ impl ExtensionBlocks {
                     .find(|kept| kept.block == block)
                     .cloned()
                     .unwrap_or_else(|| {
+                        let player = old
+                            .iter()
+                            .find(|kept| {
+                                kept.block.name == block.name
+                                    && kept.block.rows.start == block.rows.start
+                            })
+                            .map_or_else(|| Rc::new(Player::new()), |kept| kept.player.clone());
                         Rc::new(EditorBlock {
                             args: block.extension_args(),
                             scale: block.scale(),
                             block,
-                            player: Player::new(),
+                            player,
                         })
                     })
             })
@@ -281,11 +351,13 @@ impl ExtensionBlocks {
         }
     }
 
-    /// 블록 닫는 줄 아래에 캔버스를 그린다. 블록이 아니면 `None`이다.
+    /// 블록 닫는 줄 아래에 캔버스를 그린다. 블록이 아니면 `None`이다. 영역(`g.region`)이 있으면 마우스를
+    /// 받는다: 올라가면 그 상태로 다시 그리고, 누르면 `click`이 돌려준 인자를 `editor`의 블록 본문에 쓴다.
     pub(super) fn render(
         &self,
         row: usize,
         size: Size<Pixels>,
+        editor: &WeakEntity<EditorState>,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
@@ -310,19 +382,36 @@ impl ExtensionBlocks {
             Frame::Pending => None,
             Frame::Error(err) => return Some(error_box(&block.block.name, &err, size, pal)),
         };
+        let click_error = block
+            .player
+            .click_error
+            .borrow()
+            .as_ref()
+            .filter(|(failed, _)| Rc::ptr_eq(failed, &loaded))
+            .map(|(_, err)| err.clone());
+        if let Some(err) = click_error {
+            return Some(error_box(&block.block.name, &err, size, pal));
+        }
+        let canvas = div().size_full().child(shapes_canvas(
+            shapes,
+            block.player.cache(),
+            Some(block.player.bounds.clone()),
+            canvas_size,
+            width,
+            height,
+        ));
+        let canvas = if block.player.regions().is_empty() {
+            canvas.into_any_element()
+        } else {
+            interactive(canvas, &block, loaded, canvas_size.0, editor.clone())
+        };
         Some(
             div()
                 .w(size.width)
                 .h(size.height)
                 .pt(px(PADDING_TOP))
                 .pl(left)
-                .child(shapes_canvas(
-                    shapes,
-                    block.player.cache(),
-                    canvas_size,
-                    width,
-                    height,
-                ))
+                .child(div().w(width).h(height).child(canvas))
                 .into_any_element(),
         )
     }
@@ -342,11 +431,119 @@ impl ExtensionBlocks {
     }
 }
 
+/// 영역이 있는 블록의 캔버스: 포인터가 영역에 오가면 그 상태로 다시 그리고, 영역을 눌렀다 떼면 `click`을
+/// 불러 돌려준 인자를 블록 본문에 쓴다. 영역 밖을 누르면 에디터가 받는다(커서가 블록으로 들어간다).
+fn interactive(
+    canvas: Div,
+    block: &Rc<EditorBlock>,
+    loaded: Rc<Loaded>,
+    canvas_width: f32,
+    editor: WeakEntity<EditorState>,
+) -> AnyElement {
+    let hovering = block.player.ui.borrow().hover.is_some();
+    let (moved, left, pressed, released) =
+        (block.clone(), block.clone(), block.clone(), block.clone());
+    canvas
+        .id(("extension-block", block.block.rows.start))
+        .when(hovering, |this| this.cursor_pointer())
+        .on_mouse_move(move |event, window, _| {
+            let player = &moved.player;
+            let ui = Ui {
+                hover: player.region_at(event.position, canvas_width),
+                pressed: player.ui.borrow().pressed.clone(),
+            };
+            if player.set_ui(ui) {
+                window.refresh();
+            }
+        })
+        .on_hover(move |hovered, window, _| {
+            if !hovered && left.player.set_ui(Ui::default()) {
+                window.refresh();
+            }
+        })
+        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            let player = &pressed.player;
+            let Some(region) = player.region_at(event.position, canvas_width) else {
+                return;
+            };
+            window.prevent_default();
+            cx.stop_propagation();
+            player.set_ui(Ui {
+                hover: Some(region.clone()),
+                pressed: Some(region),
+            });
+            window.refresh();
+        })
+        .on_mouse_up(MouseButton::Left, move |event, window, cx| {
+            let player = &released.player;
+            let Some(region) = player.ui.borrow().pressed.clone() else {
+                return;
+            };
+            cx.stop_propagation();
+            let hover = player.region_at(event.position, canvas_width);
+            player.set_ui(Ui {
+                hover: hover.clone(),
+                pressed: None,
+            });
+            window.refresh();
+            // 누른 영역에서 뗐을 때만 누른 것이다.
+            if hover.as_deref() != Some(region.as_str()) {
+                return;
+            }
+            let Ok(worker) = &*loaded else {
+                return;
+            };
+            match worker.click(&region, &released.args) {
+                Ok(changes) if !changes.is_empty() => {
+                    let rows = released.block.rows.clone();
+                    editor
+                        .update(cx, |state, cx| {
+                            write_args(state, rows, &changes, window, cx);
+                        })
+                        .ok();
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    *player.click_error.borrow_mut() = Some((loaded.clone(), err));
+                }
+            }
+        })
+        .into_any_element()
+}
+
+/// 블록(`rows`, 펜스 포함) 본문에 인자 변경을 쓴다. 되돌리기 한 번으로 돌아가고, 커서는 그대로 둔다.
+fn write_args(
+    state: &mut EditorState,
+    rows: Range<usize>,
+    changes: &[(String, String)],
+    window: &mut Window,
+    cx: &mut Context<EditorState>,
+) {
+    let text = state.value();
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(ix, _)| ix + 1))
+        .collect();
+    // 본문: 여는 줄 다음 줄부터 닫는 줄 앞까지.
+    let (Some(&start), Some(&end)) = (starts.get(rows.start + 1), starts.get(rows.end - 1)) else {
+        return;
+    };
+    if start > end {
+        return;
+    }
+    let body: Vec<&str> = text[start..end].lines().collect();
+    let mut new_body = extension::set_args(&body, changes).join("\n");
+    new_body.push('\n');
+    if new_body != text[start..end] {
+        state.replace_range_keeping_selections(start..end, &new_body, window, cx);
+    }
+}
+
 /// 모양을 `width` × `height`에 맞춰 그리는 캔버스. `canvas_size`는 배율을 곱하기 전 크기다(모양의
-/// 좌표가 이 크기 기준이다). 모양이 아직 없으면 빈 자리다.
+/// 좌표가 이 크기 기준이다). 모양이 아직 없으면 빈 자리다. `bounds`가 있으면 그린 자리를 적어 둔다.
 pub(super) fn shapes_canvas(
     shapes: Option<Rc<Vec<Shape>>>,
     cache: Rc<RefCell<TessCache>>,
+    bounds_out: Option<Rc<Cell<Option<Bounds<Pixels>>>>>,
     canvas_size: (f32, f32),
     width: Pixels,
     height: Pixels,
@@ -355,6 +552,9 @@ pub(super) fn shapes_canvas(
     canvas(
         |_, _, _| (),
         move |bounds, (), window, cx| {
+            if let Some(out) = &bounds_out {
+                out.set(Some(bounds));
+            }
             if let Some(shapes) = shapes {
                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
                     paint(&shapes, bounds.origin, scale, &cache, window, cx);

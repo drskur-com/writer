@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
-use super::{Extension, Shape, Theme};
+use super::{Drawing, Extension, Theme, Ui};
 
 /// UI 스레드가 읽기를 기다리는 최대 시간. Lua 쪽 제한([`super::LOAD_TIMEOUT`])보다 조금 길다(스레드를 띄우고
 /// 파일을 해석하는 시간).
@@ -25,6 +25,8 @@ pub struct Info {
     pub animated: bool,
     pub period: Option<f32>,
     pub draws: bool,
+    /// 영역을 누르면 `click`을 부른다.
+    pub clicks: bool,
     pub commands: Vec<String>,
 }
 
@@ -34,6 +36,13 @@ enum Request {
         t: f32,
         args: Vec<(String, String)>,
         theme: Theme,
+        ui: Ui,
+    },
+    /// 영역 `region`을 눌렀다.
+    Click {
+        id: u64,
+        region: String,
+        args: Vec<(String, String)>,
     },
     /// `size(args)`를 묻는다.
     Size {
@@ -45,12 +54,15 @@ enum Request {
 /// 크기 답(요청 번호, 크기).
 type SizeReply = (u64, Result<(f32, f32), String>);
 
+/// 누른 답(요청 번호, 인자 변경).
+type ClickReply = (u64, Result<Vec<(String, String)>, String>);
+
 /// 크기는 블록 인자마다 한 번 묻는다.
 type SizeCache = HashMap<Vec<(String, String)>, Result<(f32, f32), String>>;
 
 struct Reply {
     id: u64,
-    shapes: Result<Vec<Shape>, String>,
+    drawing: Result<Drawing, String>,
 }
 
 /// 작업 스레드에 띄운 확장. UI 스레드에서만 쓴다.
@@ -59,10 +71,11 @@ pub struct Worker {
     requests: Sender<Request>,
     replies: Receiver<Reply>,
     sizes: Receiver<SizeReply>,
+    clicks: Receiver<ClickReply>,
     /// 받았지만 아직 가져가지 않은 결과(블록 번호별 최신 것).
-    inbox: RefCell<HashMap<u64, Result<Vec<Shape>, String>>>,
+    inbox: RefCell<HashMap<u64, Result<Drawing, String>>>,
     size_cache: RefCell<SizeCache>,
-    /// 다음 크기 요청 번호. 늦게 온 옛 답을 걸러 낸다.
+    /// 다음 크기·누름 요청 번호. 늦게 온 옛 답을 걸러 낸다.
     next_size: std::cell::Cell<u64>,
 }
 
@@ -80,6 +93,7 @@ impl Worker {
         let (request_tx, request_rx) = channel::<Request>();
         let (reply_tx, reply_rx) = channel::<Reply>();
         let (size_tx, size_rx) = channel::<SizeReply>();
+        let (click_tx, click_rx) = channel::<ClickReply>();
         let (info_tx, info_rx) = channel::<Result<Info, String>>();
         let thread_name = name.to_string();
         std::thread::Builder::new()
@@ -97,9 +111,18 @@ impl Worker {
                 }
                 while let Ok(request) = request_rx.recv() {
                     let sent = match request {
-                        Request::Draw { id, t, args, theme } => {
-                            let shapes = extension.draw(t, &args, &theme);
-                            reply_tx.send(Reply { id, shapes }).is_ok()
+                        Request::Draw {
+                            id,
+                            t,
+                            args,
+                            theme,
+                            ui,
+                        } => {
+                            let drawing = extension.draw_ui(t, &args, &theme, &ui);
+                            reply_tx.send(Reply { id, drawing }).is_ok()
+                        }
+                        Request::Click { id, region, args } => {
+                            click_tx.send((id, extension.click(&region, &args))).is_ok()
                         }
                         Request::Size { id, args } => {
                             size_tx.send((id, extension.size_for(&args))).is_ok()
@@ -119,6 +142,7 @@ impl Worker {
             requests: request_tx,
             replies: reply_rx,
             sizes: size_rx,
+            clicks: click_rx,
             inbox: RefCell::default(),
             size_cache: RefCell::default(),
             next_size: std::cell::Cell::new(1),
@@ -126,15 +150,44 @@ impl Worker {
     }
 
     /// 블록 `id`의 `t`초 그림을 요청한다. 결과는 [`Self::take`]로 가져간다.
-    pub fn request(&self, id: u64, t: f32, args: &[(String, String)], theme: Theme) {
+    pub fn request(&self, id: u64, t: f32, args: &[(String, String)], theme: Theme, ui: Ui) {
         self.requests
             .send(Request::Draw {
                 id,
                 t,
                 args: args.to_vec(),
                 theme,
+                ui,
             })
             .ok();
+    }
+
+    /// 영역 `region`을 누른 결과(블록 인자 변경). 작업 스레드의 답을 기다린다(누름은 드물고 짧다).
+    pub fn click(
+        &self,
+        region: &str,
+        args: &[(String, String)],
+    ) -> Result<Vec<(String, String)>, String> {
+        if !self.info.clicks {
+            return Ok(Vec::new());
+        }
+        let id = self.next_size.replace(self.next_size.get() + 1);
+        self.requests
+            .send(Request::Click {
+                id,
+                region: region.to_string(),
+                args: args.to_vec(),
+            })
+            .ok();
+        let deadline = std::time::Instant::now() + LOAD_WAIT;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.clicks.recv_timeout(left) {
+                Ok((reply, changes)) if reply == id => return changes,
+                Ok(_) => continue,
+                Err(_) => return Err("click took too long".into()),
+            }
+        }
     }
 
     /// 블록 인자 `args`일 때의 캔버스 크기. `size`가 함수면 작업 스레드에 묻고 답을 기다린다(배치에
@@ -169,17 +222,17 @@ impl Worker {
     }
 
     /// 블록 `id`에 온 결과가 있으면 가져간다.
-    pub fn take(&self, id: u64) -> Option<Result<Vec<Shape>, String>> {
+    pub fn take(&self, id: u64) -> Option<Result<Drawing, String>> {
         let mut inbox = self.inbox.borrow_mut();
         for reply in self.replies.try_iter() {
-            inbox.insert(reply.id, reply.shapes);
+            inbox.insert(reply.id, reply.drawing);
         }
         inbox.remove(&id)
     }
 
     /// 결과를 기다린다(테스트용).
     #[cfg(test)]
-    pub fn wait(&self, id: u64) -> Result<Vec<Shape>, String> {
+    pub fn wait(&self, id: u64) -> Result<Drawing, String> {
         loop {
             if let Some(shapes) = self.take(id) {
                 return shapes;
@@ -204,11 +257,41 @@ mod tests {
         .unwrap();
         assert_eq!(worker.info.size, Some((10.0, 20.0)));
         assert_eq!(worker.info.period, Some(2.0));
-        worker.request(1, 0.0, &[], Theme::default());
-        worker.request(2, 5.0, &[], Theme::default());
+        worker.request(1, 0.0, &[], Theme::default(), Ui::default());
+        worker.request(2, 5.0, &[], Theme::default(), Ui::default());
         let second = worker.wait(2).unwrap();
         let first = worker.wait(1).unwrap();
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn draws_regions_and_answers_clicks() {
+        let worker = Worker::spawn(
+            "button",
+            "return { draw = function(g, t, args, ui) \
+               g.setColor(ui.hover == 'b' and '#ff0000' or '#000000') \
+               g.rectangle('fill', 0, 0, 10, 10) g.region('b', 0, 0, 10, 10) end, \
+             click = function(id, args) return { on = not args.on, n = (args.n or 0) + 1 } end }"
+                .into(),
+        )
+        .unwrap();
+        assert!(worker.info.clicks);
+        worker.request(1, 0.0, &[], Theme::default(), Ui::default());
+        let (plain, regions) = worker.wait(1).unwrap();
+        assert_eq!(regions.len(), 1);
+        let hover = Ui {
+            hover: Some("b".into()),
+            ..Ui::default()
+        };
+        worker.request(2, 0.0, &[], Theme::default(), hover);
+        assert_ne!(worker.wait(2).unwrap().0, plain);
+        assert_eq!(
+            worker.click("b", &[("on".into(), "true".into())]),
+            Ok(vec![
+                ("n".into(), "1".into()),
+                ("on".into(), "false".into())
+            ])
+        );
     }
 
     #[test]

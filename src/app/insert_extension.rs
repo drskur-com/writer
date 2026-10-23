@@ -208,6 +208,7 @@ pub(super) fn render_preview(
         .child(shapes_canvas(
             shapes,
             player.cache(),
+            None,
             canvas_size,
             fit_width * shrink,
             fit_height * shrink,

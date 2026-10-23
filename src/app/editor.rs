@@ -663,6 +663,8 @@ impl WriterApp {
                 )),
                 cx,
             );
+            // 확장 블록의 영역을 누르면 블록 본문(인자)을 고친다(ADR-0032).
+            let block_editor = cx.entity().downgrade();
             // 이미지 줄 아래에 이미지를 그린다(ADR-0008).
             let images = Rc::new(ImageBlocks::new(&path));
             let measure = images.clone();
@@ -688,6 +690,7 @@ impl WriterApp {
                             .children(render_extensions.render(
                                 block.line,
                                 size(block.size.width, drawn),
+                                &block_editor,
                                 window,
                                 cx,
                             ))

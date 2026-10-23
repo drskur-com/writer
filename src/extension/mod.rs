@@ -31,7 +31,8 @@ use std::time::{Duration, Instant, SystemTime};
 use mlua::{Function, Lua, Table, Value, VmState};
 
 pub use canvas::{
-    Align, Color, FillRule, LineCap, LineJoin, Paint, Segment, Shape, StrokeStyle, Theme,
+    Align, Color, FillRule, LineCap, LineJoin, Paint, Region, Segment, Shape, StrokeStyle, Theme,
+    region_at,
 };
 pub use worker::{Info, Worker};
 
@@ -207,6 +208,26 @@ pub fn parse_args(lines: &[&str]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// 블록 본문 줄에 인자 변경을 적는다(`click`의 결과, ADR-0032). 있는 인자는 마지막 줄의 값만 바꾸고(들여쓰기와
+/// `key:` 모양은 그대로), 없는 인자는 끝에 `key: value` 줄로 더한다.
+pub fn set_args(body: &[&str], changes: &[(String, String)]) -> Vec<String> {
+    let mut lines: Vec<String> = body.iter().map(ToString::to_string).collect();
+    for (key, value) in changes {
+        let found = lines.iter().rposition(|line| {
+            line.split_once(':')
+                .is_some_and(|(name, _)| name.trim() == key)
+        });
+        match found {
+            Some(ix) => {
+                let (name, _) = lines[ix].split_once(':').unwrap_or_default();
+                lines[ix] = format!("{name}: {value}").trim_end().to_string();
+            }
+            None => lines.push(format!("{key}: {value}").trim_end().to_string()),
+        }
+    }
+    lines
+}
+
 /// 내보내기·책 미리보기에 넣는 확장 블록 그림: 밝은 테마, `t = 0` 한 장.
 #[derive(Clone, Debug)]
 pub struct Still {
@@ -378,6 +399,24 @@ pub fn block_text(name: &str, args: &[(String, String)]) -> String {
     text
 }
 
+/// 그릴 때 넘기는 마우스 상태(`draw`의 `ui`, ADR-0032). 내보내기·미리보기처럼 마우스가 없으면 비어 있다.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Ui {
+    /// 포인터가 올라가 있는 영역.
+    pub hover: Option<String>,
+    /// 누르고 있는 영역.
+    pub pressed: Option<String>,
+}
+
+impl Ui {
+    pub fn is_empty(&self) -> bool {
+        self.hover.is_none() && self.pressed.is_none()
+    }
+}
+
+/// 한 프레임의 그림: 모양과 누를 수 있는 영역.
+pub type Drawing = (Vec<Shape>, Vec<Region>);
+
 /// 명령에 넘기는 정보.
 #[derive(Clone, Debug, Default)]
 pub struct CommandContext {
@@ -404,6 +443,8 @@ pub struct Extension {
     /// 애니메이션이 되풀이되는 주기(초). 있으면 한 주기의 프레임을 캐시해 다시 그리지 않는다.
     pub period: Option<f32>,
     pub draws: bool,
+    /// 영역을 누르면 부르는 `click(id, args)`가 있는지.
+    pub clicks: bool,
     /// 명령 제목(순서대로).
     pub commands: Vec<String>,
 }
@@ -476,6 +517,7 @@ impl Extension {
             animated: self.animated,
             period: self.period,
             draws: self.draws,
+            clicks: self.clicks,
             commands: self.commands.clone(),
         }
     }
@@ -523,6 +565,17 @@ impl Extension {
             ));
         };
         let draws = matches!(module.get::<Value>("draw"), Ok(Value::Function(_)));
+        let clicks = match module.get::<Value>("click").map_err(message)? {
+            Value::Nil => false,
+            Value::Function(_) if draws => true,
+            Value::Function(_) => return Err("click needs a draw function with regions".into()),
+            other => {
+                return Err(format!(
+                    "click must be a function(id, args), got {}",
+                    other.type_name()
+                ));
+            }
+        };
         let commands = command_titles(&module)?;
         if !draws && commands.is_empty() {
             return Err("the returned table has neither draw nor commands".into());
@@ -568,17 +621,30 @@ impl Extension {
             animated,
             period,
             draws,
+            clicks,
             commands,
         })
     }
 
-    /// `t`초의 그림. `args`는 블록 본문이다.
+    /// `t`초의 그림(마우스 없이). `args`는 블록 본문이다.
     pub fn draw(
         &self,
         t: f32,
         args: &[(String, String)],
         theme: &Theme,
     ) -> Result<Vec<Shape>, String> {
+        self.draw_ui(t, args, theme, &Ui::default())
+            .map(|(shapes, _)| shapes)
+    }
+
+    /// `t`초의 그림과 영역. `ui`는 마우스 상태다.
+    pub fn draw_ui(
+        &self,
+        t: f32,
+        args: &[(String, String)],
+        theme: &Theme,
+        ui: &Ui,
+    ) -> Result<Drawing, String> {
         if !self.draws {
             return Err("this extension has no draw function".into());
         }
@@ -600,11 +666,74 @@ impl Extension {
             let math: Table = self.lua.globals().get("math")?;
             math.get::<Function>("randomseed")?
                 .call::<()>(RANDOM_SEED)?;
+            let ui_table = self.lua.create_table()?;
+            ui_table.raw_set("hover", ui.hover.as_deref())?;
+            ui_table.raw_set("pressed", ui.pressed.as_deref())?;
             self.deadline.set(Instant::now() + DRAW_TIMEOUT);
-            draw.call::<()>((self.g.clone(), t, self.args_table(args)?))
+            draw.call::<()>((self.g.clone(), t, self.args_table(args)?, ui_table))
         };
         run().map_err(message)?;
-        Ok(std::mem::take(&mut self.recorder.borrow_mut().shapes))
+        let mut recorder = self.recorder.borrow_mut();
+        Ok((
+            std::mem::take(&mut recorder.shapes),
+            std::mem::take(&mut recorder.regions),
+        ))
+    }
+
+    /// 영역 `id`를 눌렀다. `click(id, args)`가 돌려준 인자 변경(`key`, 블록에 쓸 값)을 돌려준다.
+    pub fn click(
+        &self,
+        id: &str,
+        args: &[(String, String)],
+    ) -> Result<Vec<(String, String)>, String> {
+        if !self.clicks {
+            return Ok(Vec::new());
+        }
+        let click: Function = self.module.get("click").map_err(message)?;
+        let call = || -> mlua::Result<Value> {
+            self.deadline.set(Instant::now() + DRAW_TIMEOUT);
+            click.call((id, self.args_table(args)?))
+        };
+        let changes = match call().map_err(message)? {
+            Value::Nil => return Ok(Vec::new()),
+            Value::Table(changes) => changes,
+            other => {
+                return Err(format!(
+                    "click must return a table of argument values or nil, got {}",
+                    other.type_name()
+                ));
+            }
+        };
+        let mut out = Vec::new();
+        for pair in changes.pairs::<Value, Value>() {
+            let (key, value) = pair.map_err(message)?;
+            let Value::String(key) = key else {
+                return Err("click: argument names must be strings".into());
+            };
+            let key = key.to_string_lossy();
+            if key.trim().is_empty() || key.contains([':', '\n']) || key.trim() != key {
+                return Err(format!("click: invalid argument name \"{key}\""));
+            }
+            let value = match value {
+                Value::String(text) => text.to_string_lossy(),
+                Value::Boolean(flag) => flag.to_string(),
+                Value::Integer(n) => n.to_string(),
+                Value::Number(n) if n.fract() == 0.0 && n.abs() < 1e15 => format!("{}", n as i64),
+                Value::Number(n) => n.to_string(),
+                other => {
+                    return Err(format!(
+                        "click: the value of {key} must be a string, number, or boolean, got {}",
+                        other.type_name()
+                    ));
+                }
+            };
+            if value.contains('\n') {
+                return Err(format!("click: the value of {key} must be one line"));
+            }
+            out.push((key, value.trim().to_string()));
+        }
+        out.sort();
+        Ok(out)
     }
 
     /// 블록 인자 `args`일 때의 캔버스 크기.
@@ -1123,16 +1252,70 @@ return {
         assert!(bad.size_for(&[]).unwrap_err().contains("between 1 and"));
     }
 
+    #[test]
+    fn click_changes_block_args() {
+        let body = ["  mode: a", "count: 1", "note: x: y"];
+        assert_eq!(
+            set_args(
+                &body,
+                &[
+                    ("count".into(), "2".into()),
+                    ("note".into(), "z".into()),
+                    ("new".into(), "yes".into())
+                ]
+            ),
+            ["  mode: a", "count: 2", "note: z", "new: yes"]
+        );
+        let extension = Extension::load(
+            "toggle",
+            "return { draw = function(g, t, args, ui) g.region('x', 0, 0, 1, 1) end, \
+             click = function(id, args) return { on = not args.on, label = 'a\\nb' } end }",
+        )
+        .unwrap();
+        assert!(extension.click("x", &[]).unwrap_err().contains("one line"));
+        let bad = Extension::load("bad", "return { click = function() end, commands = {} }");
+        assert!(bad.unwrap_err().contains("draw"));
+        // 변환을 적용한 테두리 상자로 모은다.
+        let rotated = Extension::load(
+            "r",
+            "return { draw = function(g) g.translate(10, 0) g.rotate(math.pi / 2) \
+             g.region('r', 0, 0, 4, 2) end }",
+        )
+        .unwrap();
+        let (_, regions) = rotated
+            .draw_ui(0.0, &[], &Theme::default(), &Ui::default())
+            .unwrap();
+        let [x, y, w, h] = regions[0].rect;
+        assert!(
+            (x - 8.0).abs() < 1e-4
+                && y.abs() < 1e-4
+                && (w - 2.0).abs() < 1e-4
+                && (h - 4.0).abs() < 1e-4
+        );
+        assert_eq!(region_at(&regions, [9.0, 1.0]), Some("r"));
+        assert_eq!(region_at(&regions, [11.0, 1.0]), None);
+    }
+
     /// `extension` 스킬의 예제는 모델이 그대로 베끼므로 모두 실제로 돌아야 한다.
     #[test]
     fn skill_examples_run() {
-        let doc = include_str!("../../resources/skills/extension/references/examples.md");
+        let doc = [
+            include_str!("../../resources/skills/extension/references/examples/archer.md"),
+            include_str!("../../resources/skills/extension/references/examples/bar-chart.md"),
+            include_str!("../../resources/skills/extension/references/examples/night-sky.md"),
+            include_str!("../../resources/skills/extension/references/examples/text-tools.md"),
+            include_str!("../../resources/skills/extension/references/examples/turntable.md"),
+            include_str!("../../resources/skills/extension/references/examples/seedling.md"),
+            include_str!("../../resources/skills/extension/references/examples/route.md"),
+            include_str!("../../resources/skills/extension/references/examples/pick-chart.md"),
+        ]
+        .concat();
         let sources: Vec<&str> = doc
             .split("```lua\n")
             .skip(1)
             .filter_map(|rest| rest.split("\n```").next())
             .collect();
-        assert_eq!(sources.len(), 7);
+        assert_eq!(sources.len(), 8);
         let theme = Theme::default();
         let args = [
             ("values".to_string(), "12, 30, 21, 8".to_string()),
@@ -1152,6 +1335,36 @@ return {
             if extension.draws {
                 assert!(!meta.example.is_empty());
                 extension.draw(0.0, &meta.example, &theme).unwrap();
+            }
+            // 누를 수 있으면 영역마다 눌러 보고, 돌려준 인자로도 그린다. 바꾸는 인자는 앞머리에 있다.
+            if extension.clicks {
+                let (_, regions) = extension
+                    .draw_ui(0.0, &meta.example, &theme, &Ui::default())
+                    .unwrap();
+                assert!(!regions.is_empty());
+                for region in &regions {
+                    let changes = extension.click(&region.id, &meta.example).unwrap();
+                    for (key, _) in &changes {
+                        assert!(meta.args.iter().any(|(arg, _)| arg == key), "{key}");
+                    }
+                    let body: Vec<String> = meta
+                        .example
+                        .iter()
+                        .map(|(key, value)| format!("{key}: {value}"))
+                        .collect();
+                    let body: Vec<&str> = body.iter().map(String::as_str).collect();
+                    let clicked = parse_args(
+                        &set_args(&body, &changes)
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>(),
+                    );
+                    let hover = Ui {
+                        hover: Some(region.id.clone()),
+                        pressed: None,
+                    };
+                    extension.draw_ui(0.0, &clicked, &theme, &hover).unwrap();
+                }
             }
             if extension.draws {
                 for t in [0.0, 0.7, 1.9, 2.5] {

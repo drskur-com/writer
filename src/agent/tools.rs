@@ -239,8 +239,10 @@ impl Workspace {
                 "Test an extension (Extensions/<name>.lua). Without command, calls draw(g, t, args) and reports \
                  errors, the number of shapes, and the bounds of what was drawn compared with the canvas, and attaches \
                  a picture of the canvas so you can see the drawing. Pass times to see several animation frames in one \
-                 picture. With command, runs that command (1-based index or title) with the given selection and \
-                 returns its result. Nothing in the library changes.",
+                 picture. Lists the regions (g.region) it declared. Pass hover to draw with the pointer over a region, \
+                 or click to call click(id, args) on a region and draw with the arguments it returns. With command, \
+                 runs that command (1-based index or title) with the given selection and returns its result. Nothing \
+                 in the library changes.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -263,6 +265,8 @@ impl Workspace {
                             "description": "Block arguments for draw, as in the ```ext block's key: value lines.",
                             "additionalProperties": { "type": ["string", "number", "boolean"] },
                         },
+                        "hover": { "type": "string", "description": "Region id under the pointer (ui.hover) while drawing." },
+                        "click": { "type": "string", "description": "Region id to click: calls click(id, args), then draws with the changed arguments and the pointer over that region." },
                         "command": { "type": ["integer", "string"], "description": "Command to run instead of draw: 1-based index or title." },
                         "selection": { "type": "string", "description": "Selected text passed to the command as ctx.selection." },
                     },
@@ -569,7 +573,7 @@ impl Workspace {
         &self,
         arguments: &Map<String, Value>,
     ) -> Result<(String, Option<Drawing>), String> {
-        use crate::extension::{CommandContext, Extension, Theme};
+        use crate::extension::{CommandContext, Extension, Theme, Ui};
         let name = arguments.get("name").and_then(Value::as_str).unwrap_or("");
         let source = self.extension_source(name)?;
         let extension = Extension::load(name, &source)?;
@@ -632,7 +636,40 @@ impl Workspace {
             })
             .unwrap_or_default();
         // 배율은 앱이 적용하고 확장에는 넘기지 않는다.
-        let args = crate::extension::without_scale(&args);
+        let mut args = crate::extension::without_scale(&args);
+        let mut ui = Ui {
+            hover: arguments
+                .get("hover")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            pressed: None,
+        };
+        // 누르면 돌려준 인자로 바꿔 그린다(에디터가 블록 본문에 쓰는 것과 같다).
+        let mut clicked = String::new();
+        if let Some(region) = arguments.get("click").and_then(Value::as_str) {
+            let changes = extension.click(region, &args)?;
+            clicked = if !extension.clicks {
+                " The extension has no click function, so clicking changes nothing.".to_string()
+            } else if changes.is_empty() {
+                format!(" click(\"{region}\") returned nothing to change.")
+            } else {
+                let set: Vec<String> = changes
+                    .iter()
+                    .map(|(key, value)| format!("{key}: {value}"))
+                    .collect();
+                format!(
+                    " click(\"{region}\") set {}; drawn with the changed arguments.",
+                    set.join(", ")
+                )
+            };
+            for (key, value) in changes {
+                match args.iter_mut().rev().find(|(name, _)| *name == key) {
+                    Some(arg) => arg.1 = value,
+                    None => args.push((key, value)),
+                }
+            }
+            ui.hover = Some(region.to_string());
+        }
         let (width, height) = extension.size_for(&args)?;
         let header = format!(
             "Canvas {width} x {height}, animated: {}, commands: {commands}.",
@@ -643,14 +680,20 @@ impl Workspace {
         }
         let theme = Theme::default();
         let mut frames = Vec::with_capacity(times.len());
+        let mut regions = Vec::new();
         for &t in &times {
-            frames.push((t, extension.draw(t, &args, &theme)?));
+            let (shapes, drawn) = extension.draw_ui(t, &args, &theme, &ui)?;
+            if frames.is_empty() {
+                regions = drawn;
+            }
+            frames.push((t, shapes));
         }
         let lines: Vec<String> = frames
             .iter()
             .map(|(t, shapes)| describe(*t, shapes, width, height))
             .collect();
-        let mut report = format!("{header} {}", lines.join(" "));
+        let mut report = format!("{header}{clicked} {}", lines.join(" "));
+        report.push_str(&describe_regions(&regions, ui.hover.as_deref()));
         let image = if arguments.get("image").and_then(Value::as_bool) == Some(false) {
             None
         } else {
@@ -952,6 +995,38 @@ fn shown(path: &str) -> String {
 const MAX_FRAMES: usize = 8;
 
 /// 그린 결과 한 프레임의 요약: 모양 수와 범위, 캔버스를 벗어나는지.
+/// `g.region`으로 둔 영역(첫 프레임). `hover`가 영역에 없으면 알린다.
+fn describe_regions(regions: &[crate::extension::Region], hover: Option<&str>) -> String {
+    const SHOWN: usize = 20;
+    let mut text = if regions.is_empty() {
+        " No regions (g.region), so the block does not react to the mouse.".to_string()
+    } else {
+        let listed: Vec<String> = regions
+            .iter()
+            .take(SHOWN)
+            .map(|region| {
+                let [x, y, w, h] = region.rect.map(|value| value.round());
+                format!("{} [{x}, {y}, {w}, {h}]", region.id)
+            })
+            .collect();
+        let more = regions.len().saturating_sub(SHOWN);
+        let more = if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        };
+        format!(" Regions [x, y, w, h]: {}{more}.", listed.join(", "))
+    };
+    if let Some(hover) = hover
+        && !regions.iter().any(|region| region.id == hover)
+    {
+        text.push_str(&format!(
+            " Note: no region is named \"{hover}\", so nothing is under the pointer."
+        ));
+    }
+    text
+}
+
 fn describe(t: f32, shapes: &[crate::extension::Shape], width: f32, height: f32) -> String {
     use crate::extension::{Paint, Segment, Shape};
     let (mut fills, mut strokes, mut texts, mut gradients) = (0, 0, 0, 0);
@@ -1469,6 +1544,47 @@ mod tests {
         let out = run(json!({ "name": "bare" }));
         assert!(
             out.text.contains("Note: The file has no header."),
+            "{}",
+            out.text
+        );
+    }
+
+    #[test]
+    fn runs_extension_hover_and_click() {
+        let (ws, root) = workspace();
+        std::fs::create_dir_all(root.join("Extensions")).unwrap();
+        std::fs::write(
+            root.join("Extensions/toggle.lua"),
+            "--[[---\ndescription: 켜고 끄기\nargs:\n  on: 켜짐\nexample:\n  on: false\n---]]\n\
+             return { size = { 40, 20 }, \
+             draw = function(g, t, args, ui) \
+               if args.on then g.circle('fill', 30, 10, 5) end \
+               if ui.hover == 'switch' then g.rectangle('line', 0, 0, 20, 20) end \
+               g.rectangle('fill', 2, 2, 16, 16) g.region('switch', 0, 0, 20, 20) end, \
+             click = function(id, args) return { on = not args.on } end }",
+        )
+        .unwrap();
+        let run = |arguments: Value| ws.call(RUN_EXTENSION, arguments.as_object().unwrap());
+        let out = run(json!({ "name": "toggle", "args": { "on": false } }));
+        assert!(
+            out.text
+                .contains("Regions [x, y, w, h]: switch [0, 0, 20, 20]."),
+            "{}",
+            out.text
+        );
+        assert!(out.text.contains("1 shapes"), "{}", out.text);
+        let out = run(json!({ "name": "toggle", "args": { "on": false }, "hover": "switch" }));
+        assert!(out.text.contains("2 shapes"), "{}", out.text);
+        let out = run(json!({ "name": "toggle", "args": { "on": false }, "click": "switch" }));
+        assert!(
+            out.text.contains("click(\"switch\") set on: true"),
+            "{}",
+            out.text
+        );
+        assert!(out.text.contains("3 shapes"), "{}", out.text);
+        let out = run(json!({ "name": "toggle", "hover": "nope" }));
+        assert!(
+            out.text.contains("no region is named \"nope\""),
             "{}",
             out.text
         );
