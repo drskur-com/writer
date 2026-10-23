@@ -566,28 +566,51 @@ impl ExtensionBlocks {
     /// 본문에 맞춰 블록을 다시 찾는다. 바뀐 블록이 닿았던 줄과 닿는 줄을 돌려준다(다시 배치할 줄).
     pub(super) fn sync(&self, text: &str) -> Vec<Range<usize>> {
         let old = self.blocks.take();
+        // 그리기 상태(Player)를 넘겨받은 옛 블록. 둘이 같은 상태를 나눠 갖지 않게 한다.
+        let mut claimed = vec![false; old.len()];
         let new: Vec<Rc<EditorBlock>> = extension::blocks(text)
             .into_iter()
             .map(|block| {
-                old.iter()
-                    .find(|kept| kept.block == block)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        let player = old
-                            .iter()
-                            .find(|kept| {
-                                kept.block.name == block.name
-                                    && kept.block.rows.start == block.rows.start
-                            })
-                            .map_or_else(|| Rc::new(Player::new()), |kept| kept.player.clone());
-                        Rc::new(EditorBlock {
-                            args: block.extension_args(),
-                            scale: block.scale(),
-                            align: extension::align_of(&block.args),
-                            block,
-                            player,
-                        })
+                if let Some(ix) = old
+                    .iter()
+                    .enumerate()
+                    .position(|(ix, kept)| !claimed[ix] && kept.block == block)
+                {
+                    claimed[ix] = true;
+                    return old[ix].clone();
+                }
+                // 위에서 줄을 더하거나 지워 자리만 옮긴 블록(같은 이름·인자, 가장 가까운 것), 아니면 같은 자리에서 인자를
+                // 고친 블록의 상태를 넘겨받는다. 지난 그림을 그대로 보이다가 바뀐 것만 다시 그린다(깜박이지 않는다).
+                let distance = |kept: &EditorBlock| kept.block.rows.start.abs_diff(block.rows.start);
+                let moved = old
+                    .iter()
+                    .enumerate()
+                    .filter(|(ix, kept)| {
+                        !claimed[*ix] && kept.block.name == block.name && kept.block.args == block.args
                     })
+                    .min_by_key(|(_, kept)| distance(kept))
+                    .map(|(ix, _)| ix);
+                let edited = || {
+                    old.iter().enumerate().position(|(ix, kept)| {
+                        !claimed[ix]
+                            && kept.block.name == block.name
+                            && kept.block.rows.start == block.rows.start
+                    })
+                };
+                let player = match moved.or_else(edited) {
+                    Some(ix) => {
+                        claimed[ix] = true;
+                        old[ix].player.clone()
+                    }
+                    None => Rc::new(Player::new()),
+                };
+                Rc::new(EditorBlock {
+                    args: block.extension_args(),
+                    scale: block.scale(),
+                    align: extension::align_of(&block.args),
+                    block,
+                    player,
+                })
             })
             .collect();
         let changed = |from: &[Rc<EditorBlock>], to: &[Rc<EditorBlock>]| {

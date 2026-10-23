@@ -4,6 +4,7 @@
 //!   화면, 어시스턴트가 보는 PNG, DOCX가 같은 그림이다.
 //! - 그리기는 렌더 스레드들이 한다([`submit`]). UI는 기다리지 않고 지난 이미지를 보이다가, 새 이미지가 오면 다음
 //!   프레임에 바꾼다. 캔버스마다 한 번에 하나만 맡기고, 끝나면 그때의 최신 모양을 맡긴다(느리면 프레임을 건너뛴다).
+//!   보일 이미지가 아직 없을 때(처음 보일 때)만 UI 스레드에서 바로 그린다.
 //! - 캔버스마다 마지막 이미지를 (모양, 픽셀 크기)로 기억한다. 같으면(스크롤, 입력, 정지 그림) 다시 그리지 않는다.
 //! - 바꾸거나 캔버스가 사라진 이미지는 그 창의 이미지 아틀라스에서 지운다. 지우려면 창이 있어야 하므로, 다음에
 //!   그 창에서 그릴 때 지운다([`STALE`]).
@@ -46,6 +47,8 @@ impl Drop for RasterCache {
 thread_local! {
     /// 아틀라스에서 지울 이미지와 그 창.
     static STALE: RefCell<Vec<(WindowId, Arc<RenderImage>)>> = const { RefCell::new(Vec::new()) };
+    /// 처음 보이는 그림을 바로 그릴 때 쓰는 렌더 문맥.
+    static UI_RENDERER: RefCell<Renderer> = RefCell::new(Renderer::new());
 }
 
 /// 모양 목록을 `bounds`(창 좌표)에 그린다. 모양 좌표에 `scale`을 곱하면 `bounds` 안의 자리다.
@@ -94,6 +97,19 @@ pub(super) fn paint(
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => cache.pending = None,
+        }
+    }
+    // 아직 보일 것이 없으면(처음 보일 때) 여기서 바로 그린다. 빈 캔버스가 한 프레임 보이지 않게 한다.
+    if cache.shown.is_none() && cache.pending.is_none() {
+        let job = Job {
+            shapes: shapes.to_vec(),
+            scale: scale * density * fit,
+            width,
+            height,
+            reply: channel().0,
+        };
+        if let Some(image) = UI_RENDERER.with(|renderer| render(&mut renderer.borrow_mut(), &job)) {
+            cache.shown = Some((key, Arc::new(image), window_id));
         }
     }
     let current = cache.shown.as_ref().is_some_and(|(shown, ..)| *shown == key);
