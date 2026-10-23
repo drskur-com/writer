@@ -61,7 +61,8 @@ reqwest_client = { version = "=0.3.9", package = "gpui-pre-reqwest-client" }
 # 로컬 캐시(할 일 색인 등, ADR-0024): 동기화하지 않는 OS 캐시 폴더의 키-값 파일. 값은 JSON으로 넣는다.
 redb = "4.4"
 serde_json = "1"
-rig-core = "0.45"
+# Alibaba Token Plan(OpenAI 호환 Chat Completions)은 rig의 공유 reqwest 클라이언트로 부른다.
+rig-core = { version = "0.45", features = ["reqwest"] }
 rig-bedrock = "0.45"
 # 어시스턴트의 web_fetch: HTTP(rig와 같은 reqwest), HTML → 마크다운, 옛 문자 인코딩(EUC-KR 등).
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip"] }

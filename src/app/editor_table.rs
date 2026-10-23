@@ -16,7 +16,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use super::book_preview::column_widths;
-use super::style::Palette;
 use crate::markdown::{self, ColumnAlign, Table};
 
 /// 칸 글자 크기(본문 대비).
@@ -166,7 +165,7 @@ impl TableBlocks {
             .table_at(row)
             .filter(|table| table.rows.end == row + 1)?;
         let grid = self.grid(&table, size.width);
-        let pal = Palette::from_theme(cx.theme());
+        let theme = cx.theme();
         let line_height = self.font_size.get() * LINE_HEIGHT;
         let rule = |top: Pixels| {
             div()
@@ -175,7 +174,7 @@ impl TableBlocks {
                 .top(top)
                 .w(size.width)
                 .h(px(1.))
-                .bg(pal.border)
+                .bg(theme.table_row_border)
         };
         let mut root = div()
             .relative()
@@ -184,7 +183,7 @@ impl TableBlocks {
             .font_family(self.family.borrow().clone())
             .text_size(self.font_size.get())
             .line_height(line_height)
-            .text_color(pal.foreground);
+            .text_color(theme.foreground);
         // 행 배경을 먼저 그려 테두리가 배경에 가려지지 않게 한다.
         for (row_ix, row) in grid.rows.iter().enumerate() {
             root = root.child(
@@ -195,9 +194,9 @@ impl TableBlocks {
                     .w(size.width)
                     .h(row.height)
                     .bg(if row_ix % 2 == 1 {
-                        pal.tint
+                        theme.table_even
                     } else {
-                        pal.background
+                        theme.table
                     }),
             );
         }
@@ -240,7 +239,7 @@ impl TableBlocks {
                     .top(first.top)
                     .w(px(1.))
                     .h(height)
-                    .bg(pal.border)
+                    .bg(theme.table_row_border)
             };
             root = root.child(vertical_rule(px(0.)));
             for &(left, _, _) in grid.columns.iter().skip(1) {

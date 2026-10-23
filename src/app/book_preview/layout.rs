@@ -761,8 +761,7 @@ impl<'a> Flow<'a> {
         marker: Option<(&str, Pixels)>,
     ) {
         let (text, runs, mut boxes) = self.laid(rich, style, true);
-        let lines =
-            self.break_lines_with(&text, &runs, &mut boxes, style, ctx.width, style.indent);
+        let lines = self.break_lines_with(&text, &runs, &mut boxes, style, ctx.width, style.indent);
         self.space(style.before);
         // 한 줄씩 놓아 페이지 끝에서 문단이 나뉘게 한다. 첫 줄만 페이지 끝에 남거나(외톨이 줄)
         // 마지막 줄만 다음 페이지로 넘어가지(과부 줄) 않게 그다음 줄과 함께 둔다.

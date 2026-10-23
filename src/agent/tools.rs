@@ -320,6 +320,11 @@ impl Workspace {
                 }),
             ),
             (super::web::WEB_FETCH, super::web::DESCRIPTION, super::web::parameters()),
+            (
+                super::model_tool::SET_MODEL,
+                super::model_tool::DESCRIPTION,
+                super::model_tool::parameters(),
+            ),
         ]
         .into_iter()
         .chain(load_skill)
@@ -491,7 +496,10 @@ impl Workspace {
         let mut by_extension: BTreeMap<String, Vec<PendingChange>> = BTreeMap::new();
         for (key, draft) in drafts {
             if let Some(name) = draft_extension(&key) {
-                by_extension.entry(name.to_string()).or_default().push(draft);
+                by_extension
+                    .entry(name.to_string())
+                    .or_default()
+                    .push(draft);
             }
         }
         by_extension
@@ -590,8 +598,12 @@ impl Workspace {
             files.extend(disk.modules.into_values());
         }
         files.extend(drafted);
-        Package::from_files(files.iter().map(|(path, source)| (path.as_str(), source.as_str())))
-            .map_err(|err| format!("{prefix}: {err}"))
+        Package::from_files(
+            files
+                .iter()
+                .map(|(path, source)| (path.as_str(), source.as_str())),
+        )
+        .map_err(|err| format!("{prefix}: {err}"))
     }
 
     /// 승인한 변경을 쓴다. 기다리는 동안 파일이 바뀌었으면 쓰지 않는다.
@@ -615,6 +627,13 @@ impl Workspace {
                                 before retrying."
                             .into(),
                     );
+                }
+                // 첫 라이브러리 테마면 테마 폴더가 아직 없다(`plan_write`가 허락한 경우만 여기 온다).
+                if let Some(parent) = file.parent()
+                    && parent.file_name() == Some(std::ffi::OsStr::new(crate::theme::THEMES_DIR))
+                    && std::fs::symlink_metadata(parent).is_err()
+                {
+                    std::fs::create_dir(parent).map_err(|err| err.to_string())?;
                 }
                 crate::library::write_sheet(&file, &change.after).map_err(|err| err.to_string())?;
                 Ok(change.done)
@@ -1025,8 +1044,18 @@ impl Workspace {
         let parent = relative
             .parent()
             .map_or("", |parent| parent.to_str().unwrap_or(""));
-        let dir = self.resolve_existing(parent)?;
-        if !dir.is_dir() {
+        // 테마 폴더는 첫 테마를 승인할 때 만든다(ADR-0047).
+        let dir = match self.resolve_existing(parent) {
+            Err(_) if parent == crate::theme::THEMES_DIR => {
+                let themes = self.resolve_existing("")?.join(parent);
+                if std::fs::symlink_metadata(&themes).is_ok() {
+                    return Err("Cannot write through a symbolic link.".into());
+                }
+                themes
+            }
+            dir => dir?,
+        };
+        if !dir.is_dir() && parent != crate::theme::THEMES_DIR {
             return Err("The parent folder does not exist.".into());
         }
         let file = dir.join(name);
@@ -1266,7 +1295,9 @@ fn draft_key(path: &str) -> Option<String> {
 
 /// 초안 열쇠의 확장 이름.
 fn draft_extension(key: &str) -> Option<&str> {
-    let rest = key.strip_prefix(crate::extension::EXTENSIONS_DIR)?.strip_prefix('/')?;
+    let rest = key
+        .strip_prefix(crate::extension::EXTENSIONS_DIR)?
+        .strip_prefix('/')?;
     match rest.split_once('/') {
         Some((name, _)) => Some(name),
         None => rest.strip_suffix(".lua"),
@@ -1449,6 +1480,10 @@ fn check_content(path: &Path, content: &str) -> Result<(), String> {
         return crate::library::validate_group_meta(content)
             .map_err(|err| format!("Not written. {err}"));
     }
+    if is_theme_file(path) {
+        return crate::theme::validate_library_file(content)
+            .map_err(|err| format!("Not written. Theme file error: {err}"));
+    }
     let is_toml = Path::new(name)
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"));
@@ -1458,6 +1493,14 @@ fn check_content(path: &Path, content: &str) -> Result<(), String> {
             .map_err(|err| format!("Not written. TOML syntax error: {err}"))?;
     }
     Ok(())
+}
+
+/// 라이브러리 테마 파일(`Themes/<이름>.json`)인지.
+fn is_theme_file(path: &Path) -> bool {
+    path.parent() == Some(Path::new(crate::theme::THEMES_DIR))
+        && path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
 }
 
 const OUTSIDE: &str = "Paths outside the library folder are not allowed.";
@@ -1538,6 +1581,7 @@ mod tests {
                 RUN_EXTENSION,
                 WRITE,
                 super::super::web::WEB_FETCH,
+                super::super::model_tool::SET_MODEL,
                 LOAD_SKILL
             ]
         );
@@ -1551,7 +1595,7 @@ mod tests {
         );
         // 스킬이 없으면 load_skill을 주지 않는다.
         let (bare, _) = workspace();
-        assert_eq!(bare.definitions().len(), 7);
+        assert_eq!(bare.definitions().len(), 8);
     }
 
     #[test]
@@ -1792,6 +1836,43 @@ mod tests {
     }
 
     #[test]
+    fn writes_theme_files_and_makes_the_folder_on_approval() {
+        let (ws, root) = workspace();
+        let theme = |name: &str| {
+            format!(r#"{{"name":"x","themes":[{{"name":"{name}","mode":"dark","colors":{{}}}}]}}"#)
+        };
+        // 테마 폴더가 없어도 계획은 되고, 승인 전에는 아무것도 만들지 않는다.
+        let Planned::Change(change) = ws.plan(
+            WRITE,
+            &args(&[
+                ("path", "Themes/nord.json"),
+                ("content", &theme("Nord Dark")),
+            ]),
+        ) else {
+            panic!("테마 쓰기가 계획되지 않았다");
+        };
+        assert!(!root.join("Themes").exists());
+        ws.commit(change);
+        assert!(root.join("Themes/nord.json").is_file());
+
+        let out = ws.call(
+            WRITE,
+            &args(&[
+                ("path", "Themes/mine.json"),
+                ("content", &theme("Writer Dark")),
+            ]),
+        );
+        assert!(out.text.contains("built-in theme name"), "{}", out.text);
+        let out = ws.call(
+            WRITE,
+            &args(&[("path", "Themes/broken.json"), ("content", "{")]),
+        );
+        assert!(out.text.contains("Theme file error"), "{}", out.text);
+        assert!(!root.join("Themes/mine.json").exists());
+        assert!(!root.join("Themes/broken.json").exists());
+    }
+
+    #[test]
     fn runs_extensions_for_the_model() {
         let (ws, root) = workspace();
         std::fs::create_dir_all(root.join("Extensions")).unwrap();
@@ -1974,12 +2055,18 @@ mod tests {
         let call = |name: &str, arguments: Value| ws.plan(name, arguments.as_object().unwrap());
         let init = "local hud = require('ui.hud')\nreturn { size = { 10, 10 }, draw = function(g) hud.draw(g) end }";
         let hud = "return { draw = function(g) g.circle('fill', 5, 5, 2) end }";
-        let Planned::Done(out) = call(WRITE, json!({ "path": "Extensions/game/init.lua", "content": init })) else {
+        let Planned::Done(out) = call(
+            WRITE,
+            json!({ "path": "Extensions/game/init.lua", "content": init }),
+        ) else {
             panic!("a folder extension file must be a draft");
         };
         assert!(out.text.contains("moves to the trash"), "{}", out.text);
         assert!(matches!(
-            call(WRITE, json!({ "path": "Extensions/game/ui/hud.lua", "content": hud })),
+            call(
+                WRITE,
+                json!({ "path": "Extensions/game/ui/hud.lua", "content": hud })
+            ),
             Planned::Done(_)
         ));
         // 모듈 이름이 될 수 없는 경로는 초안이 아니다(보통 쓰기처럼 폴더가 있어야 한다).
@@ -2006,7 +2093,11 @@ mod tests {
             .collect();
         assert_eq!(
             headers,
-            ["Extensions/game/init.lua", "Extensions/game/ui/hud.lua", "Extensions/game.lua"]
+            [
+                "Extensions/game/init.lua",
+                "Extensions/game/ui/hud.lua",
+                "Extensions/game.lua"
+            ]
         );
         assert!(!drafts[0].is_new());
     }
@@ -2017,10 +2108,16 @@ mod tests {
         std::fs::create_dir_all(root.join("Extensions")).unwrap();
         let call = |name: &str, arguments: Value| ws.plan(name, arguments.as_object().unwrap());
         for (path, content) in [
-            ("Extensions/kit/init.lua", "return { value = function() return require('words').hi end }"),
+            (
+                "Extensions/kit/init.lua",
+                "return { value = function() return require('words').hi end }",
+            ),
             ("Extensions/kit/words.lua", "return { hi = 'hi' }"),
         ] {
-            assert!(matches!(call(WRITE, json!({ "path": path, "content": content })), Planned::Done(_)));
+            assert!(matches!(
+                call(WRITE, json!({ "path": path, "content": content })),
+                Planned::Done(_)
+            ));
         }
         let drafts = ws.take_drafts();
         assert!(drafts[0].is_new());
@@ -2029,7 +2126,10 @@ mod tests {
         let extension = crate::extension::Extension::open(&root, "kit").unwrap();
         assert_eq!(extension.value(&[], "a.md").unwrap().as_deref(), Some("hi"));
         // 폴더 확장 옆에 같은 이름의 파일은 쓰지 못한다.
-        let Planned::Done(out) = call(WRITE, json!({ "path": "Extensions/kit.lua", "content": "return {}" })) else {
+        let Planned::Done(out) = call(
+            WRITE,
+            json!({ "path": "Extensions/kit.lua", "content": "return {}" }),
+        ) else {
             panic!()
         };
         assert!(out.text.contains("folder extension"), "{}", out.text);

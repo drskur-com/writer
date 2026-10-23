@@ -26,7 +26,7 @@ pub struct Config {
     pub editor_font: Option<String>,
     /// 에디터 본문 글자 크기(px). 없으면 16.
     pub editor_font_size: Option<u16>,
-    /// 어시스턴트가 쓸 AI 제공자(`bedrock`). 없으면 쓰지 않는다.
+    /// 어시스턴트가 쓸 AI 제공자(`bedrock`, `alibaba-token-plan`). 없으면 쓰지 않는다.
     pub ai_provider: Option<String>,
     /// Bedrock에 쓸 AWS 프로필 이름(`~/.aws/config`). 없으면 고르지 않은 것.
     pub aws_profile: Option<String>,
@@ -34,6 +34,10 @@ pub struct Config {
     pub aws_region: Option<String>,
     /// 어시스턴트가 부를 Bedrock 모델(추론 프로필) ID. 없으면 `agent::DEFAULT_MODEL`.
     pub ai_model: Option<String>,
+    /// Alibaba Token Plan API 키(`sk-sp-…`).
+    pub token_plan_api_key: Option<String>,
+    /// 어시스턴트가 부를 Token Plan 모델 ID. 없으면 `agent::token_plan::DEFAULT_MODEL`.
+    pub token_plan_model: Option<String>,
     /// UI 언어(`en`·`ko`). 없으면 시스템 언어를 따른다.
     pub language: Option<String>,
 }

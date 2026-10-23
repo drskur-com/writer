@@ -329,15 +329,16 @@ impl PlayWorker {
         std::thread::Builder::new()
             .name(format!("play-{name}"))
             .spawn(move || {
-                let started = Extension::load_package(&thread_name, &source).and_then(|extension| {
-                    if !extension.plays {
-                        return Err(format!("{thread_name} has no play table"));
-                    }
-                    let size = extension.play_size(&args)?;
-                    extension.enable_sound(sound)?;
-                    extension.play_load(&args)?;
-                    Ok((extension, size))
-                });
+                let started =
+                    Extension::load_package(&thread_name, &source).and_then(|extension| {
+                        if !extension.plays {
+                            return Err(format!("{thread_name} has no play table"));
+                        }
+                        let size = extension.play_size(&args)?;
+                        extension.enable_sound(sound)?;
+                        extension.play_load(&args)?;
+                        Ok((extension, size))
+                    });
                 let (extension, size) = match started {
                     Ok(started) => started,
                     Err(err) => {

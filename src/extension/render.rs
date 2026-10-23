@@ -9,16 +9,16 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use vello_cpu::color::{AlphaColor, Srgb};
-use vello_cpu::kurbo::{Affine, BezPath, Cap, Join, Point as KPoint, Rect, Stroke};
 use vello_cpu::filter_effects::{EdgeMode, Filter, FilterPrimitive};
+use vello_cpu::kurbo::{Affine, BezPath, Cap, Join, Point as KPoint, Rect, Stroke};
 use vello_cpu::peniko::{
     BlendMode, Compose, Extend, Fill, Gradient, ImageAlphaType, ImageQuality, ImageSampler, Mix,
 };
 use vello_cpu::{ImageSource, PixelMetadata};
 use vello_cpu::{Pixmap, RenderContext, RenderSettings, Resources};
 
-use super::canvas::{Blend, Effects, 
-    Align, Color, FillRule, LINE_HEIGHT, LineCap, LineJoin, Paint, Segment, Shape,
+use super::canvas::{
+    Align, Blend, Color, Effects, FillRule, LINE_HEIGHT, LineCap, LineJoin, Paint, Segment, Shape,
 };
 
 /// 한 변의 픽셀 상한(vello_cpu의 크기는 u16이다).
@@ -222,7 +222,11 @@ fn draw(ctx: &mut RenderContext, fonts: &mut Fonts, shapes: &[Shape], base: Affi
                 let mut clip = BezPath::new();
                 for (ix, [x, y]) in mesh.clip.iter().enumerate() {
                     let p = KPoint::new(f64::from(*x), f64::from(*y));
-                    if ix == 0 { clip.move_to(p) } else { clip.line_to(p) }
+                    if ix == 0 {
+                        clip.move_to(p)
+                    } else {
+                        clip.line_to(p)
+                    }
                 }
                 clip.close_path();
                 ctx.set_transform(base);
@@ -545,7 +549,9 @@ fn hash_shape(shape: &Shape, f: &mut dyn FnMut(f32)) {
             f(600.0 + effects.blend as u8 as f32);
             f(effects.blur);
             if let Some(shadow) = effects.shadow {
-                [shadow.blur, shadow.offset[0], shadow.offset[1]].into_iter().for_each(&mut *f);
+                [shadow.blur, shadow.offset[0], shadow.offset[1]]
+                    .into_iter()
+                    .for_each(&mut *f);
                 shadow.color.iter().for_each(|v| f(*v));
             }
         }

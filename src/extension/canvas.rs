@@ -1196,7 +1196,10 @@ pub(super) fn create(
                     ))
                 })?,
         };
-        let effects = Effects { blend, ..rec.effects };
+        let effects = Effects {
+            blend,
+            ..rec.effects
+        };
         rec.set_effects(effects)?;
         Ok(MultiValue::new())
     });
@@ -1212,7 +1215,10 @@ pub(super) fn create(
         let shadow = if args.len() == 0 || matches!(args.values.first(), Some(Value::Nil)) {
             None
         } else {
-            if !matches!(args.values.first(), Some(Value::Table(_) | Value::String(_))) {
+            if !matches!(
+                args.values.first(),
+                Some(Value::Table(_) | Value::String(_))
+            ) {
                 return Err(args.error(
                     "argument #1 must be a color table or \"#rrggbb\", e.g. g.setShadow({0, 0, 0, 0.3}, 6, 0, 3)",
                 ));
@@ -1227,14 +1233,20 @@ pub(super) fn create(
                 ],
             })
         };
-        let effects = Effects { shadow, ..rec.effects };
+        let effects = Effects {
+            shadow,
+            ..rec.effects
+        };
         rec.set_effects(effects)?;
         Ok(MultiValue::new())
     });
     // setBlur(radius): 뒤 모양을 흐린다(그때의 변환 배율을 따른다). 인자가 없거나 0이면 끈다.
     function!("setBlur", |rec, args| {
         let blur = args.opt_number(0)?.unwrap_or(0.0).max(0.0) * rec.transform.scale();
-        let effects = Effects { blur, ..rec.effects };
+        let effects = Effects {
+            blur,
+            ..rec.effects
+        };
         rec.set_effects(effects)?;
         Ok(MultiValue::new())
     });
@@ -1288,7 +1300,12 @@ pub(super) fn create(
                 Err(_) => return Err(args.error("argument #2 must be a quad or a number")),
             },
             _ => (
-                [0.0, 0.0, image.image.width as f32, image.image.height as f32],
+                [
+                    0.0,
+                    0.0,
+                    image.image.width as f32,
+                    image.image.height as f32,
+                ],
                 1,
             ),
         };

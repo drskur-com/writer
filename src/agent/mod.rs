@@ -5,19 +5,22 @@ mod bedrock;
 mod diff;
 mod edit;
 mod history;
+mod model_tool;
 mod prompt;
 mod review;
 pub mod skills;
+pub mod token_plan;
 mod tools;
 mod web;
 
-pub use bedrock::{BedrockModel, ChatRequest, DEFAULT_MODEL, available_models, stream};
+pub use bedrock::{ChatRequest, stream};
 pub use diff::{DiffLine, LineKind};
 pub use history::{History, Summary, now_millis};
 pub use prompt::{Sheet, system_prompt};
 pub use review::PASS_SCORE;
 pub use tools::Workspace;
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -121,36 +124,136 @@ pub enum ChatEvent {
     ApproveFetch(FetchApproval),
     /// 승인한 변경을 쓰지 못했다(카드 번호).
     ChangeFailed(u64),
+    /// 어시스턴트가 부를 모델을 이 ID로 바꿨다(`set_model`). 다음 말부터 쓴다.
+    SetModel(String),
     /// 답이 끝났다.
     Done,
     /// 요청이 실패했다(자격 증명, 권한, 모델 ID 등). 사람이 읽을 설명.
     Failed(String),
 }
 
-/// 모델을 부를 곳.
+/// 모델 고르기의 선택지 하나.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Backend {
-    /// 자격 증명을 읽을 AWS 프로필(`~/.aws/config`).
-    pub profile: String,
-    /// 부를 리전. 없으면 프로필의 리전을 따른다.
-    pub region: Option<String>,
-    /// Bedrock 모델 ID 또는 추론 프로필 ID.
-    pub model: String,
+pub struct ModelChoice {
+    /// 표시 이름.
+    pub name: Cow<'static, str>,
+    /// 모델 ID. Bedrock은 기본 모델 ID이고, 실제로 부를 때는 이 ID로 끝나는 추론 프로필
+    /// (`global.…`, `us.…` 등)을 쓴다.
+    pub base: Cow<'static, str>,
+}
+
+impl ModelChoice {
+    /// 부를 ID(Bedrock이면 추론 프로필 `global.openai.gpt-6.1-sol`)가 이 모델의 것인지.
+    pub fn matches(&self, id: &str) -> bool {
+        id == self.base
+            || id
+                .strip_suffix(self.base.as_ref())
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    }
+}
+
+/// 모델을 부를 곳.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Backend {
+    /// Amazon Bedrock.
+    Bedrock {
+        /// 자격 증명을 읽을 AWS 프로필(`~/.aws/config`).
+        profile: String,
+        /// 부를 리전. 없으면 프로필의 리전을 따른다.
+        region: Option<String>,
+        /// Bedrock 모델 ID 또는 추론 프로필 ID.
+        model: String,
+    },
+    /// Alibaba Cloud Model Studio Token Plan.
+    TokenPlan {
+        api_key: String,
+        /// 모델 ID.
+        model: String,
+    },
+}
+
+/// API 키는 기록(로그)에 남기지 않는다.
+impl std::fmt::Debug for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Backend::Bedrock {
+                profile,
+                region,
+                model,
+            } => f
+                .debug_struct("Bedrock")
+                .field("profile", profile)
+                .field("region", region)
+                .field("model", model)
+                .finish(),
+            Backend::TokenPlan { model, .. } => f
+                .debug_struct("TokenPlan")
+                .field("model", model)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 impl Backend {
-    /// 설정에서 고른 곳. AI를 설정하지 않았으면(제공자나 AWS 프로필이 없으면) `None`.
+    /// 설정에서 고른 곳. AI를 설정하지 않았으면(제공자가 없거나, Bedrock에 AWS 프로필이,
+    /// Token Plan에 API 키가 없으면) `None`.
     pub fn from_prefs(prefs: &Prefs) -> Option<Self> {
-        match prefs.ai_provider {
-            Some(AiProvider::Bedrock) => Some(Self {
+        match prefs.ai_provider? {
+            AiProvider::Bedrock => Some(Self::Bedrock {
                 profile: prefs.aws_profile.as_ref()?.to_string(),
                 region: prefs.aws_region.as_ref().map(ToString::to_string),
                 model: prefs
                     .ai_model
                     .as_ref()
-                    .map_or_else(|| DEFAULT_MODEL.to_string(), ToString::to_string),
+                    .map_or_else(|| bedrock::DEFAULT_MODEL.to_string(), ToString::to_string),
             }),
-            None => None,
+            AiProvider::TokenPlan => Some(Self::TokenPlan {
+                api_key: prefs.token_plan_key.as_ref()?.to_string(),
+                model: prefs.token_plan_model.as_ref().map_or_else(
+                    || token_plan::DEFAULT_MODEL.to_string(),
+                    ToString::to_string,
+                ),
+            }),
+        }
+    }
+
+    /// 부를 모델 ID.
+    pub fn model(&self) -> &str {
+        match self {
+            Backend::Bedrock { model, .. } | Backend::TokenPlan { model, .. } => model,
+        }
+    }
+
+    /// 쓸 수 있는 모델이 달라지는 설정. 바뀌면 모델 목록을 다시 확인한다.
+    pub fn models_key(&self) -> String {
+        match self {
+            Backend::Bedrock {
+                profile, region, ..
+            } => format!("bedrock/{profile}/{}", region.as_deref().unwrap_or("")),
+            Backend::TokenPlan { .. } => "token-plan".to_string(),
+        }
+    }
+
+    /// 쓸 수 있는 모델과 부를 ID. Bedrock은 리전의 추론 프로필을, Token Plan은 플랜의 모델 목록
+    /// (`/models`)을 읽어 판단한다.
+    pub fn available_models(
+        &self,
+    ) -> oneshot::Receiver<Result<Vec<(ModelChoice, String)>, String>> {
+        let (tx, rx) = oneshot::channel();
+        let backend = self.clone();
+        bedrock::runtime().spawn(async move {
+            tx.send(backend.list_models().await).ok();
+        });
+        rx
+    }
+
+    /// [`Self::available_models`]를 tokio 런타임 안에서 읽는다.
+    async fn list_models(&self) -> Result<Vec<(ModelChoice, String)>, String> {
+        match self {
+            Backend::Bedrock {
+                profile, region, ..
+            } => bedrock::list_models(profile, region.clone()).await,
+            Backend::TokenPlan { api_key, .. } => token_plan::list_models(api_key).await,
         }
     }
 }
@@ -268,6 +371,8 @@ impl Conversation {
                 self.set_change_state(id, ChangeState::Failed);
                 None
             }
+            // 설정은 화면이 바꾼다. 대화에는 도구 줄(`Tool`)만 남는다.
+            ChatEvent::SetModel(_) => None,
             ChatEvent::Done => {
                 self.streaming = false;
                 self.drop_pending();

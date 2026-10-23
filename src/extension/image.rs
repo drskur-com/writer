@@ -112,7 +112,10 @@ pub fn load(roots: &ImageRoots, path: &str) -> Result<Arc<ImageData>, String> {
             MAX_FILE_BYTES / 1024 / 1024
         ));
     }
-    let stamp = (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
+    let stamp = (
+        meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        meta.len(),
+    );
     let mut cache = cache().lock().unwrap_or_else(|err| err.into_inner());
     if let Some((cached_stamp, image)) = cache.get(&real)
         && *cached_stamp == stamp
@@ -120,7 +123,8 @@ pub fn load(roots: &ImageRoots, path: &str) -> Result<Arc<ImageData>, String> {
         return Ok(image.clone());
     }
     let encoded = std::fs::read(&real).map_err(|err| err.to_string())?;
-    let image = Arc::new(decode(&real, stamp, encoded).map_err(|err| format!("\"{path}\": {err}"))?);
+    let image =
+        Arc::new(decode(&real, stamp, encoded).map_err(|err| format!("\"{path}\": {err}"))?);
     if cache.len() >= CACHE_LIMIT {
         cache.clear();
     }
@@ -143,13 +147,16 @@ fn decode(path: &Path, stamp: (SystemTime, u64), encoded: Vec<u8>) -> Result<Ima
         image::ImageFormat::WebP => "webp",
         other => return Err(format!("{other:?} images are not supported")),
     };
-    let decoded = image::load_from_memory_with_format(&encoded, format).map_err(|err| err.to_string())?;
+    let decoded =
+        image::load_from_memory_with_format(&encoded, format).map_err(|err| err.to_string())?;
     let (width, height) = (decoded.width(), decoded.height());
     if width == 0 || height == 0 {
         return Err("the image is empty".into());
     }
     let rgba = if width.max(height) > MAX_SIDE {
-        decoded.resize(MAX_SIDE, MAX_SIDE, image::imageops::FilterType::Triangle).into_rgba8()
+        decoded
+            .resize(MAX_SIDE, MAX_SIDE, image::imageops::FilterType::Triangle)
+            .into_rgba8()
     } else {
         decoded.into_rgba8()
     };
@@ -177,7 +184,10 @@ mod tests {
         let png = |w, h| {
             let mut bytes = Vec::new();
             image::RgbaImage::from_pixel(w, h, image::Rgba([255, 0, 0, 255]))
-                .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
                 .unwrap();
             bytes
         };
@@ -197,8 +207,17 @@ mod tests {
         let image = load(&roots, "Notes/Attachments/a.png").unwrap();
         assert_eq!((image.width, image.height, image.format), (4, 2, "png"));
         // 다시 읽으면 캐시의 같은 그림이다.
-        assert!(Arc::ptr_eq(&image, &load(&roots, "Notes/Attachments/a.png").unwrap()));
-        for bad in ["../x.png", "/etc/x.png", "Notes/b.txt", "Notes/missing.png", ""] {
+        assert!(Arc::ptr_eq(
+            &image,
+            &load(&roots, "Notes/Attachments/a.png").unwrap()
+        ));
+        for bad in [
+            "../x.png",
+            "/etc/x.png",
+            "Notes/b.txt",
+            "Notes/missing.png",
+            "",
+        ] {
             assert!(load(&roots, bad).is_err(), "{bad}");
         }
         // 폴더 확장은 자기 폴더를 먼저 찾는다.
@@ -210,7 +229,8 @@ mod tests {
         assert_eq!(load(&folder, "Notes/Attachments/a.png").unwrap().width, 4);
         #[cfg(unix)]
         {
-            let outside = std::env::temp_dir().join(format!("writer-outside-{}.png", ulid::Ulid::generate()));
+            let outside =
+                std::env::temp_dir().join(format!("writer-outside-{}.png", ulid::Ulid::generate()));
             std::fs::copy(dir.join("Notes/Attachments/a.png"), &outside).unwrap();
             std::os::unix::fs::symlink(&outside, dir.join("Notes/link.png")).unwrap();
             assert!(load(&roots, "Notes/link.png").is_err());

@@ -14,7 +14,8 @@ Answer in the user's language.
 | Group and project settings, book info, book styles | `.writer.toml` in each group folder (for example `Projects/Novel/.writer.toml`, `Notes/Inbox/.writer.toml`) | `edit_file`. In the app: the project menu's "Book info…" (책 정보…) and "Book style…" (책 스타일…), or the group's context menu |
 | Library marker | `.writer/library.toml` | Internal app state. Do not read or change it |
 | Skills | `Skills/<name>/SKILL.md` and files next to it | `edit_file`; new files with `write_file` |
-| App settings (per machine) | macOS `~/Library/Application Support/Writer/config.toml`, Windows `%APPDATA%\Writer\config.toml`, Linux `~/.config/Writer/config.toml` | Outside the library, so the tools cannot change it. Tell the user to use the app's Settings window (설정) |
+| Color themes | `Themes/<name>.json` | `write_file`, `edit_file` (read the theme skill first). Built-in themes cannot be changed |
+| App settings (per machine) | macOS `~/Library/Application Support/Writer/config.toml`, Windows `%APPDATA%\Writer\config.toml`, Linux `~/.config/Writer/config.toml` | Outside the library, so the file tools cannot change it. The assistant's model: `set_model`. Anything else: tell the user to use the app's Settings window (설정) |
 
 Library layout: `Notes/<group>/` (notes), `Projects/<project>/` (manuscripts; subfolders are manuscript groups), `Projects/<project>/Extras/` (extra material, left out of the book), `Projects/<project>/Extras/Attachments/` (attachments and the cover `cover.<ext>`). Sheet file names are permanent identifiers (`<ULID>.md`); the title shown in the app is the first line of the sheet.
 
@@ -56,9 +57,10 @@ Group values (top level, no table name):
 
 ## Values in `config.toml` (app settings)
 
-For reference only. The tools cannot change this file; point the user to the Settings window (설정).
-- `theme`: theme name. `editor_font`, `editor_font_size` (default 16): editor font and size.
-- `ai_provider` (`bedrock`), `aws_profile`, `aws_region`, `ai_model`: assistant settings (Settings › AI).
+For reference only. The file tools cannot change this file; except for the model (`set_model`), point the user to the Settings window (설정).
+- `theme`: theme name (a built-in theme or one from `Themes/` in the library; see the theme skill for making themes). `editor_font`, `editor_font_size` (default 16): editor font and size.
+- `ai_provider` (`bedrock` or `alibaba-token-plan`), `aws_profile`, `aws_region`: assistant settings (Settings › AI). `token_plan_api_key`: the Alibaba Token Plan API key. Never show or repeat it.
+- `ai_model` (Bedrock) and `token_plan_model` (Token Plan): the model the assistant uses, also for new conversations. Change it with the `set_model` tool when the user asks (call it without a model to list the available ones); it applies from the next message.
 - `library_root`, `recent_libraries`: current and recent library locations. Managed by the app.
 
 ## How to change a setting

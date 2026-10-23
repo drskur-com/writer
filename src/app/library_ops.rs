@@ -117,12 +117,19 @@ impl WriterApp {
         .detach();
     }
 
+    /// 열린 라이브러리의 `Themes/`를 다시 읽는다(ADR-0047). 바뀌면 테마 관찰이 메뉴와 화면을 맞춘다.
+    pub(super) fn refresh_library_themes(&self, cx: &mut Context<Self>) {
+        let root = self.library.as_ref().map(|lib| lib.root.clone());
+        crate::theme::load_library(root.as_deref(), cx);
+    }
+
     // --- 폴더 감시 ---------------------------------------------------------
 
     /// 현재 라이브러리 루트 감시를 (다시) 시작한다. 변경이 오면 잠깐 모았다가 다시 스캔한다.
     pub(super) fn start_watching(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.watcher = None;
         self.refresh_extension_commands(cx);
+        self.refresh_library_themes(cx);
         let Some(root) = self.library.as_ref().map(|lib| lib.root.clone()) else {
             return;
         };
@@ -182,6 +189,7 @@ impl WriterApp {
             }
         };
         self.library = Some(scanned);
+        self.refresh_library_themes(cx);
         if let Some(Selection::Group(path)) = &self.selected
             && !path.is_dir()
         {

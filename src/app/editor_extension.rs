@@ -197,9 +197,7 @@ impl Player {
         // 프레임마다 작업 스레드에 다시 그리게 한다(`draw`는 프레임당 0.1ms 안팎이라 보관하지 않는다).
         let ui = self.ui.borrow().clone();
         let key = (frame, ui);
-        if state.pending.is_none()
-            && state.shown.as_ref().is_none_or(|(shown, _)| *shown != key)
-        {
+        if state.pending.is_none() && state.shown.as_ref().is_none_or(|(shown, _)| *shown != key) {
             worker.request(
                 state.request,
                 frame as f32 / FPS,
@@ -581,12 +579,15 @@ impl ExtensionBlocks {
                 }
                 // 위에서 줄을 더하거나 지워 자리만 옮긴 블록(같은 이름·인자, 가장 가까운 것), 아니면 같은 자리에서 인자를
                 // 고친 블록의 상태를 넘겨받는다. 지난 그림을 그대로 보이다가 바뀐 것만 다시 그린다(깜박이지 않는다).
-                let distance = |kept: &EditorBlock| kept.block.rows.start.abs_diff(block.rows.start);
+                let distance =
+                    |kept: &EditorBlock| kept.block.rows.start.abs_diff(block.rows.start);
                 let moved = old
                     .iter()
                     .enumerate()
                     .filter(|(ix, kept)| {
-                        !claimed[*ix] && kept.block.name == block.name && kept.block.args == block.args
+                        !claimed[*ix]
+                            && kept.block.name == block.name
+                            && kept.block.args == block.args
                     })
                     .min_by_key(|(_, kept)| distance(kept))
                     .map(|(ix, _)| ix);

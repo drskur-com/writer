@@ -22,8 +22,8 @@ use super::editor_extension::{
     Frame, OnChanges, Player, Ticker, block_range, fit, interactive, scaled, shapes_canvas, theme,
 };
 use super::style::Palette;
-use crate::extension::{self, Host, Meta};
 use crate::InsertExtension;
+use crate::extension::{self, Host, Meta};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -522,14 +522,7 @@ impl ExtensionPicker {
                         .children(aligns),
                 )
             })
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(export)
-                    .child(hint),
-            )
+            .child(div().flex().flex_col().gap_1().child(export).child(hint))
     }
 }
 

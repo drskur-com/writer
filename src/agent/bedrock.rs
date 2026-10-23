@@ -1,4 +1,5 @@
-//! Amazon Bedrock(rig-bedrock, Converse API)에 대화를 보내고 답을 조각으로 받는다.
+//! 어시스턴트 대화를 모델에 보내고 답을 조각으로 받는다. 모델은 Amazon Bedrock(rig-bedrock,
+//! Converse API) 또는 Alibaba Token Plan([`super::token_plan`])이고, 도구 루프는 같다.
 //!
 //! rig·AWS SDK는 tokio 위에서 돈다. 앱(gpui) 실행기와 섞지 않도록 tokio 런타임을 따로 두고,
 //! 답 조각은 채널로 화면에 넘긴다. 받는 쪽이 채널을 버리면 다음 조각에서 요청을 멈춘다.
@@ -7,11 +8,14 @@ use futures::StreamExt as _;
 use futures::channel::mpsc;
 use rig_bedrock::client::BedrockRuntime;
 use rig_core::completion::CompletionRequest;
+use rig_core::driver::DynModel;
 use rig_core::message::{
     DocumentSourceKind, Image, ImageMediaType, Message, ToolResultContent, UserContent,
 };
+use rig_core::operation::Completion;
 use rig_core::streaming::{Item, StreamEvent};
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -20,77 +24,48 @@ use futures::channel::oneshot;
 use super::tools::{PendingChange, Planned};
 use super::{
     AllowedSites, Approval, Backend, ChangeCard, ChangeState, ChatEvent, FetchApproval, FetchCard,
-    Turn, Workspace,
+    ModelChoice, Turn, Workspace,
 };
-use super::{review, web};
+use super::{model_tool, review, token_plan, web};
 
 /// 설정에서 모델을 고르지 않았을 때 쓰는 모델(Bedrock 전역 교차 리전 추론 프로필).
 pub const DEFAULT_MODEL: &str = "global.anthropic.claude-opus-5-5";
 
-/// 설정 창에서 고를 수 있는 Bedrock 모델.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BedrockModel {
-    /// 표시 이름.
-    pub name: &'static str,
-    /// Bedrock 기본 모델 ID. 실제로 부를 때는 이 ID로 끝나는 추론 프로필
-    /// (`global.…`, `us.…` 등)을 쓴다.
-    pub base: &'static str,
-}
-
-/// 고를 수 있는 모델(설정 창 순서). 기본은 Claude Opus 5.5.
-pub const BEDROCK_MODELS: &[BedrockModel] = &[
-    BedrockModel {
-        name: "GPT-6.1 Sol",
-        base: "openai.gpt-6.1-sol",
+/// 고를 수 있는 Bedrock 모델(모델 고르기 순서). 기본은 Claude Opus 5.5.
+pub const BEDROCK_MODELS: &[ModelChoice] = &[
+    ModelChoice {
+        name: Cow::Borrowed("GPT-6.1 Sol"),
+        base: Cow::Borrowed("openai.gpt-6.1-sol"),
     },
-    BedrockModel {
-        name: "GPT-6 Astra",
-        base: "openai.gpt-6-astra",
+    ModelChoice {
+        name: Cow::Borrowed("GPT-6 Astra"),
+        base: Cow::Borrowed("openai.gpt-6-astra"),
     },
-    BedrockModel {
-        name: "Claude Sonnet 5.5",
-        base: "anthropic.claude-sonnet-5-5",
+    ModelChoice {
+        name: Cow::Borrowed("Claude Sonnet 5.5"),
+        base: Cow::Borrowed("anthropic.claude-sonnet-5-5"),
     },
-    BedrockModel {
-        name: "Claude Opus 5.5",
-        base: "anthropic.claude-opus-5-5",
+    ModelChoice {
+        name: Cow::Borrowed("Claude Opus 5.5"),
+        base: Cow::Borrowed("anthropic.claude-opus-5-5"),
     },
 ];
 
-impl BedrockModel {
-    /// 추론 프로필 ID(`global.openai.gpt-6.1-sol`)가 이 모델의 것인지.
-    pub fn matches(&self, id: &str) -> bool {
-        id == self.base
-            || id
-                .strip_suffix(self.base)
-                .is_some_and(|prefix| prefix.ends_with('.'))
-    }
-
-    /// 리전에서 쓸 수 있는 추론 프로필 중 이 모델의 것. 어느 리전으로든 보낼 수 있는 `global.`을
-    /// 먼저 고르고, 없으면 지역 프로필(`us.`, `eu.`, `apac.` 등)을 고른다.
-    fn pick<'a>(&self, ids: &'a [String]) -> Option<&'a String> {
-        let mut candidates = ids.iter().filter(|id| self.matches(id) && *id != self.base);
-        let first = candidates.clone().next();
-        candidates.find(|id| id.starts_with("global.")).or(first)
-    }
+/// 리전에서 쓸 수 있는 추론 프로필 중 이 모델의 것. 어느 리전으로든 보낼 수 있는 `global.`을
+/// 먼저 고르고, 없으면 지역 프로필(`us.`, `eu.`, `apac.` 등)을 고른다.
+fn pick<'a>(model: &ModelChoice, ids: &'a [String]) -> Option<&'a String> {
+    let mut candidates = ids
+        .iter()
+        .filter(|id| model.matches(id) && **id != model.base);
+    let first = candidates.clone().next();
+    candidates.find(|id| id.starts_with("global.")).or(first)
 }
 
 /// 이 리전에서 쓸 수 있는 모델과 부를 ID([`BEDROCK_MODELS`] 순서). 추론 프로필 목록으로 판단한다.
-pub fn available_models(
-    profile: String,
-    region: Option<String>,
-) -> futures::channel::oneshot::Receiver<Result<Vec<(BedrockModel, String)>, String>> {
-    let (tx, rx) = futures::channel::oneshot::channel();
-    runtime().spawn(async move {
-        tx.send(list_models(&profile, region).await).ok();
-    });
-    rx
-}
-
-async fn list_models(
+pub(super) async fn list_models(
     profile: &str,
     region: Option<String>,
-) -> Result<Vec<(BedrockModel, String)>, String> {
+) -> Result<Vec<(ModelChoice, String)>, String> {
     let mut loader =
         aws_config::defaults(aws_config::BehaviorVersion::latest()).profile_name(profile);
     if let Some(region) = region {
@@ -114,17 +89,17 @@ async fn list_models(
 }
 
 /// 추론 프로필 ID 목록에서 고를 수 있는 모델과 부를 ID.
-fn models_in(ids: &[String]) -> Vec<(BedrockModel, String)> {
+fn models_in(ids: &[String]) -> Vec<(ModelChoice, String)> {
     BEDROCK_MODELS
         .iter()
-        .filter_map(|model| model.pick(ids).map(|id| (*model, id.clone())))
+        .filter_map(|model| pick(model, ids).map(|id| (model.clone(), id.clone())))
         .collect()
 }
 
-/// 한 번의 답에 쓸 수 있는 최대 출력 토큰. 스트리밍이라 넉넉히 둔다.
+/// 한 번의 답에 쓸 수 있는 최대 출력 토큰. 스트리밍이라 넉넉히 둔다(모델의 상한이 더 낮으면 그것).
 const MAX_TOKENS: u64 = 64_000;
 
-/// Bedrock에 보낼 대화.
+/// 모델에 보낼 대화.
 #[derive(Clone, Debug)]
 pub struct ChatRequest {
     pub backend: Backend,
@@ -157,16 +132,50 @@ enum ImagePlacement {
     None,
 }
 
-/// 모델에 맞는 이미지 자리. 도구 결과 안의 이미지를 확실히 받는 것은 Claude다.
-fn image_placement(model: &str) -> ImagePlacement {
-    if model.contains("anthropic.claude") {
-        ImagePlacement::InToolResult
-    } else {
-        ImagePlacement::AfterToolResults
+/// 모델에 맞는 이미지 자리. 도구 결과 안의 이미지를 확실히 받는 것은 Bedrock의 Claude다.
+/// Token Plan은 그림을 보는 모델만 넣는다.
+fn image_placement(backend: &Backend) -> ImagePlacement {
+    match backend {
+        Backend::Bedrock { model, .. } if model.contains("anthropic.claude") => {
+            ImagePlacement::InToolResult
+        }
+        Backend::Bedrock { .. } => ImagePlacement::AfterToolResults,
+        Backend::TokenPlan { model, .. } => match token_plan::find(model) {
+            Some(model) if !model.vision => ImagePlacement::None,
+            _ => ImagePlacement::AfterToolResults,
+        },
     }
 }
 
-/// Bedrock 오류가 이미지 때문인지.
+/// 한 번의 답에 쓸 최대 출력 토큰. 모델의 상한을 넘겨 부르면 거절한다.
+fn max_tokens(backend: &Backend) -> u64 {
+    match backend {
+        Backend::Bedrock { .. } => MAX_TOKENS,
+        Backend::TokenPlan { model, .. } => {
+            token_plan::find(model).map_or(MAX_TOKENS, |model| model.max_output.min(MAX_TOKENS))
+        }
+    }
+}
+
+/// 이 곳에서 부를 rig 모델.
+fn completion_model(backend: &Backend) -> DynModel<Completion> {
+    match backend {
+        Backend::Bedrock {
+            profile,
+            region,
+            model,
+        } => {
+            let mut runtime = BedrockRuntime::builder().profile_name(profile);
+            if let Some(region) = region {
+                runtime = runtime.region(region);
+            }
+            runtime.build().completion(model).erase()
+        }
+        Backend::TokenPlan { api_key, model } => token_plan::completion_model(api_key, model),
+    }
+}
+
+/// 모델 오류가 이미지 때문인지.
 fn mentions_image(error: &str) -> bool {
     error.to_ascii_lowercase().contains("image")
 }
@@ -289,7 +298,7 @@ fn attach(
 
 /// 확장 그림을 대화 맥락 없이 검토받는다(ADR-0030). 검토 글을 돌려준다.
 async fn critique(
-    model: &rig_core::Model<rig_bedrock::completion::Converse, BedrockRuntime>,
+    model: &DynModel<Completion>,
     prompt: String,
     png: Vec<u8>,
 ) -> Result<String, String> {
@@ -354,7 +363,7 @@ async fn approve_drafts(workspace: &Workspace, tx: &mpsc::UnboundedSender<ChatEv
 }
 
 /// tokio 런타임. 처음 대화를 보낼 때 만든다.
-fn runtime() -> &'static tokio::runtime::Runtime {
+pub(super) fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -401,11 +410,8 @@ async fn run(request: &ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Re
         return Err(t!("assistant.error.nothing_to_send").into());
     }
     let backend = &request.backend;
-    let mut runtime = BedrockRuntime::builder().profile_name(&backend.profile);
-    if let Some(region) = &backend.region {
-        runtime = runtime.region(region);
-    }
-    let model = runtime.build().completion(&backend.model);
+    let model = completion_model(backend);
+    let max_tokens = max_tokens(backend);
     let tools = request
         .workspace
         .as_ref()
@@ -426,7 +432,7 @@ async fn run(request: &ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Re
         .collect();
 
     // 도구 결과 이미지를 넣을 자리. 그래도 모델이 거절하면 이미지를 빼고 한 번 다시 보낸다.
-    let mut tool_images = image_placement(&backend.model);
+    let mut tool_images = image_placement(backend);
     let mut retried_without_images = false;
     // 확장 이름 → (마지막으로 검토한 소스, 점수), 검토를 통과하지 못해 돌려보낸 횟수(ADR-0030).
     let mut reviews: HashMap<String, (String, Option<u8>)> = HashMap::new();
@@ -446,7 +452,7 @@ async fn run(request: &ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Re
                 .preamble(&request.system)
                 .messages(history.iter().cloned())
                 .tools(tools.iter().cloned())
-                .max_tokens(MAX_TOKENS);
+                .max_tokens(max_tokens);
             let result: Result<Option<_>, String> = async {
                 let mut stream = model.stream(completion).map_err(|err| err.to_string())?;
                 while let Some(item) = stream.next().await {
@@ -522,6 +528,22 @@ async fn run(request: &ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Re
                 };
                 results.push(call.result(content));
                 after_results.extend(image);
+                continue;
+            }
+            if call.function.name == model_tool::SET_MODEL {
+                let outcome = model_tool::run(backend, &call.function.arguments).await;
+                let summary = match &outcome.model {
+                    Some(model) => t!("assistant.tool.model_set", model = model),
+                    None => t!("assistant.tool.models_listed"),
+                };
+                if tx.unbounded_send(ChatEvent::Tool(summary.into())).is_err()
+                    || outcome
+                        .model
+                        .is_some_and(|model| tx.unbounded_send(ChatEvent::SetModel(model)).is_err())
+                {
+                    return Ok(());
+                }
+                results.push(call.result(vec![ToolResultContent::text(outcome.text)]));
                 continue;
             }
             let text = match workspace.plan(&call.function.name, &call.function.arguments) {
@@ -618,14 +640,30 @@ mod tests {
 
     #[test]
     fn strips_images_for_models_that_refuse_them() {
+        let bedrock = |model: &str| Backend::Bedrock {
+            profile: "default".into(),
+            region: None,
+            model: model.into(),
+        };
+        let token_plan = |model: &str| Backend::TokenPlan {
+            api_key: "sk-sp-test".into(),
+            model: model.into(),
+        };
         assert_eq!(
-            image_placement("global.anthropic.claude-opus-5-5"),
+            image_placement(&bedrock("global.anthropic.claude-opus-5-5")),
             ImagePlacement::InToolResult
         );
         assert_eq!(
-            image_placement("global.openai.gpt-6.1-sol"),
+            image_placement(&bedrock("global.openai.gpt-6.1-sol")),
             ImagePlacement::AfterToolResults
         );
+        assert_eq!(
+            image_placement(&token_plan("qwen3.8-max")),
+            ImagePlacement::AfterToolResults
+        );
+        assert_eq!(image_placement(&token_plan("glm-5")), ImagePlacement::None);
+        assert_eq!(max_tokens(&token_plan("glm-5")), 16_384);
+        assert_eq!(max_tokens(&token_plan("qwen3.8-max")), MAX_TOKENS);
         assert!(mentions_image(
             "ValidationException: The model does not support image content"
         ));
@@ -671,7 +709,10 @@ mod tests {
         .map(String::from)
         .into();
         let models = models_in(&ids);
-        let picked: Vec<_> = models.iter().map(|(m, id)| (m.name, id.as_str())).collect();
+        let picked: Vec<_> = models
+            .iter()
+            .map(|(m, id)| (m.name.as_ref(), id.as_str()))
+            .collect();
         assert_eq!(
             picked,
             [
@@ -684,13 +725,13 @@ mod tests {
         assert!(!BEDROCK_MODELS[0].matches("global.openai.gpt-6-sol"));
     }
 
-    /// 실제 Bedrock에서 리전의 모델 목록을 읽는다.
+    /// 실제 모델 목록을 읽는다([`live_backend`]).
     /// `WRITER_AI_PROFILE=<프로필> WRITER_AI_REGION=<리전> cargo test -- --ignored live_models`
+    /// (Token Plan은 `WRITER_TOKEN_PLAN_KEY=sk-sp-…`)
     #[test]
     #[ignore]
     fn live_models() {
-        let profile = std::env::var("WRITER_AI_PROFILE").expect("WRITER_AI_PROFILE");
-        let rx = available_models(profile, std::env::var("WRITER_AI_REGION").ok());
+        let rx = live_backend().available_models();
         let models = futures::executor::block_on(rx).expect("응답 없음");
         println!("models={models:?}");
         assert!(models.is_ok());
@@ -708,24 +749,36 @@ mod tests {
         if let Ok(region) = std::env::var("WRITER_AI_REGION") {
             builder = builder.region(&region);
         }
-        let model = builder.build().completion(DEFAULT_MODEL);
+        let model = builder.build().completion(DEFAULT_MODEL).erase();
         let prompt = review::request("빨간 머리 여자를 그려 줘", "", "test", (400.0, 400.0), 1);
         let review = runtime().block_on(critique(&model, prompt, png)).unwrap();
         println!("{review}");
         assert!(review::score(&review).is_some());
     }
 
-    /// 실제 Bedrock을 부른다. `WRITER_AI_PROFILE=<프로필> cargo test -- --ignored live_stream`
+    /// 실제 모델을 부를 곳. `WRITER_TOKEN_PLAN_KEY`가 있으면 Token Plan,
+    /// 없으면 `WRITER_AI_PROFILE`의 Bedrock. 모델은 `WRITER_AI_MODEL`, 없으면 그 제공자의 기본.
+    pub(super) fn live_backend() -> Backend {
+        let model = std::env::var("WRITER_AI_MODEL").ok();
+        if let Ok(api_key) = std::env::var("WRITER_TOKEN_PLAN_KEY") {
+            return Backend::TokenPlan {
+                api_key,
+                model: model.unwrap_or_else(|| token_plan::DEFAULT_MODEL.into()),
+            };
+        }
+        Backend::Bedrock {
+            profile: std::env::var("WRITER_AI_PROFILE").expect("WRITER_AI_PROFILE"),
+            region: std::env::var("WRITER_AI_REGION").ok(),
+            model: model.unwrap_or_else(|| DEFAULT_MODEL.into()),
+        }
+    }
+
+    /// 실제 모델을 부른다([`live_backend`]). `WRITER_AI_PROFILE=<프로필> cargo test -- --ignored live_stream`
     #[test]
     #[ignore]
     fn live_stream() {
-        let profile = std::env::var("WRITER_AI_PROFILE").expect("WRITER_AI_PROFILE");
         let mut rx = stream(ChatRequest {
-            backend: Backend {
-                profile,
-                region: std::env::var("WRITER_AI_REGION").ok(),
-                model: std::env::var("WRITER_AI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()),
-            },
+            backend: live_backend(),
             workspace: None,
             system: "짧게 답하세요.".into(),
             turns: vec![Turn {
@@ -754,8 +807,9 @@ mod tests {
         assert!(!text.is_empty());
     }
 }
-/// 실제 Bedrock으로 도구 루프를 돈다(도구 호출이 사라지지 않는지, web_fetch 이미지).
+/// 실제 모델로 도구 루프를 돈다(도구 호출이 사라지지 않는지, web_fetch 이미지).
 /// `WRITER_AI_PROFILE=<프로필> [WRITER_AI_REGION=…] [WRITER_AI_MODEL=…] [Q=질문] cargo test -- --ignored live_tools --nocapture`
+/// (Token Plan은 `WRITER_AI_PROFILE` 대신 `WRITER_TOKEN_PLAN_KEY=sk-sp-…`)
 #[cfg(test)]
 mod live_tools {
     use super::*;
@@ -777,11 +831,7 @@ mod live_tools {
         let question = std::env::var("Q")
             .unwrap_or_else(|_| "Notes/Inbox에 있는 메모를 한 줄로 요약해 줘.".into());
         let mut rx = stream(ChatRequest {
-            backend: Backend {
-                profile: std::env::var("WRITER_AI_PROFILE").expect("WRITER_AI_PROFILE"),
-                region: std::env::var("WRITER_AI_REGION").ok(),
-                model: std::env::var("WRITER_AI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()),
-            },
+            backend: tests::live_backend(),
             workspace: Some(ws),
             system,
             turns: vec![Turn {

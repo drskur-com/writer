@@ -47,6 +47,7 @@ const BUILTIN: &[Builtin] = &[
     builtin!("brainstorm": "SKILL.md"),
     builtin!("settings": "SKILL.md"),
     builtin!("sheet-format": "SKILL.md"),
+    builtin!("theme": "SKILL.md"),
     builtin!(
         "extension": "SKILL.md",
         "references/draw.md",
@@ -406,7 +407,8 @@ mod tests {
                 "proofread",
                 "revise",
                 "settings",
-                "sheet-format"
+                "sheet-format",
+                "theme"
             ]
         );
         let file = |name: &str| root.join(SKILLS_DIR).join(name).join(SKILL_FILE);
@@ -429,7 +431,8 @@ mod tests {
                 "proofread",
                 "revise",
                 "settings",
-                "sheet-format"
+                "sheet-format",
+                "theme"
             ]
         );
         assert!(!reference.exists());

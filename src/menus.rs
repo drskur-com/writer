@@ -6,8 +6,8 @@ use gpui_kit::gpui::*;
 #[cfg(target_os = "macos")]
 use crate::APP_NAME;
 use crate::{
-    CloseLibrary, CompileProject, InsertExtension, InsertFootnote, InsertImage,
-    InsertSpecialChar, InsertTable, ManageExtensions, NewSheet, OpenLibrary, OpenSettings, QuitApp,
+    CloseLibrary, CompileProject, InsertExtension, InsertFootnote, InsertImage, InsertSpecialChar,
+    InsertTable, ManageExtensions, NewSheet, OpenLibrary, OpenSettings, QuitApp,
     RunExtensionCommand, SaveSheet, SetTheme, ShowAbout, ToggleBold, ToggleItalic, ToggleLineGroup,
     TogglePreview, ToggleSidebar, ToggleTheme, theme,
 };

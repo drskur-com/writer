@@ -16,14 +16,14 @@
 
 mod boolean;
 pub mod canvas;
-pub mod package;
-pub mod sound;
-pub(crate) mod path;
 pub mod image;
+pub mod package;
+pub(crate) mod path;
 pub mod raster;
 pub mod raster3d;
 pub mod render;
 mod scene;
+pub mod sound;
 pub mod svg;
 mod worker;
 
@@ -37,7 +37,8 @@ use std::time::{Duration, Instant, SystemTime};
 use mlua::{Function, Lua, Table, Value, VmState};
 
 pub use canvas::{
-    Align, Blend, Color, FillRule, LineCap, LineJoin, Paint, Region, Segment, Shape, Theme, region_at,
+    Align, Blend, Color, FillRule, LineCap, LineJoin, Paint, Region, Segment, Shape, Theme,
+    region_at,
 };
 pub use package::Package;
 pub use worker::{Info, PlayEvent, PlayWorker, Worker};
@@ -992,8 +993,13 @@ impl Extension {
         let (width, height) = DEFAULT_SIZE;
         let recorder = Rc::new(RefCell::new(canvas::Recorder::new(width, height)));
         let deadline = Rc::new(Cell::new(Instant::now() + LOAD_TIMEOUT));
-        let g = canvas::create(&lua, recorder.clone(), package.images.clone(), deadline.clone())
-            .map_err(message)?;
+        let g = canvas::create(
+            &lua,
+            recorder.clone(),
+            package.images.clone(),
+            deadline.clone(),
+        )
+        .map_err(message)?;
         lua.sandbox(true).map_err(message)?;
         // sandbox가 그 전 전역 표를 읽기 전용으로 얼리므로(`g.theme`을 그릴 때마다 바꾼다) 그 뒤에 넣는다.
         lua.globals().raw_set("g", g.clone()).map_err(message)?;
@@ -1728,7 +1734,10 @@ return {
             shapes: std::sync::Arc::new(shapes.clone()),
         };
         let svg = svg::to_svg(&still);
-        assert!(svg.contains(r#"image-rendering="pixelated" href="data:image/png;base64,"#), "{svg}");
+        assert!(
+            svg.contains(r#"image-rendering="pixelated" href="data:image/png;base64,"#),
+            "{svg}"
+        );
         let document = crate::export::pdf::PdfDocument {
             title: "그림".into(),
             authors: Vec::new(),
@@ -1748,15 +1757,29 @@ return {
         let pdf = crate::export::pdf::render(&document).unwrap();
         assert!(pdf.windows(6).any(|w| w == b"/Image"));
         // 라이브러리 밖이나 없는 그림은 알린다.
-        for (missing, expected) in [("../x.png", "without \"..\""), ("Notes/none.png", "not found")] {
+        for (missing, expected) in [
+            ("../x.png", "without \"..\""),
+            ("Notes/none.png", "not found"),
+        ] {
             let err = extension
-                .draw(0.0, &[("missing".into(), missing.into())], &Theme::default())
+                .draw(
+                    0.0,
+                    &[("missing".into(), missing.into())],
+                    &Theme::default(),
+                )
                 .unwrap_err();
             assert!(err.contains(expected), "{err}");
         }
         // 스킬의 예제(photo-frame)는 모든 모양새로 그리고, src가 없으면 안내만 그린다.
-        let example = include_str!("../../resources/skills/extension/references/examples/photo-frame.md");
-        let source = example.split("```lua\n").nth(1).unwrap().split("\n```").next().unwrap();
+        let example =
+            include_str!("../../resources/skills/extension/references/examples/photo-frame.md");
+        let source = example
+            .split("```lua\n")
+            .nth(1)
+            .unwrap()
+            .split("\n```")
+            .next()
+            .unwrap();
         std::fs::write(root.join(EXTENSIONS_DIR).join("photo-frame.lua"), source).unwrap();
         std::fs::copy(
             root.join("Notes/Attachments/pic.png"),
@@ -1771,7 +1794,12 @@ return {
                 ("style".to_string(), style.to_string()),
             ];
             let shapes = frame.draw(0.0, &args, &Theme::default()).unwrap();
-            assert!(shapes.iter().any(|shape| matches!(shape, Shape::Image { .. })), "{style}");
+            assert!(
+                shapes
+                    .iter()
+                    .any(|shape| matches!(shape, Shape::Image { .. })),
+                "{style}"
+            );
         }
         let hint = frame.draw(0.0, &[], &Theme::default()).unwrap();
         assert!(matches!(&hint[..], [Shape::Text { .. }]), "{hint:?}");
@@ -2159,7 +2187,10 @@ return {
         assert_eq!(path(&root, "game"), dir.join("init.lua"));
         // 모듈은 한 번만 돈다.
         let extension = Extension::open(&root, "game").unwrap();
-        assert_eq!(extension.value(&[], "a.md").unwrap().as_deref(), Some("hp true"));
+        assert_eq!(
+            extension.value(&[], "a.md").unwrap().as_deref(),
+            Some("hp true")
+        );
         // 모듈을 고치면 확장이 바뀐 것으로 본다.
         let before = package::modified(&root, "game");
         std::thread::sleep(Duration::from_millis(20));
@@ -2178,7 +2209,11 @@ return {
         let err = Extension::load_package("x", &circular).unwrap_err();
         assert!(err.contains("circular require: a -> b -> a"), "{err}");
         // 오류는 모듈 파일을 가리킨다.
-        let broken = Package::from_files([("init.lua", "require('a') return {}"), ("a.lua", "error('boom')")]).unwrap();
+        let broken = Package::from_files([
+            ("init.lua", "require('a') return {}"),
+            ("a.lua", "error('boom')"),
+        ])
+        .unwrap();
         let err = Extension::load_package("x", &broken).unwrap_err();
         assert!(err.contains("x/a.lua"), "{err}");
         // 파일 하나 확장에는 모듈이 없다.
@@ -2186,7 +2221,11 @@ return {
         assert!(err.contains("this extension is one file"), "{err}");
         // 같은 이름의 파일과 폴더가 함께 있으면 읽지 않는다.
         std::fs::write(root.join(EXTENSIONS_DIR).join("game.lua"), "return {}").unwrap();
-        assert!(Extension::open(&root, "game").unwrap_err().contains("keep one"));
+        assert!(
+            Extension::open(&root, "game")
+                .unwrap_err()
+                .contains("keep one")
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -2534,9 +2573,7 @@ return {
                                 Shape::Clip(_)
                                 | Shape::ClipPath(_)
                                 | Shape::Effects(_)
-                                | Shape::Image { .. } => {
-                                    Vec::new()
-                                }
+                                | Shape::Image { .. } => Vec::new(),
                             };
                             assert!(points.into_iter().all(inside), "t = {t}: {shape:?}");
                         }

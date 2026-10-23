@@ -6,10 +6,14 @@
 use gpui_kit::assets::IconName as AssetIcon;
 #[cfg(not(target_os = "macos"))]
 use gpui_kit::component::TitleBar;
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogButtonProps;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{
-    ActiveTheme as _, FocusableExt as _, Icon, IndexPath, Sizable as _, StyledExt as _,
+    ActiveTheme as _, FocusableExt as _, Icon, IndexPath, Sizable as _, StyledExt as _, Theme,
+    WindowExt as _,
 };
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
@@ -18,7 +22,7 @@ use crate::app::style::{PANEL_INSET, Palette, TOOLBAR_HEIGHT, window_drag_area};
 use crate::aws_profiles::{self, AwsProfile};
 use crate::config::Config;
 use crate::i18n::{self, Language};
-use crate::icons;
+use crate::{icons, theme};
 
 /// 설정 창 크기.
 const WINDOW_SIZE: Size<Pixels> = Size {
@@ -46,6 +50,10 @@ pub struct Prefs {
     pub aws_region: Option<SharedString>,
     /// 어시스턴트가 부를 Bedrock 모델(추론 프로필) ID. 어시스턴트 패널에서 고른다.
     pub ai_model: Option<SharedString>,
+    /// Token Plan API 키.
+    pub token_plan_key: Option<SharedString>,
+    /// 어시스턴트가 부를 Token Plan 모델 ID. 어시스턴트 패널에서 고른다.
+    pub token_plan_model: Option<SharedString>,
     /// UI 언어(ADR-0027).
     pub language: Language,
 }
@@ -57,15 +65,18 @@ impl Global for Prefs {}
 pub enum AiProvider {
     /// Amazon Bedrock(AWS 프로필의 자격 증명으로 부른다).
     Bedrock,
+    /// Alibaba Cloud Model Studio Token Plan(API 키로 부른다).
+    TokenPlan,
 }
 
 impl AiProvider {
-    const ALL: [AiProvider; 1] = [AiProvider::Bedrock];
+    const ALL: [AiProvider; 2] = [AiProvider::Bedrock, AiProvider::TokenPlan];
 
     /// `config.toml`에 적는 이름.
     fn key(self) -> &'static str {
         match self {
             AiProvider::Bedrock => "bedrock",
+            AiProvider::TokenPlan => "alibaba-token-plan",
         }
     }
 
@@ -76,6 +87,7 @@ impl AiProvider {
     fn title(self) -> &'static str {
         match self {
             AiProvider::Bedrock => "Amazon Bedrock",
+            AiProvider::TokenPlan => "Alibaba Token Plan",
         }
     }
 }
@@ -83,15 +95,18 @@ impl AiProvider {
 impl Prefs {
     /// 설정 파일 값으로 전역 설정을 만든다.
     pub fn init(config: &Config, cx: &mut App) {
+        let ai_provider = config.ai_provider.as_deref().and_then(AiProvider::from_key);
         cx.set_global(Prefs {
             editor_font: config.editor_font.clone().map(SharedString::from),
             editor_font_size: config
                 .editor_font_size
                 .filter(|size| (12..=32).contains(size)),
-            ai_provider: config.ai_provider.as_deref().and_then(AiProvider::from_key),
+            ai_provider,
             aws_profile: config.aws_profile.clone().map(SharedString::from),
             aws_region: config.aws_region.clone().map(SharedString::from),
             ai_model: config.ai_model.clone().map(SharedString::from),
+            token_plan_key: config.token_plan_api_key.clone().map(SharedString::from),
+            token_plan_model: config.token_plan_model.clone().map(SharedString::from),
             language: Language::from_key(config.language.as_deref()),
         });
         rust_i18n::set_locale(cx.global::<Prefs>().language.locale());
@@ -174,14 +189,41 @@ impl Prefs {
         }
     }
 
-    /// 어시스턴트가 부를 Bedrock 모델(추론 프로필) ID를 바꾸고 저장한다.
+    /// 어시스턴트가 부를 모델 ID를 지금 제공자의 것으로 바꾸고 저장한다(Bedrock이면 추론 프로필 ID).
     pub(crate) fn set_ai_model(model: Option<SharedString>, cx: &mut App) {
-        if cx.global::<Prefs>().ai_model == model {
+        let token_plan = cx.global::<Prefs>().ai_provider == Some(AiProvider::TokenPlan);
+        let prefs = cx.global_mut::<Prefs>();
+        let saved = if token_plan {
+            &mut prefs.token_plan_model
+        } else {
+            &mut prefs.ai_model
+        };
+        if *saved == model {
             return;
         }
-        cx.global_mut::<Prefs>().ai_model = model.clone();
+        *saved = model.clone();
         let mut config = Config::load();
-        config.ai_model = model.map(|model| model.to_string());
+        let model = model.map(|model| model.to_string());
+        if token_plan {
+            config.token_plan_model = model;
+        } else {
+            config.ai_model = model;
+        }
+        if let Err(err) = config.save() {
+            eprintln!("설정 저장 실패: {err}");
+        }
+    }
+
+    /// Token Plan API 키를 바꾸고 저장한다. 빈 글이면 지운다.
+    fn set_token_plan_key(key: &str, cx: &mut App) {
+        let key = key.trim();
+        let key = (!key.is_empty()).then(|| key.to_string());
+        if cx.global::<Prefs>().token_plan_key.as_deref() == key.as_deref() {
+            return;
+        }
+        cx.global_mut::<Prefs>().token_plan_key = key.clone().map(SharedString::from);
+        let mut config = Config::load();
+        config.token_plan_api_key = key;
         if let Err(err) = config.save() {
             eprintln!("설정 저장 실패: {err}");
         }
@@ -399,11 +441,16 @@ struct SettingsWindow {
     /// 선택지를 만들 때의 언어. 바뀌면 선택지를 다시 만든다(이름이 그 언어로 들어 있다).
     language: Language,
     language_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
+    /// 테마 선택지를 만들 때의 (테마 이름들, 지금 테마). 바뀌면 선택지를 다시 넣는다.
+    themes: (Vec<SharedString>, SharedString),
+    theme_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
     font_picker: Entity<SelectState<SearchableVec<FontItem>>>,
     font_size_picker: Entity<SelectState<SearchableVec<FontSizeItem>>>,
     provider_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
     profile_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
     region_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
+    /// Token Plan API 키 입력(가려 보인다).
+    token_plan_key: Entity<InputState>,
     /// 창을 열 때 읽은 AWS 프로필.
     aws_profiles: Vec<AwsProfile>,
     _subscriptions: Vec<Subscription>,
@@ -428,6 +475,16 @@ impl SettingsWindow {
             SelectState::new(
                 SearchableVec::new(languages),
                 Some(IndexPath::new(selected_language)),
+                window,
+                cx,
+            )
+        });
+        let themes = (theme::theme_names(cx), theme::active_name(cx));
+        let (theme_items, selected_theme) = Self::theme_items(&themes);
+        let theme_picker = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(theme_items),
+                selected_theme.map(IndexPath::new),
                 window,
                 cx,
             )
@@ -544,6 +601,18 @@ impl SettingsWindow {
             .searchable(true)
         });
 
+        // Token Plan API 키.
+        let saved_key = cx.global::<Prefs>().token_plan_key.clone();
+        let token_plan_key = cx.new(|cx| {
+            let mut input = InputState::new(window, cx)
+                .masked(true)
+                .placeholder(t!("settings.ai.token_plan.key_placeholder"));
+            if let Some(key) = saved_key {
+                input.set_value(key, window, cx);
+            }
+            input
+        });
+
         let subscriptions = vec![
             cx.subscribe(
                 &language_picker,
@@ -554,6 +623,28 @@ impl SettingsWindow {
                     }
                 },
             ),
+            cx.subscribe(
+                &theme_picker,
+                |_, _, event: &SelectEvent<SearchableVec<ChoiceItem>>, cx| {
+                    let SelectEvent::Confirm(value) = event;
+                    if let Some(Some(name)) = value {
+                        theme::choose(name, cx);
+                    }
+                },
+            ),
+            // 메뉴·단축키로 바꾸거나 라이브러리 테마 파일이 바뀌면 선택지를 맞춘다.
+            cx.observe_global_in::<Theme>(window, |this, window, cx| {
+                let themes = (theme::theme_names(cx), theme::active_name(cx));
+                if themes != this.themes {
+                    let (items, selected) = Self::theme_items(&themes);
+                    this.theme_picker.update(cx, |picker, cx| {
+                        picker.set_items(SearchableVec::new(items), window, cx);
+                        picker.set_selected_index(selected.map(IndexPath::new), window, cx);
+                    });
+                    this.themes = themes;
+                }
+                cx.notify();
+            }),
             cx.subscribe(
                 &font_picker,
                 |_, _, event: &SelectEvent<SearchableVec<FontItem>>, cx| {
@@ -599,6 +690,12 @@ impl SettingsWindow {
                     }
                 },
             ),
+            cx.subscribe(&token_plan_key, |_, input, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    let key = input.read(cx).value().to_string();
+                    Prefs::set_token_plan_key(&key, cx);
+                }
+            }),
             // 언어가 바뀌면 선택지 이름도 그 언어로 다시 만든다. 보던 페이지는 그대로 둔다.
             cx.observe_global_in::<Prefs>(window, |this, window, cx| {
                 if cx.global::<Prefs>().language != this.language {
@@ -614,11 +711,14 @@ impl SettingsWindow {
             page: Page::General,
             language,
             language_picker,
+            themes,
+            theme_picker,
             font_picker,
             font_size_picker,
             provider_picker,
             profile_picker,
             region_picker,
+            token_plan_key,
             aws_profiles,
             _subscriptions: subscriptions,
         }
@@ -678,8 +778,115 @@ impl SettingsWindow {
         )
     }
 
-    /// 일반: 언어, 에디터 서체와 글자 크기.
-    fn render_general(&self) -> impl IntoElement {
+    /// 테마 선택지와 지금 테마의 위치.
+    fn theme_items(
+        (names, active): &(Vec<SharedString>, SharedString),
+    ) -> (Vec<ChoiceItem>, Option<usize>) {
+        let items = names
+            .iter()
+            .map(|name| ChoiceItem {
+                title: name.clone(),
+                value: Some(name.clone()),
+            })
+            .collect();
+        (items, names.iter().position(|name| name == active))
+    }
+
+    /// 확인을 받고 라이브러리 테마 파일 `file`을 휴지통으로 옮긴다.
+    fn confirm_delete_theme(file: std::path::PathBuf, window: &mut Window, cx: &mut App) {
+        let file_name = file
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let themes = theme::themes_in(&file, cx).join(", ");
+        let description = t!(
+            "settings.theme.delete_description",
+            file = file_name,
+            themes = themes
+        )
+        .to_string();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let file = file.clone();
+            alert
+                .confirm()
+                .title(t!("settings.theme.delete_title"))
+                .description(description.clone())
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(t!("common.delete"))
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text(t!("common.cancel")),
+                )
+                .on_ok(move |_, window, cx| {
+                    if let Err(err) = theme::delete_file(&file, cx) {
+                        window.push_notification(
+                            t!("settings.theme.delete_failed", err = err).to_string(),
+                            cx,
+                        );
+                    }
+                    true
+                })
+        });
+    }
+
+    /// 테마 선택과, 라이브러리 테마면 그 파일(보기·삭제). 시스템 테마는 지울 수 없다.
+    fn render_theme(&self, cx: &App, pal: Palette) -> impl IntoElement {
+        let file = theme::library_file(&self.themes.1, cx);
+        let hint = match &file {
+            Some(file) => t!(
+                "settings.theme.hint_library",
+                file = format!(
+                    "{}/{}",
+                    theme::THEMES_DIR,
+                    file.file_name().unwrap_or_default().to_string_lossy()
+                )
+            )
+            .to_string(),
+            None => t!("settings.theme.hint_system").to_string(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(t!("settings.theme"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Select::new(&self.theme_picker)
+                                .large()
+                                .focus_ring(false)
+                                .menu_max_h(px(320.0)),
+                        ),
+                    )
+                    .when_some(file, |this, file| {
+                        let reveal = file.clone();
+                        this.child(
+                            Button::new("theme-reveal")
+                                .ghost()
+                                .icon(icons::reveal())
+                                .tooltip(t!("common.reveal_in_finder"))
+                                .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
+                        )
+                        .child(
+                            Button::new("theme-delete")
+                                .ghost()
+                                .icon(Icon::new(icons::trash()).text_color(pal.danger))
+                                .tooltip(t!("common.move_to_trash"))
+                                .on_click(move |_, window, cx| {
+                                    Self::confirm_delete_theme(file.clone(), window, cx)
+                                }),
+                        )
+                    }),
+            )
+            .child(div().text_sm().text_color(pal.muted).child(hint))
+    }
+
+    /// 일반: 언어, 테마, 에디터 서체와 글자 크기.
+    fn render_general(&self, cx: &App, pal: Palette) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
@@ -692,6 +899,7 @@ impl SettingsWindow {
                     .child(t!("settings.language"))
                     .child(Select::new(&self.language_picker).large().focus_ring(false)),
             )
+            .child(self.render_theme(cx, pal))
             .child(
                 div()
                     .flex()
@@ -803,6 +1011,27 @@ impl SettingsWindow {
                         ),
                 )
             })
+            .when(prefs.ai_provider == Some(AiProvider::TokenPlan), |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(t!("settings.ai.token_plan.key"))
+                        .child(
+                            Input::new(&self.token_plan_key)
+                                .large()
+                                .mask_toggle()
+                                .focus_ring(false),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(pal.muted)
+                                .child(t!("settings.ai.token_plan.key_hint")),
+                        ),
+                )
+            })
     }
 }
 
@@ -810,7 +1039,7 @@ impl Render for SettingsWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = Palette::from_theme(cx.theme());
         let content = match self.page {
-            Page::General => self.render_general().into_any_element(),
+            Page::General => self.render_general(cx, pal).into_any_element(),
             Page::Ai => self.render_ai(cx, pal).into_any_element(),
         };
 

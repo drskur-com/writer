@@ -53,7 +53,6 @@ pub(super) const FUNCTIONS: &[&str] = &[
 /// 카메라에서 이보다 가까운 것은 잘라 낸다(원근 투영).
 const NEAR: f32 = 0.01;
 
-
 /// 3×4 아핀 변환(행 우선): 행마다 `[m0, m1, m2, t]`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Mat([f32; 12]);
@@ -107,7 +106,11 @@ impl Mat {
             cof[1] * x + cof[4] * y + cof[7] * z,
             cof[2] * x + cof[5] * y + cof[8] * z,
         ];
-        if self.determinant() < 0.0 { n.map(|v| -v) } else { n }
+        if self.determinant() < 0.0 {
+            n.map(|v| -v)
+        } else {
+            n
+        }
     }
 
     fn determinant(&self) -> f32 {
@@ -380,7 +383,12 @@ impl Target<'_> {
             p: [v.p[0] + n[0] * s, v.p[1] + n[1] * s],
             ..v
         };
-        let (a0, a1, b0, b1) = (shift(va, 1.0), shift(va, -1.0), shift(vb, 1.0), shift(vb, -1.0));
+        let (a0, a1, b0, b1) = (
+            shift(va, 1.0),
+            shift(va, -1.0),
+            shift(vb, 1.0),
+            shift(vb, -1.0),
+        );
         for v in [[a0, b0, b1], [a0, b1, a1]] {
             out.push(raster3d::Tri {
                 v,
@@ -463,7 +471,9 @@ impl Scene {
     ) -> mlua::Result<()> {
         for face in faces {
             let normals: Option<Vec<Vec3>> = normal.and_then(|normal| {
-                face.iter().map(|p| normal(&face, *p)).collect::<Option<Vec<_>>>()
+                face.iter()
+                    .map(|p| normal(&face, *p))
+                    .collect::<Option<Vec<_>>>()
             });
             self.face(args, mode, &face, normals.as_deref(), false)?;
         }
@@ -528,7 +538,12 @@ impl Scene {
                 }
                 Item::Line { points, color } => {
                     for pair in points.windows(2) {
-                        target.segment(camera.view(pair[0]), camera.view(pair[1]), *color, &mut tris);
+                        target.segment(
+                            camera.view(pair[0]),
+                            camera.view(pair[1]),
+                            *color,
+                            &mut tris,
+                        );
                     }
                 }
             }
@@ -636,7 +651,11 @@ fn frustum_normal(bottom: f32, top: f32, height: f32) -> impl Fn(&[Vec3], Vec3) 
         if n[1].abs() > 0.99 {
             return None;
         }
-        let around = if p[0].hypot(p[2]) > 1e-5 { p } else { centroid(face) };
+        let around = if p[0].hypot(p[2]) > 1e-5 {
+            p
+        } else {
+            centroid(face)
+        };
         let radial = normalize([around[0], 0.0, around[2]])?;
         normalize([radial[0] * height, bottom - top, radial[2] * height])
     }
@@ -844,7 +863,12 @@ pub(super) fn create(
         let mode = args.mode(0)?;
         let radius = positive(&args, 1)?;
         let segments = segments(&args, 2, 16)?;
-        scene.solid(&args, mode, sphere_faces(radius, segments), Some(&|_, p| normalize(p)))?;
+        scene.solid(
+            &args,
+            mode,
+            sphere_faces(radius, segments),
+            Some(&|_, p| normalize(p)),
+        )?;
         Ok(MultiValue::new())
     });
     function!("cylinder", |scene, args| {
@@ -852,7 +876,12 @@ pub(super) fn create(
         let (radius, height) = (positive(&args, 1)?, positive(&args, 2)?);
         let segments = segments(&args, 3, 24)?;
         let normal = frustum_normal(radius, radius, height);
-        scene.solid(&args, mode, frustum_faces(radius, radius, height, segments), Some(&normal))?;
+        scene.solid(
+            &args,
+            mode,
+            frustum_faces(radius, radius, height, segments),
+            Some(&normal),
+        )?;
         Ok(MultiValue::new())
     });
     function!("cone", |scene, args| {
@@ -860,7 +889,12 @@ pub(super) fn create(
         let (radius, height) = (positive(&args, 1)?, positive(&args, 2)?);
         let segments = segments(&args, 3, 24)?;
         let normal = frustum_normal(radius, 0.0, height);
-        scene.solid(&args, mode, frustum_faces(radius, 0.0, height, segments), Some(&normal))?;
+        scene.solid(
+            &args,
+            mode,
+            frustum_faces(radius, 0.0, height, segments),
+            Some(&normal),
+        )?;
         Ok(MultiValue::new())
     });
     // torus(mode, R, r[, segments, sides]): y축을 둘러싼 고리.
@@ -875,7 +909,12 @@ pub(super) fn create(
             let ring = normalize([p[0], 0.0, p[2]])?;
             normalize(sub(p, ring.map(|v| v * major)))
         };
-        scene.solid(&args, mode, torus_faces(major, minor, segments, sides), Some(&normal))?;
+        scene.solid(
+            &args,
+            mode,
+            torus_faces(major, minor, segments, sides),
+            Some(&normal),
+        )?;
         Ok(MultiValue::new())
     });
     // plane(mode, w[, d]): y = 0의 바닥판. 양면이다.

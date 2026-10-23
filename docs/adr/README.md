@@ -58,6 +58,8 @@
 | [0044](./0044-extension-images.md) | 확장은 라이브러리 안의 그림 파일만 `g.newImage`로 읽어 LÖVE식 `g.draw`로 그린다 | Proposed | 2026-10-23 |
 | [0045](./0045-extension-3d-depth-buffer.md) | 3차원 장면은 삼각형 묶음 하나로 모양 목록에 넣고, 깊이 버퍼로 픽셀마다 빛을 주어 그린다 | Proposed | 2026-10-23 |
 | [0046](./0046-extension-render-threads.md) | 확장 그림은 렌더 스레드들이 그리고, UI는 지난 이미지를 보이다가 다음 프레임에 바꾼다 | Proposed | 2026-10-23 |
+| [0047](./0047-library-themes.md) | 시스템 테마 4개는 바이너리에 두고, 라이브러리 `Themes/*.json`의 테마를 더한다 | Proposed | 2026-10-23 |
+| [0048](./0048-alibaba-token-plan.md) | 어시스턴트 제공자에 Alibaba Token Plan을 더하고, OpenAI 호환 Chat 와이어로 같은 도구 루프를 돈다 | Proposed | 2026-10-23 |
 
 ## 작성 규칙
 

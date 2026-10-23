@@ -45,8 +45,8 @@ use gpui_kit::component::menu::AppMenuBar;
 use crate::menus::install_menus;
 use crate::{
     APP_NAME, CloseLibrary, CompileProject, OpenLibrary, QuitApp, SaveSheet, SetTheme, ShowAbout,
-    ToggleBold, ToggleItalic, ToggleLineGroup, TogglePreview, ToggleSidebar, ToggleTheme, config,
-    icons, library, markdown, theme,
+    ToggleBold, ToggleItalic, ToggleLineGroup, TogglePreview, ToggleSidebar, ToggleTheme, icons,
+    library, markdown, theme,
 };
 use style::*;
 
@@ -131,6 +131,7 @@ pub(crate) struct WriterApp {
     /// 앱 종료 직전에 열린 시트를 저장하는 구독.
     _quit_subscription: Subscription,
     _prefs_subscription: Subscription,
+    _theme_subscription: Subscription,
     /// 라이브러리 폴더 감시(watcher + 변경 시 다시 스캔하는 태스크). 버리면 멈춘다.
     watcher: Option<(notify::RecommendedWatcher, Task<()>)>,
     /// 앱 루트의 포커스. 시트를 열지 않아 포커스된 요소가 없어도 메뉴 액션이 이 뷰로 오게 한다.
@@ -163,6 +164,7 @@ impl WriterApp {
                 this.menu_bar.update(cx, |menu_bar, cx| menu_bar.reload(cx));
                 cx.notify();
             });
+        let theme_subscription = cx.observe_global::<Theme>(|this, cx| this.after_theme_change(cx));
         let quit_subscription = cx.on_app_quit(|this, cx| {
             this.close_sheet(cx);
             async {}
@@ -194,6 +196,7 @@ impl WriterApp {
             file_filter: None,
             _quit_subscription: quit_subscription,
             _prefs_subscription: prefs_subscription,
+            _theme_subscription: theme_subscription,
             watcher: None,
             focus: cx.focus_handle(),
             #[cfg(not(target_os = "macos"))]
@@ -295,6 +298,7 @@ impl WriterApp {
         self.previews.clear();
         self.library = None;
         self.refresh_extension_commands(cx);
+        self.refresh_library_themes(cx);
         self.notice = None;
         self.open_project = None;
         self.expanded_groups.clear();
@@ -383,28 +387,16 @@ impl WriterApp {
     }
 
     fn on_set_theme(&mut self, action: &SetTheme, _: &mut Window, cx: &mut Context<Self>) {
-        theme::set_theme(&action.name, cx);
-        self.after_theme_change(cx);
+        theme::choose(&action.name, cx);
     }
 
     fn on_toggle_theme(&mut self, _: &ToggleTheme, _: &mut Window, cx: &mut Context<Self>) {
-        let next = if Theme::global(cx).is_dark() {
-            theme::DEFAULT_LIGHT
-        } else {
-            theme::DEFAULT_DARK
-        };
-        theme::set_theme(next, cx);
-        self.after_theme_change(cx);
+        let next = theme::counterpart(cx);
+        theme::choose(&next, cx);
     }
 
+    /// 테마가 바뀌면(메뉴·설정 창·라이브러리 테마 파일) 메뉴의 체크와 에디터 장식을 맞춘다.
     fn after_theme_change(&mut self, cx: &mut Context<Self>) {
-        // 선택한 테마를 기억해 다음 실행에 복원한다.
-        let mut config = config::Config::load();
-        config.theme = Some(theme::active_name(cx).to_string());
-        if let Err(err) = config.save() {
-            eprintln!("설정 저장 실패: {err}");
-        }
-
         install_menus(cx);
         self.refresh_markup(cx);
         #[cfg(not(target_os = "macos"))]

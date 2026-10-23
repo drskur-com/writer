@@ -187,16 +187,21 @@ fn voice(instrument: Instrument, freq: f32, length: f32, seed: u32) -> Vec<f32> 
                 Instrument::Triangle => (4. * (wave(phase) - 0.5).abs() - 1.) * 0.45,
                 Instrument::Saw => (2. * wave(phase) - 1.) * 0.25,
                 Instrument::Organ => {
-                    ((TAU * phase).sin() + 0.5 * (TAU * 2. * phase).sin() + 0.3 * (TAU * 4. * phase).sin())
+                    ((TAU * phase).sin()
+                        + 0.5 * (TAU * 2. * phase).sin()
+                        + 0.3 * (TAU * 4. * phase).sin())
                         * 0.22
                 }
                 Instrument::Piano => {
-                    ((TAU * phase).sin() + 0.4 * (TAU * 2. * phase).sin() + 0.15 * (TAU * 3. * phase).sin())
+                    ((TAU * phase).sin()
+                        + 0.4 * (TAU * 2. * phase).sin()
+                        + 0.15 * (TAU * 3. * phase).sin())
                         * 0.35
                         * (-t * 3.).exp()
                 }
                 Instrument::Bass => {
-                    ((TAU * wave(phase)).sin() * 0.6 + (2. * wave(phase) - 1.) * 0.2) * (-t * 2.).exp()
+                    ((TAU * wave(phase)).sin() * 0.6 + (2. * wave(phase) - 1.) * 0.2)
+                        * (-t * 2.).exp()
                 }
                 Instrument::Kick => (TAU * phase).sin() * 0.8 * (-t * 12.).exp(),
                 Instrument::Snare => {
@@ -273,7 +278,10 @@ impl Noise {
 
 /// `sound.play`의 표를 악보로 읽는다.
 pub fn parse_score(spec: &Table) -> Result<Score, String> {
-    let instrument = match spec.get::<Value>("instrument").map_err(|err| err.to_string())? {
+    let instrument = match spec
+        .get::<Value>("instrument")
+        .map_err(|err| err.to_string())?
+    {
         Value::Nil => Instrument::Square,
         Value::String(name) => {
             let name = name.to_string_lossy();
@@ -282,7 +290,12 @@ pub fn parse_score(spec: &Table) -> Result<Score, String> {
                 format!("unknown instrument \"{name}\" (use {})", known.join(", "))
             })?
         }
-        other => return Err(format!("instrument must be a name, got {}", other.type_name())),
+        other => {
+            return Err(format!(
+                "instrument must be a name, got {}",
+                other.type_name()
+            ));
+        }
     };
     let number = |key: &str, default: f32| -> Result<f32, String> {
         match spec.get::<Value>(key).map_err(|err| err.to_string())? {
@@ -298,16 +311,23 @@ pub fn parse_score(spec: &Table) -> Result<Score, String> {
     }
     let length = number("length", 0.25)?;
     if !(length > 0. && length <= MAX_SECONDS) {
-        return Err(format!("length must be between 0 and {MAX_SECONDS} seconds"));
+        return Err(format!(
+            "length must be between 0 and {MAX_SECONDS} seconds"
+        ));
     }
     let looped = matches!(spec.get::<Value>("loop"), Ok(Value::Boolean(true)));
     let mut notes = Vec::new();
     let note = spec.get::<Value>("note").map_err(|err| err.to_string())?;
     let sequence = spec.get::<Value>("notes").map_err(|err| err.to_string())?;
     let chord = spec.get::<Value>("chord").map_err(|err| err.to_string())?;
-    let given = [&note, &sequence, &chord].iter().filter(|v| !v.is_nil()).count();
+    let given = [&note, &sequence, &chord]
+        .iter()
+        .filter(|v| !v.is_nil())
+        .count();
     if given != 1 {
-        return Err("give exactly one of note, notes (one after another), or chord (together)".into());
+        return Err(
+            "give exactly one of note, notes (one after another), or chord (together)".into(),
+        );
     }
     if !note.is_nil() {
         notes.push(Note {
@@ -328,14 +348,19 @@ pub fn parse_score(spec: &Table) -> Result<Score, String> {
                         Value::Number(n) => n as f32,
                         Value::Nil => length,
                         other => {
-                            return Err(format!("a note's length must be a number, got {}", other.type_name()));
+                            return Err(format!(
+                                "a note's length must be a number, got {}",
+                                other.type_name()
+                            ));
                         }
                     },
                 ),
                 _ => (item.clone(), length),
             };
             if !(own > 0. && own <= MAX_SECONDS) {
-                return Err(format!("a note's length must be between 0 and {MAX_SECONDS} seconds"));
+                return Err(format!(
+                    "a note's length must be between 0 and {MAX_SECONDS} seconds"
+                ));
             }
             notes.push(Note {
                 at,
@@ -378,17 +403,22 @@ fn pitch(value: &Value) -> Result<Option<f32>, String> {
     match value {
         Value::Integer(n) if (0..=127).contains(n) => Ok(Some(*n as f32)),
         Value::Number(n) if (0.0..=127.0).contains(n) => Ok(Some(*n as f32)),
-        Value::Integer(_) | Value::Number(_) => Err("MIDI note numbers are 0 to 127 (60 is C4)".into()),
+        Value::Integer(_) | Value::Number(_) => {
+            Err("MIDI note numbers are 0 to 127 (60 is C4)".into())
+        }
         Value::String(name) => {
             let name = name.to_string_lossy();
             if name == "-" || name.eq_ignore_ascii_case("rest") {
                 return Ok(None);
             }
-            parse_note(&name)
-                .map(Some)
-                .ok_or_else(|| format!("\"{name}\" is not a note (use names like C4, F#3, Bb2, or MIDI numbers)"))
+            parse_note(&name).map(Some).ok_or_else(|| {
+                format!("\"{name}\" is not a note (use names like C4, F#3, Bb2, or MIDI numbers)")
+            })
         }
-        other => Err(format!("a note must be a name or a MIDI number, got {}", other.type_name())),
+        other => Err(format!(
+            "a note must be a name or a MIDI number, got {}",
+            other.type_name()
+        )),
     }
 }
 
@@ -413,7 +443,8 @@ pub fn install(lua: &Lua) -> mlua::Result<Slot> {
                     "sound.play takes a table: sound.play{ note = \"C4\", length = 0.2 }",
                 ));
             };
-            let score = parse_score(&spec).map_err(|err| mlua::Error::runtime(format!("sound.play: {err}")))?;
+            let score = parse_score(&spec)
+                .map_err(|err| mlua::Error::runtime(format!("sound.play: {err}")))?;
             let id = next.get();
             next.set(id + 1);
             send(Command::Play {
@@ -460,7 +491,10 @@ pub enum Command {
         looped: bool,
     },
     /// `id`가 없으면 묶음의 소리를 모두 멈춘다.
-    Stop { group: u64, id: Option<u64> },
+    Stop {
+        group: u64,
+        id: Option<u64>,
+    },
     Pause(u64),
     Resume(u64),
 }
@@ -604,36 +638,78 @@ mod tests {
     fn reads_scores_from_lua() {
         let lua = Lua::new();
         let score = |code: &str| -> Result<Score, String> {
-            parse_score(&lua.load(code).eval::<Table>().map_err(|err| err.to_string())?)
+            parse_score(
+                &lua.load(code)
+                    .eval::<Table>()
+                    .map_err(|err| err.to_string())?,
+            )
         };
-        let melody = score(r#"{ notes = { "C4", "-", { "G4", 0.5 } }, length = 0.25, instrument = "piano" }"#).unwrap();
+        let melody = score(
+            r#"{ notes = { "C4", "-", { "G4", 0.5 } }, length = 0.25, instrument = "piano" }"#,
+        )
+        .unwrap();
         assert_eq!(melody.instrument, Instrument::Piano);
         assert_eq!(
             melody.notes,
             vec![
-                Note { at: 0., length: 0.25, pitch: Some(60.) },
-                Note { at: 0.25, length: 0.25, pitch: None },
-                Note { at: 0.5, length: 0.5, pitch: Some(67.) },
+                Note {
+                    at: 0.,
+                    length: 0.25,
+                    pitch: Some(60.)
+                },
+                Note {
+                    at: 0.25,
+                    length: 0.25,
+                    pitch: None
+                },
+                Note {
+                    at: 0.5,
+                    length: 0.5,
+                    pitch: Some(67.)
+                },
             ]
         );
         assert_eq!(melody.duration(), 1.);
         let chord = score(r#"{ chord = { 60, 64, 67 } }"#).unwrap();
         assert!(chord.notes.iter().all(|note| note.at == 0.));
-        assert!(score(r#"{ note = "C4", chord = { 60 } }"#).unwrap_err().contains("exactly one"));
-        assert!(score(r#"{ note = "X9" }"#).unwrap_err().contains("not a note"));
-        assert!(score(r#"{ note = 60, instrument = "tuba" }"#).unwrap_err().contains("unknown instrument"));
-        assert!(score(r#"{ note = 60, length = 30 }"#).unwrap_err().contains("length"));
+        assert!(
+            score(r#"{ note = "C4", chord = { 60 } }"#)
+                .unwrap_err()
+                .contains("exactly one")
+        );
+        assert!(
+            score(r#"{ note = "X9" }"#)
+                .unwrap_err()
+                .contains("not a note")
+        );
+        assert!(
+            score(r#"{ note = 60, instrument = "tuba" }"#)
+                .unwrap_err()
+                .contains("unknown instrument")
+        );
+        assert!(
+            score(r#"{ note = 60, length = 30 }"#)
+                .unwrap_err()
+                .contains("length")
+        );
     }
 
     #[test]
     fn plays_only_in_a_group() {
         let lua = Lua::new();
         let slot = install(&lua).unwrap();
-        let err = lua.load(r#"sound.play{ note = "C4" }"#).exec().unwrap_err().to_string();
+        let err = lua
+            .load(r#"sound.play{ note = "C4" }"#)
+            .exec()
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("only in play"), "{err}");
         let group = new_group();
         slot.set(Some(group));
-        let id: u64 = lua.load(r#"return sound.play{ note = "C4", loop = true }"#).eval().unwrap();
+        let id: u64 = lua
+            .load(r#"return sound.play{ note = "C4", loop = true }"#)
+            .eval()
+            .unwrap();
         lua.load("sound.stop()").exec().unwrap();
         let sent = SENT.lock().unwrap();
         assert!(sent.iter().any(|command| matches!(

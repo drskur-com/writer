@@ -1054,6 +1054,9 @@ mod tests {
             ..document
         };
         let pdf = render(&document).unwrap();
-        assert!(pdf.windows(13).any(|w| w == b"/Subtype /Ima" || w == b"/Subtype/Imag"));
+        assert!(
+            pdf.windows(13)
+                .any(|w| w == b"/Subtype /Ima" || w == b"/Subtype/Imag")
+        );
     }
 }

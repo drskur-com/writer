@@ -56,7 +56,8 @@ pub fn to_svg(still: &Still) -> String {
             } => {
                 use base64::Engine as _;
                 // 원래 파일을 data URI로 넣는다. 안쪽 <svg>가 `src` 밖을 자른다.
-                let data = base64::engine::general_purpose::STANDARD.encode(image.encoded.as_slice());
+                let data =
+                    base64::engine::general_purpose::STANDARD.encode(image.encoded.as_slice());
                 let matrix: Vec<String> = transform.iter().map(|v| num(*v)).collect();
                 let _ = writeln!(
                     body,
@@ -71,7 +72,11 @@ pub fn to_svg(still: &Still) -> String {
                     num(-sy),
                     image.width,
                     image.height,
-                    if *smooth { "" } else { r#" image-rendering="pixelated""# },
+                    if *smooth {
+                        ""
+                    } else {
+                        r#" image-rendering="pixelated""#
+                    },
                     image.format
                 );
             }
@@ -224,7 +229,11 @@ fn effects_attr(
             num(h * 3.)
         );
         if effects.blur > 0. {
-            let _ = writeln!(defs, r#"<feGaussianBlur stdDeviation="{}"/>"#, num(effects.blur));
+            let _ = writeln!(
+                defs,
+                r#"<feGaussianBlur stdDeviation="{}"/>"#,
+                num(effects.blur)
+            );
         }
         if let Some(shadow) = effects.shadow {
             let [r, g, b, a] = shadow.color;
@@ -439,8 +448,14 @@ mod tests {
         };
         let svg = to_svg(&still);
         assert!(svg.contains(r#"transform="rotate(90 10 20)""#), "{svg}");
-        assert!(svg.contains(r#"style="mix-blend-mode:color-dodge" filter="url(#f1)""#), "{svg}");
-        assert!(svg.contains(r#"<feGaussianBlur stdDeviation="2"/>"#), "{svg}");
+        assert!(
+            svg.contains(r#"style="mix-blend-mode:color-dodge" filter="url(#f1)""#),
+            "{svg}"
+        );
+        assert!(
+            svg.contains(r#"<feGaussianBlur stdDeviation="2"/>"#),
+            "{svg}"
+        );
         assert!(
             svg.contains(r##"<feDropShadow dx="1" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.5"/>"##),
             "{svg}"

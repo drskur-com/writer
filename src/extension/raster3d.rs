@@ -59,7 +59,10 @@ impl Mesh {
         let mut f = |v: f32| v.to_bits().hash(&mut hasher);
         for tri in &tris {
             for v in &tri.v {
-                [v.p[0], v.p[1], v.w, v.depth].into_iter().chain(v.normal).for_each(&mut f);
+                [v.p[0], v.p[1], v.w, v.depth]
+                    .into_iter()
+                    .chain(v.normal)
+                    .for_each(&mut f);
             }
             tri.color.into_iter().for_each(&mut f);
             f(f32::from(u8::from(tri.lit)));
@@ -107,7 +110,11 @@ pub fn rasterize(mesh: &Mesh, scale: f32, max_side: u32) -> Option<Pixels> {
     if width == 0 || height == 0 {
         return None;
     }
-    let ss = if width * height * 4 <= MAX_SAMPLES { 2 } else { 1 };
+    let ss = if width * height * 4 <= MAX_SAMPLES {
+        2
+    } else {
+        1
+    };
     let (sw, sh) = (width * ss, height * ss);
     let k = scale * ss as f32;
     // 샘플 좌표로 옮긴 점.
@@ -213,12 +220,18 @@ fn draw_tri(
                 // 원근에 맞춘 법선 보간.
                 let (p0, p1, p2) = (w0 * v0.w, w1 * v1.w, w2 * v2.w);
                 let total = p0 + p1 + p2;
-                let n: [f32; 3] =
-                    std::array::from_fn(|i| (p0 * v0.normal[i] + p1 * v1.normal[i] + p2 * v2.normal[i]) / total);
+                let n: [f32; 3] = std::array::from_fn(|i| {
+                    (p0 * v0.normal[i] + p1 * v1.normal[i] + p2 * v2.normal[i]) / total
+                });
                 let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-12);
-                let lambert = (n[0] * mesh.light[0] + n[1] * mesh.light[1] + n[2] * mesh.light[2]) / length;
+                let lambert =
+                    (n[0] * mesh.light[0] + n[1] * mesh.light[1] + n[2] * mesh.light[2]) / length;
                 let light = mesh.ambient + (1.0 - mesh.ambient) * lambert.max(0.0);
-                [tri.color[0] * light, tri.color[1] * light, tri.color[2] * light]
+                [
+                    tri.color[0] * light,
+                    tri.color[1] * light,
+                    tri.color[2] * light,
+                ]
             } else {
                 [tri.color[0], tri.color[1], tri.color[2]]
             };
@@ -290,7 +303,10 @@ mod tests {
         let mesh = Mesh::new(tris, [0.0, 0.0, 1.0], 0.0, clip);
         let pixels = rasterize(&mesh, 1.0, 1000).unwrap();
         let p = &pixels.rgba[(5 * 10 + 5) * 4..][..4];
-        assert!(p[0] > 110 && p[0] < 145 && p[2] > 110 && p[2] < 145, "{p:?}");
+        assert!(
+            p[0] > 110 && p[0] < 145 && p[2] > 110 && p[2] < 145,
+            "{p:?}"
+        );
         assert_eq!(p[3], 255);
     }
 }

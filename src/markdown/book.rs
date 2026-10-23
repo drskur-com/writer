@@ -583,7 +583,9 @@ impl Walk<'_> {
                 return;
             }
             match out.last_mut() {
-                Some(last) if last.marks == marks && last.footnote.is_none() && last.object.is_none() => {
+                Some(last)
+                    if last.marks == marks && last.footnote.is_none() && last.object.is_none() =>
+                {
                     last.text.push_str(text)
                 }
                 _ => out.push(Inline {

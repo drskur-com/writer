@@ -106,15 +106,13 @@ fn main() {
             // 확장 그림의 글자에 쓰는 시스템 서체를 미리 찾아 둔다(첫 그림이 기다리지 않게).
             extension::render::preload_fonts();
 
-            // 테마 등록 후 저장된 테마(없거나 모르는 이름이면 기본 라이트) 적용
+            // 테마 등록 후 저장된 테마(없거나 모르는 이름이면 기본 라이트) 적용.
+            // 저장된 테마가 라이브러리 테마일 수 있어 마지막 라이브러리의 테마를 먼저 읽는다.
             let config = config::Config::load();
             theme::register(cx);
-            let restored = config
-                .theme
-                .as_deref()
-                .is_some_and(|name| theme::set_theme(name, cx));
-            if !restored {
-                theme::set_theme(theme::DEFAULT_LIGHT, cx);
+            theme::set_theme(theme::DEFAULT_LIGHT, cx);
+            if !theme::load_library(config.library_root.as_deref(), cx) {
+                theme::apply_saved(cx);
             }
 
             // 언어를 먼저 정해야 메뉴와 첫 화면이 그 언어로 나온다.

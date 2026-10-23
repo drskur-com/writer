@@ -273,15 +273,19 @@ impl Markup {
         let mut calls = Vec::new();
         let mut start = 0;
         for line in text.split('\n') {
-            calls.extend(crate::extension::inline_calls(line).into_iter().map(|call| {
-                TextDecoration::new(
-                    start + call.range.start..start + call.range.end,
-                    HighlightStyle {
-                        fade_out: Some(MARKER_FADE),
-                        ..Default::default()
-                    },
-                )
-            }));
+            calls.extend(
+                crate::extension::inline_calls(line)
+                    .into_iter()
+                    .map(|call| {
+                        TextDecoration::new(
+                            start + call.range.start..start + call.range.end,
+                            HighlightStyle {
+                                fade_out: Some(MARKER_FADE),
+                                ..Default::default()
+                            },
+                        )
+                    }),
+            );
             start += line.len() + 1;
         }
         self.calls.set(calls, cx);

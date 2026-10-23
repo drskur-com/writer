@@ -55,7 +55,9 @@ impl From<&str> for Package {
 
 impl Package {
     /// 폴더 안 경로(`ui/hud.lua`)와 소스들로 만든다. `init.lua`가 진입 파일이다.
-    pub fn from_files<'a>(files: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<Self, String> {
+    pub fn from_files<'a>(
+        files: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Self, String> {
         let mut main = None;
         let mut modules = BTreeMap::new();
         for (path, source) in files {
@@ -68,7 +70,9 @@ impl Package {
                     "{path}: module paths use letters, digits, - and _ in each part and end in .{EXTENSION_FILE}"
                 )
             })?;
-            if let Some((other, _)) = modules.insert(name.clone(), (path.to_string(), source.to_string())) {
+            if let Some((other, _)) =
+                modules.insert(name.clone(), (path.to_string(), source.to_string()))
+            {
                 return Err(format!("{other} and {path} are both module \"{name}\""));
             }
         }
@@ -153,9 +157,13 @@ pub fn read_folder(dir: &Path) -> Result<Package, String> {
     let mut total = 0;
     let mut files = Vec::new();
     for (relative, file) in lua_files(dir) {
-        let size = std::fs::metadata(&file).map_err(|err| err.to_string())?.len();
+        let size = std::fs::metadata(&file)
+            .map_err(|err| err.to_string())?
+            .len();
         if size > MAX_SOURCE_BYTES {
-            return Err(format!("{relative} is too large (limit {MAX_SOURCE_BYTES} bytes)."));
+            return Err(format!(
+                "{relative} is too large (limit {MAX_SOURCE_BYTES} bytes)."
+            ));
         }
         total += size;
         if total > MAX_PACKAGE_BYTES {
@@ -166,7 +174,11 @@ pub fn read_folder(dir: &Path) -> Result<Package, String> {
         let source = std::fs::read_to_string(&file).map_err(|err| format!("{relative}: {err}"))?;
         files.push((relative, source));
     }
-    Package::from_files(files.iter().map(|(path, source)| (path.as_str(), source.as_str())))
+    Package::from_files(
+        files
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str())),
+    )
 }
 
 /// 확장이 마지막으로 바뀐 때: 파일이면 그 파일, 폴더면 안의 파일·폴더 중 가장 늦은 것(지우거나 더해도 바뀐다).
@@ -255,10 +267,15 @@ mod tests {
 
     #[test]
     fn packages_need_an_entry_and_unique_modules() {
-        let package = Package::from_files([("init.lua", "return {}"), ("ui/hud.lua", "return 1")]).unwrap();
+        let package =
+            Package::from_files([("init.lua", "return {}"), ("ui/hud.lua", "return 1")]).unwrap();
         assert_eq!(package.main, "return {}");
         assert_eq!(package.modules["ui.hud"].0, "ui/hud.lua");
-        assert!(Package::from_files([("a.lua", "")]).unwrap_err().contains("init.lua"));
+        assert!(
+            Package::from_files([("a.lua", "")])
+                .unwrap_err()
+                .contains("init.lua")
+        );
         assert!(
             Package::from_files([("init.lua", ""), ("ui.lua", ""), ("ui/init.lua", "")])
                 .unwrap_err()

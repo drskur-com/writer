@@ -1,6 +1,6 @@
 //! 오른쪽 어시스턴트(LLM) 패널. 에디터 툴바 오른쪽 끝 버튼으로 열고 닫는다.
 //!
-//! 새 대화는 설정의 Bedrock 프로필로 실제 모델과 주고받고, 답을 받는 대로 조금씩 그린다
+//! 새 대화는 설정의 제공자(Bedrock·Token Plan)로 실제 모델과 주고받고, 답을 받는 대로 조금씩 그린다
 //! ([`crate::agent`]). 대화 상태와 프롬프트는 에이전트가 맡고, 여기서는 그리기만 한다. 답이 끝날 때마다 대화를
 //! 라이브러리의 대화 기록(redb, ADR-0031)에 쓰고, 기록 화면에서 지난 대화를 다시 열어 이어 간다.
 
@@ -42,8 +42,8 @@ pub(super) struct LiveChat {
     /// 입력창 아래의 모델 고르기. 리전에서 쓸 수 있는 모델만 담는다.
     model_picker: Entity<SelectState<SearchableVec<ModelItem>>>,
     models: ModelLookup,
-    /// 모델 목록이 어느 (프로필, 리전) 것인지. 설정이 바뀌면 다시 확인한다.
-    models_for: Option<(String, Option<String>)>,
+    /// 모델 목록이 어느 설정([`agent::Backend::models_key`]) 것인지. 설정이 바뀌면 다시 확인한다.
+    models_for: Option<String>,
     /// 모델 목록을 확인하는 태스크. 새로 시작하면 이전 것은 버린다.
     model_lookup: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -54,8 +54,8 @@ enum ModelLookup {
     /// AI를 설정하지 않았다.
     Idle,
     Loading,
-    /// 쓸 수 있는 모델과 부를 ID(추론 프로필).
-    Ready(Vec<(agent::BedrockModel, String)>),
+    /// 쓸 수 있는 모델과 부를 ID(Bedrock이면 추론 프로필).
+    Ready(Vec<(agent::ModelChoice, String)>),
     Failed(SharedString),
 }
 
@@ -747,7 +747,7 @@ impl WriterApp {
 }
 
 impl WriterApp {
-    /// 새 대화에 사용자 말을 더하고 Bedrock에 보낸다. 답은 받는 대로 마지막 어시스턴트 답에 붙인다.
+    /// 새 대화에 사용자 말을 더하고 모델에 보낸다. 답은 받는 대로 마지막 어시스턴트 답에 붙인다.
     /// 답을 받는 중이거나 빈 말이면 아무것도 하지 않는다.
     pub(super) fn send_assistant_message(
         &mut self,
@@ -808,11 +808,10 @@ impl WriterApp {
         cx.notify();
     }
 
-    /// AI 설정(제공자·프로필·리전)이 바뀌었으면 그 리전에서 쓸 수 있는 모델을 다시 확인한다.
+    /// AI 설정(제공자·프로필·리전)이 바뀌었으면 그 설정으로 쓸 수 있는 모델을 다시 확인한다.
     pub(super) fn refresh_assistant_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let prefs = cx.global::<crate::settings::Prefs>();
-        let key =
-            agent::Backend::from_prefs(prefs).map(|backend| (backend.profile, backend.region));
+        let backend = agent::Backend::from_prefs(cx.global::<crate::settings::Prefs>());
+        let key = backend.as_ref().map(agent::Backend::models_key);
         let chat = &mut self.assistant_chat;
         if chat.models_for == key && !matches!(chat.models, ModelLookup::Failed(_)) {
             return;
@@ -821,14 +820,14 @@ impl WriterApp {
         chat.model_picker.update(cx, |picker, cx| {
             picker.set_items(SearchableVec::new(Vec::<ModelItem>::new()), window, cx);
         });
-        let Some((profile, region)) = key else {
+        let Some(backend) = backend else {
             chat.models = ModelLookup::Idle;
             chat.model_lookup = None;
             cx.notify();
             return;
         };
         chat.models = ModelLookup::Loading;
-        let lookup = agent::available_models(profile, region);
+        let lookup = backend.available_models();
         chat.model_lookup = Some(cx.spawn_in(window, async move |this, cx| {
             let result = lookup
                 .await
@@ -845,7 +844,7 @@ impl WriterApp {
     /// (`us.` ↔ `global.` 등)이면 그 ID로 바꿔 저장한다.
     fn apply_assistant_models(
         &mut self,
-        result: Result<Vec<(agent::BedrockModel, String)>, String>,
+        result: Result<Vec<(agent::ModelChoice, String)>, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -857,19 +856,24 @@ impl WriterApp {
                 return;
             }
         };
-        let saved = cx.global::<crate::settings::Prefs>().ai_model.clone();
-        // 고른 적이 없으면 기본 모델(Opus 5.5)을 고른 것으로 보인다.
-        let wanted = saved.as_deref().unwrap_or(agent::DEFAULT_MODEL);
-        let selected = models.iter().position(|(model, _)| model.matches(wanted));
-        if let (Some(ix), Some(saved)) = (selected, &saved)
-            && models[ix].1 != saved.as_ref()
+        // 고른 적이 없으면 제공자의 기본 모델을 고른 것으로 보인다. 고른 모델(또는 기본)을 쓸 수 없으면
+        // 목록의 첫 모델로 바꾼다.
+        let wanted = agent::Backend::from_prefs(cx.global::<crate::settings::Prefs>())
+            .map(|backend| backend.model().to_string())
+            .unwrap_or_default();
+        let selected = models
+            .iter()
+            .position(|(model, _)| model.matches(&wanted))
+            .or_else(|| (!models.is_empty()).then_some(0));
+        if let Some(ix) = selected
+            && models[ix].1 != wanted
         {
             crate::settings::Prefs::set_ai_model(Some(models[ix].1.clone().into()), cx);
         }
         let items: Vec<_> = models
             .iter()
             .map(|(model, id)| ModelItem {
-                title: model.name.into(),
+                title: model.name.to_string().into(),
                 id: id.clone().into(),
             })
             .collect();
@@ -882,14 +886,29 @@ impl WriterApp {
         cx.notify();
     }
 
+    /// 어시스턴트가 고른 모델(`set_model`)을 저장하고 모델 고르기에도 보인다.
+    fn choose_assistant_model(&mut self, model: &str, window: &mut Window, cx: &mut Context<Self>) {
+        crate::settings::Prefs::set_ai_model(Some(model.to_string().into()), cx);
+        let chat = &mut self.assistant_chat;
+        if let ModelLookup::Ready(models) = &chat.models {
+            let selected = models.iter().position(|(_, id)| id == model);
+            chat.model_picker.update(cx, |picker, cx| {
+                picker.set_selected_index(selected.map(IndexPath::new), window, cx);
+            });
+        }
+    }
+
     /// 지금 고른 모델로 보낼 수 있는지. 목록을 확인하지 못했으면 일단 보내 본다(실패하면 안내).
     fn assistant_model_usable(&self, cx: &App) -> bool {
         match &self.assistant_chat.models {
-            ModelLookup::Ready(models) => {
-                let prefs = cx.global::<crate::settings::Prefs>();
-                let wanted = prefs.ai_model.as_deref().unwrap_or(agent::DEFAULT_MODEL);
-                models.iter().any(|(model, _)| model.matches(wanted))
-            }
+            ModelLookup::Ready(models) => agent::Backend::from_prefs(
+                cx.global::<crate::settings::Prefs>(),
+            )
+            .is_some_and(|backend| {
+                models
+                    .iter()
+                    .any(|(model, _)| model.matches(backend.model()))
+            }),
             ModelLookup::Loading => false,
             ModelLookup::Idle | ModelLookup::Failed(_) => true,
         }
@@ -945,6 +964,9 @@ impl WriterApp {
         cx: &mut Context<Self>,
     ) {
         let finished = matches!(event, agent::ChatEvent::Done | agent::ChatEvent::Failed(_));
+        if let agent::ChatEvent::SetModel(model) = &event {
+            self.choose_assistant_model(model, window, cx);
+        }
         let chat = &mut self.assistant_chat;
         if let Some(sent) = chat.conversation.apply(event) {
             chat.input
@@ -1511,7 +1533,7 @@ fn diff_line(line: &agent::DiffLine, pal: Palette) -> AnyElement {
         .into_any_element()
 }
 
-/// AI를 쓸 준비가 됐는지: 제공자를 골랐고, Bedrock이면 AWS 프로필도 골랐다.
+/// AI를 쓸 준비가 됐는지: 제공자를 골랐고, Bedrock이면 AWS 프로필, Token Plan이면 API 키가 있다.
 fn ai_configured(cx: &App) -> bool {
     agent::Backend::from_prefs(cx.global::<crate::settings::Prefs>()).is_some()
 }

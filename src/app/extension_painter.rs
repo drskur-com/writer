@@ -112,7 +112,10 @@ pub(super) fn paint(
             cache.shown = Some((key, Arc::new(image), window_id));
         }
     }
-    let current = cache.shown.as_ref().is_some_and(|(shown, ..)| *shown == key);
+    let current = cache
+        .shown
+        .as_ref()
+        .is_some_and(|(shown, ..)| *shown == key);
     if !current && cache.pending.is_none() {
         let reply = submit(shapes.to_vec(), scale * density * fit, width, height);
         cache.pending = Some((key, reply));
@@ -138,7 +141,12 @@ struct Job {
 }
 
 /// 그리기를 렌더 스레드에 맡긴다. 결과(BGRA 이미지)는 돌려준 곳으로 온다.
-fn submit(shapes: Vec<Shape>, scale: f32, width: u32, height: u32) -> Receiver<Option<RenderImage>> {
+fn submit(
+    shapes: Vec<Shape>,
+    scale: f32,
+    width: u32,
+    height: u32,
+) -> Receiver<Option<RenderImage>> {
     static QUEUE: OnceLock<Sender<Job>> = OnceLock::new();
     let queue = QUEUE.get_or_init(|| {
         let (tx, rx) = channel::<Job>();

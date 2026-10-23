@@ -8,8 +8,7 @@ mod tasks;
 
 pub use book::{
     Block, ColumnAlign, Inline, InlineObject, Marks, Rich, Table, UNNUMBERED, for_each_rich,
-    for_each_rich_mut,
-    manuscript_blocks, plain, rich_text, table,
+    for_each_rich_mut, manuscript_blocks, plain, rich_text, table,
 };
 pub use tasks::{Todo, todos};
 
