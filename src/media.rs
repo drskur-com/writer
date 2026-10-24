@@ -205,6 +205,86 @@ pub fn poster_png(path: &Path) -> Option<Vec<u8>> {
     crate::thumbnail::png(path, POSTER_SIDE)
 }
 
+/// YouTube 주소의 동영상 ID(11자). `youtu.be/ID`, `youtube.com/watch?v=ID`, `/embed/ID`, `/shorts/ID`,
+/// `/live/ID`와 `m.`·`music.`·`youtube-nocookie.com`을 받는다. YouTube가 아니면 `None`(ADR-0051).
+pub fn youtube_id(destination: &str) -> Option<String> {
+    let url = url::Url::parse(destination.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let mut segments = url.path_segments()?.filter(|segment| !segment.is_empty());
+    let id = match host {
+        "youtu.be" => segments.next()?.to_string(),
+        "youtube.com" | "m.youtube.com" | "music.youtube.com" | "youtube-nocookie.com" => {
+            match segments.next()? {
+                "watch" => url
+                    .query_pairs()
+                    .find(|(key, _)| key == "v")
+                    .map(|(_, value)| value.into_owned())?,
+                "embed" | "shorts" | "live" | "v" => segments.next()?.to_string(),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    (id.len() == 11
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')))
+    .then_some(id)
+}
+
+/// YouTube에서 보는 주소(내보낸 책의 링크).
+pub fn youtube_watch_url(id: &str) -> String {
+    format!("https://www.youtube.com/watch?v={id}")
+}
+
+/// YouTube 공식 플레이어 주소(DOCX의 온라인 비디오).
+pub fn youtube_embed_url(id: &str) -> String {
+    format!("https://www.youtube.com/embed/{id}")
+}
+
+/// 에디터·미리보기에 보일 썸네일(480×360, 16:9 영상은 위아래에 검은 띠가 있어 16:9 칸에 채워 자른다).
+pub fn youtube_thumbnail_url(id: &str) -> String {
+    format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg")
+}
+
+/// 내보내기에 넣을 YouTube 썸네일(JPEG, 16:9). 큰 것(1280×720)이 없으면 작은 것(320×180)을 쓴다.
+/// 내려받지 못하면(오프라인 등) `None`. 응답을 기다리는 동안 스레드를 막으므로 내보내기 작업에서 부른다.
+pub fn youtube_poster(id: &str) -> Option<Vec<u8>> {
+    if cfg!(test) {
+        return None;
+    }
+    ["maxresdefault", "mqdefault"]
+        .iter()
+        .find_map(|name| fetch(&format!("https://i.ytimg.com/vi/{id}/{name}.jpg")))
+        .filter(|bytes| crate::library::image_extension(bytes) == Some("jpg"))
+}
+
+/// HTTP GET 본문. 실패하거나 2xx가 아니면 `None`.
+fn fetch(url: &str) -> Option<Vec<u8>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    runtime.block_on(async {
+        let response = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .ok()?
+            .get(url)
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        response.bytes().await.ok().map(|bytes| bytes.to_vec())
+    })
+}
+
 /// 재생 시간 표시(`1:05`, `1:02:03`).
 pub fn format_time(time: Duration) -> String {
     let total = time.as_secs();
@@ -228,6 +308,32 @@ mod tests {
         assert_eq!(kind_of("https://x.io/a.m4a?raw=1"), Some(MediaKind::Audio));
         assert_eq!(kind_of("a.png"), None);
         assert_eq!(kind_of("noext"), None);
+    }
+
+    #[test]
+    fn youtube_addresses_give_the_video_id() {
+        let id = Some("dQw4w9WgXcQ".to_string());
+        for url in [
+            "https://youtu.be/dQw4w9WgXcQ",
+            "https://youtu.be/dQw4w9WgXcQ?t=42",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=x",
+            "http://youtube.com/watch?feature=share&v=dQw4w9WgXcQ",
+            "https://m.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://www.youtube.com/embed/dQw4w9WgXcQ",
+            "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+            "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+        ] {
+            assert_eq!(youtube_id(url), id, "{url}");
+        }
+        for url in [
+            "https://www.youtube.com/channel/UC123",
+            "https://www.youtube.com/watch?v=short",
+            "https://vimeo.com/123456",
+            "Attachments/clip.mp4",
+            "https://evil.com/youtube.com/watch?v=dQw4w9WgXcQ",
+        ] {
+            assert_eq!(youtube_id(url), None, "{url}");
+        }
     }
 
     #[test]

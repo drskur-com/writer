@@ -256,6 +256,61 @@ impl<'a> EpubBuilder<'a> {
         Some(format!("../{filename}"))
     }
 
+    /// YouTube 줄(ADR-0051): 썸네일을 내려받아 넣고 YouTube로 가는 링크를 건다. ePub 리더 대부분이 iframe을
+    /// 막아서 플레이어는 넣지 않는다. 썸네일을 받지 못하면 링크 문단이다.
+    fn youtube(&mut self, img: &crate::markdown::ImageLine, id: &str) {
+        let watch = crate::media::youtube_watch_url(id);
+        let caption = img.alt.trim();
+        let key = format!("youtube\u{0}{id}");
+        let thumbnail = match self.image_dest_map.get(&key) {
+            Some(existing) => Some(format!("../{existing}")),
+            None => crate::media::youtube_poster(id).map(|jpeg| {
+                self.image_counter += 1;
+                let filename = format!("images/youtube_{:04}.jpg", self.image_counter);
+                self.images.push(ImageAsset {
+                    id: format!("img_{}", self.image_counter),
+                    zip_path: filename.clone(),
+                    source: AssetSource::Bytes(jpeg),
+                    media_type: "image/jpeg",
+                    is_cover: false,
+                });
+                self.image_dest_map.insert(key, filename.clone());
+                format!("../{filename}")
+            }),
+        };
+        let label = if caption.is_empty() {
+            "YouTube"
+        } else {
+            caption
+        };
+        let sec = self.ensure_section(&self.project.name);
+        let Some(thumbnail) = thumbnail else {
+            sec.html_body.push_str(&format!(
+                "<p class=\"media-link\"><a href=\"{}\">▶ {}</a></p>\n",
+                escape_xml(&watch),
+                escape_xml(label)
+            ));
+            return;
+        };
+        let align = match img.options.align {
+            crate::markdown::ImageAlign::Left => "align-left",
+            crate::markdown::ImageAlign::Center => "align-center",
+            crate::markdown::ImageAlign::Right => "align-right",
+        };
+        let style = img
+            .options
+            .width
+            .map(|w| format!(" style=\"width: {w}px;\""))
+            .unwrap_or_default();
+        sec.html_body.push_str(&format!(
+            "<figure class=\"video youtube {align}\">\n  <a href=\"{watch}\"><img src=\"{}\" alt=\"{}\"{style}/></a>\n  <figcaption><a href=\"{watch}\">▶ {}</a></figcaption>\n</figure>\n",
+            escape_xml(&thumbnail),
+            escape_xml(caption),
+            escape_xml(label),
+            watch = escape_xml(&watch),
+        ));
+    }
+
     /// 동영상·오디오 줄: `<video>`·`<audio>`로 넣는다. 재생하지 못하는 리더는 안쪽의 포스터·캡션을 보인다.
     /// 웹 주소는 링크로, 찾지 못한 파일은 안내 문단으로 둔다.
     fn media(
@@ -668,6 +723,10 @@ impl<'a> EpubBuilder<'a> {
                 sec.html_body.push_str("<pre><code>");
                 sec.html_body.push_str(&escape_xml(code));
                 sec.html_body.push_str("</code></pre>\n");
+            }
+            Block::Image(img) if crate::media::youtube_id(&img.destination).is_some() => {
+                let id = crate::media::youtube_id(&img.destination).unwrap();
+                self.youtube(img, &id);
             }
             Block::Image(img) if crate::media::kind_of(&img.destination).is_some() => {
                 let kind = crate::media::kind_of(&img.destination).unwrap();
@@ -1339,6 +1398,11 @@ figure.video, figure.audio {{
 }}
 
 figure.video video {{
+  max-width: 100%;
+  height: auto;
+}}
+
+figure.youtube img {{
   max-width: 100%;
   height: auto;
 }}
@@ -2119,6 +2183,18 @@ mod image_tests {
             opf.contains(r#"href="media/media_0002.mp4" media-type="video/mp4""#),
             "{opf}"
         );
+    }
+
+    #[test]
+    fn youtube_becomes_a_link_without_the_player() {
+        // 시험에서는 썸네일을 내려받지 않으므로 링크 문단이다.
+        let mut archive = build_with("![예고편](https://youtu.be/dQw4w9WgXcQ)\n");
+        let html = section(&mut archive);
+        assert!(
+            html.contains(r#"<a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ">▶ 예고편</a>"#),
+            "{html}"
+        );
+        assert!(!html.contains("iframe"), "{html}");
     }
 
     #[test]

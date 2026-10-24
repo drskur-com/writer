@@ -51,7 +51,13 @@ pub(super) fn page(layout: Rc<BookLayout>, index: usize, scale: f32) -> AnyEleme
                 } else {
                     ObjectFit::Contain
                 };
-                let video = matches!(source, ImageFile::Video { .. });
+                let video = matches!(source, ImageFile::Video { .. } | ImageFile::YouTube(_));
+                // YouTube 썸네일(4:3, 위아래 검은 띠)은 16:9 칸에 채워 자른다.
+                let fit = if matches!(source, ImageFile::YouTube(_)) {
+                    ObjectFit::Cover
+                } else {
+                    fit
+                };
                 let source: ImageSource = match source {
                     ImageFile::File { path, modified } | ImageFile::Video { path, modified } => {
                         crate::thumbnail::source(
@@ -61,6 +67,9 @@ pub(super) fn page(layout: Rc<BookLayout>, index: usize, scale: f32) -> AnyEleme
                         )
                     }
                     ImageFile::Url(uri) => uri.clone().into(),
+                    ImageFile::YouTube(id) => {
+                        SharedUri::from(crate::media::youtube_thumbnail_url(id)).into()
+                    }
                 };
                 Some(
                     div()

@@ -74,6 +74,14 @@ pub enum PdfItem {
         height: f32,
         path: PathBuf,
     },
+    /// YouTube 동영상(ADR-0051): 썸네일과 재생 표시, 누르면 YouTube가 열리는 링크.
+    YouTube {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        id: String,
+    },
     /// 확장 블록 그림(ADR-0026): `canvas` 크기의 모양 목록을 칸에 맞춰 벡터로 그린다.
     Drawing {
         x: f32,
@@ -122,6 +130,7 @@ pub fn render(document: &PdfDocument) -> Result<Vec<u8>, ExportError> {
     let mut fonts = Fonts::new();
     let mut images: HashMap<PathBuf, Option<Image>> = HashMap::new();
     let mut posters: HashMap<PathBuf, Option<Image>> = HashMap::new();
+    let mut thumbnails: HashMap<String, Option<Image>> = HashMap::new();
     let mut pdf = Document::new();
     let mut metadata = Metadata::new().title(document.title.clone());
     if !document.authors.is_empty() {
@@ -135,6 +144,8 @@ pub fn render(document: &PdfDocument) -> Result<Vec<u8>, ExportError> {
                 ExportError::InvalidProject(t!("export.error.page_size").into_owned())
             })?;
         let mut pdf_page = pdf.start_page_with(settings);
+        // 그리는 동안은 페이지를 빌릴 수 없어 링크는 모아 두었다가 다 그린 뒤 단다.
+        let mut links: Vec<(Rect, String)> = Vec::new();
         let mut surface = pdf_page.surface();
         for item in &page.items {
             match item {
@@ -201,6 +212,29 @@ pub fn render(document: &PdfDocument) -> Result<Vec<u8>, ExportError> {
                     }
                     draw_play_badge(&mut surface, *x, *y, *width, *height);
                 }
+                PdfItem::YouTube {
+                    x,
+                    y,
+                    width,
+                    height,
+                    id,
+                } => {
+                    let thumbnail = thumbnails
+                        .entry(id.clone())
+                        .or_insert_with(|| {
+                            crate::media::youtube_poster(id)
+                                .and_then(|jpeg| Image::from_jpeg(Arc::new(jpeg).into(), true).ok())
+                        })
+                        .clone();
+                    fill_rect(&mut surface, *x, *y, *width, *height, [40, 40, 40]);
+                    if let Some(thumbnail) = thumbnail {
+                        draw_image(&mut surface, thumbnail, *x, *y, *width, *height, true);
+                    }
+                    draw_play_badge(&mut surface, *x, *y, *width, *height);
+                    if let Some(rect) = Rect::from_xywh(*x, *y, *width, *height) {
+                        links.push((rect, crate::media::youtube_watch_url(id)));
+                    }
+                }
                 PdfItem::Drawing {
                     x,
                     y,
@@ -212,6 +246,15 @@ pub fn render(document: &PdfDocument) -> Result<Vec<u8>, ExportError> {
             }
         }
         surface.finish();
+        for (rect, uri) in links {
+            pdf_page.add_annotation(krilla::annotation::Annotation::new_link(
+                krilla::annotation::LinkAnnotation::new(
+                    rect,
+                    krilla::annotation::Target::Action(krilla::action::LinkAction::new(uri).into()),
+                ),
+                Some("YouTube".into()),
+            ));
+        }
         pdf_page.finish();
     }
     for path in &document.attachments {
@@ -1103,6 +1146,29 @@ mod tests {
         assert!(text.contains("clip.mp4") && text.contains("song.mp3"));
         assert!(text.contains("/video#2Fmp4") || text.contains("video/mp4"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn youtube_becomes_a_link_to_the_video() {
+        let document = PdfDocument {
+            title: "시험".into(),
+            authors: Vec::new(),
+            attachments: Vec::new(),
+            pages: vec![PdfPage {
+                width: 420.,
+                height: 595.,
+                items: vec![PdfItem::YouTube {
+                    x: 50.,
+                    y: 50.,
+                    width: 320.,
+                    height: 180.,
+                    id: "dQw4w9WgXcQ".into(),
+                }],
+            }],
+        };
+        let text = String::from_utf8_lossy(&render(&document).unwrap()).into_owned();
+        assert!(text.contains("/URI"), "링크가 없다");
+        assert!(text.contains("https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
     }
 
     #[test]

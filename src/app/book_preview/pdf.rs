@@ -80,6 +80,17 @@ fn item(item: &Item) -> Option<PdfItem> {
             path: path.clone(),
         },
         Item::Image {
+            bounds,
+            source: ImageFile::YouTube(id),
+            ..
+        } => PdfItem::YouTube {
+            x: f32::from(bounds.origin.x),
+            y: f32::from(bounds.origin.y),
+            width: f32::from(bounds.size.width),
+            height: f32::from(bounds.size.height),
+            id: id.clone(),
+        },
+        Item::Image {
             source: ImageFile::Url(_),
             ..
         } => return None,

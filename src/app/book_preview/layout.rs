@@ -121,6 +121,8 @@ pub(super) enum ImageFile {
         path: PathBuf,
         modified: u128,
     },
+    /// YouTube 동영상 ID(ADR-0051): 썸네일과 재생 표시, PDF에는 YouTube로 가는 링크를 건다.
+    YouTube(String),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1500,6 +1502,12 @@ struct ResolvedImage {
 /// 이미지 경로 → 파일. 상대 경로는 시트 폴더 기준이고, `../`가 어긋난 경로도 찾는다
 /// (`library::resolve_image_path`). 읽을 수 없으면 `None`.
 fn image_source(dir: &Path, destination: &str) -> Option<ResolvedImage> {
+    if let Some(id) = crate::media::youtube_id(destination) {
+        return Some(ResolvedImage {
+            source: ImageFile::YouTube(id),
+            size: Some((640., 360.)),
+        });
+    }
     if library::is_web_address(destination) {
         return Some(ResolvedImage {
             source: ImageFile::Url(destination.to_string().into()),

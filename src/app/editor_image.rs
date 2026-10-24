@@ -8,6 +8,8 @@
 //! 경로가 동영상·오디오면(ADR-0050) 같은 자리에 재생기를 그린다. 동영상은 포스터(첫 장면 썸네일) 위에
 //! 재생 단추를 두고, 재생하면 프레임을 그린다. 오디오는 한 줄 카드다. 단추·진행 막대는 눌러도 커서가
 //! 줄로 가지 않는다.
+//!
+//! YouTube 주소(ADR-0051)는 썸네일 카드로 그린다. 재생 단추를 누르면 브라우저에서 연다(앱 안에서 재생하지 않는다).
 
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
@@ -96,6 +98,8 @@ enum Source {
     /// 동영상: 파일, 수정 시각, 포스터 긴 변, 재생기.
     Video(PathBuf, u128, Pixels, Rc<RefCell<MediaPlayer>>),
     Audio(Rc<RefCell<MediaPlayer>>),
+    /// YouTube 동영상 ID.
+    YouTube(String),
     /// 파일이 없거나 이미지로 읽을 수 없다. 적힌 경로를 보여 준다.
     Missing(String),
 }
@@ -179,6 +183,7 @@ impl ImageBlocks {
                 placement.size,
                 pal,
             ),
+            Source::YouTube(id) => render_youtube(&id, placement.size, pal),
             Source::Audio(player) => render_audio(
                 player,
                 self.players.clone(),
@@ -228,6 +233,7 @@ impl ImageBlocks {
                     Source::Animated(..)
                     | Source::Video(..)
                     | Source::Audio(_)
+                    | Source::YouTube(_)
                     | Source::Missing(_) => unreachable!(),
                 };
                 // gpui는 아틀라스에서 이미지를 선형 보간으로 읽는데 타일 경계에서 멈추지 않는다.
@@ -293,6 +299,15 @@ impl ImageBlocks {
         let image = markdown::image_line(line)?;
         let destination = image.destination;
         let caption = (!image.alt.trim().is_empty()).then(|| image.alt.trim().to_string().into());
+        if let Some(id) = media::youtube_id(&destination) {
+            let (w, h) = DEFAULT_VIDEO_SIZE;
+            return Some(Placement {
+                size: image_size(Some(size(px(w), px(h))), &image.options, width),
+                source: Source::YouTube(id),
+                align: image.options.align,
+                caption,
+            });
+        }
         if let Some(kind) = media::kind_of(&destination) {
             return Some(self.place_media(kind, destination, &image.options, caption, width));
         }
@@ -554,6 +569,72 @@ fn render_video(
                     )),
             )
         })
+        .into_any_element()
+}
+
+/// YouTube 카드: 썸네일(16:9 칸에 채움), 가운데 재생 단추(누르면 브라우저에서 연다), 왼쪽 아래 `YouTube` 표시.
+fn render_youtube(id: &str, shown: Size<Pixels>, pal: Palette) -> AnyElement {
+    let watch = media::youtube_watch_url(id);
+    div()
+        .relative()
+        .flex_shrink_0()
+        .w(shown.width)
+        .h(shown.height)
+        .overflow_hidden()
+        .rounded(px(CORNER_RADIUS))
+        .bg(gpui_kit::gpui::black())
+        .child(
+            img(SharedUri::from(media::youtube_thumbnail_url(id)))
+                .absolute()
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+                .with_fallback(move || {
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(icons::video()).text_color(pal.muted))
+                        .into_any_element()
+                }),
+        )
+        .child(
+            div()
+                .absolute()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .size(px(BIG_PLAY_SIZE))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(gpui_kit::gpui::black().opacity(0.55))
+                        .text_color(gpui_kit::gpui::white())
+                        .cursor_pointer()
+                        .child(Icon::new(icons::play()))
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            cx.open_url(&watch);
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .absolute()
+                .left_2()
+                .bottom_2()
+                .px_1p5()
+                .rounded_sm()
+                .bg(gpui_kit::gpui::black().opacity(0.55))
+                .text_xs()
+                .text_color(gpui_kit::gpui::white())
+                .child("YouTube"),
+        )
         .into_any_element()
 }
 

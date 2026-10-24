@@ -10,7 +10,8 @@
 //! 라이브러리 밖의 시트에는 첨부파일 그룹이 없어서 원본 파일의 절대 경로와 주소를 그대로 쓴다.
 //!
 //! 동영상·오디오(ADR-0050)도 같은 대화상자로 넣는다. 문법은 이미지와 같고 확장자로 가른다. 웹 주소 탭은
-//! 없고(파일로 넣어야 내보내기에 들어간다), 오디오는 크기·한 페이지 가득을 쓰지 않는다.
+//! 없고(파일로 넣어야 내보내기에 들어간다), 오디오는 크기·한 페이지 가득을 쓰지 않는다. 동영상의 URL 탭은
+//! YouTube 주소만 받아 그대로 적는다(썸네일 카드, ADR-0051).
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -220,7 +221,7 @@ impl InsertImageForm {
             Some(_) => vec![Source::File, Source::Attachment, Source::Url],
             None => vec![Source::File, Source::Url],
         };
-        if kind.is_some() {
+        if kind == Some(MediaKind::Audio) {
             tabs.retain(|tab| *tab != Source::Url);
         }
         Self {
@@ -409,6 +410,14 @@ impl InsertImageForm {
             }
             _ => None,
         };
+        // YouTube 주소는 내려받지 않고 그대로 적는다. 동영상 대화상자의 주소는 YouTube만 받는다.
+        let youtube = web.as_deref().and_then(media::youtube_id).is_some();
+        if self.kind == Some(MediaKind::Video) && web.is_some() && !youtube {
+            self.download_error = Some(t!("insert.video.youtube_only").into());
+            cx.notify();
+            return;
+        }
+        let web = web.filter(|_| !youtube);
         if attachable && let Some(url) = web {
             self.start_download(url, window, cx);
             return;
@@ -763,6 +772,9 @@ impl Render for InsertImageForm {
                     Source::Attachment => {
                         (icons::attachments(), t!("insert.image.tab_attachments"))
                     }
+                    Source::Url if self.kind == Some(MediaKind::Video) => {
+                        (icons::link(), "YouTube".into())
+                    }
                     Source::Url => (icons::link(), "URL".into()),
                 };
                 Tab::new().flex_1().icon(icon).label(label)
@@ -777,6 +789,8 @@ impl Render for InsertImageForm {
                     Some((t!("insert.image.downloading").into(), pal.muted))
                 } else if let Some(error) = &self.download_error {
                     Some((error.clone(), pal.danger))
+                } else if self.kind == Some(MediaKind::Video) {
+                    Some((t!("insert.video.youtube_note").into(), pal.muted))
                 } else if self.tabs.contains(&Source::Attachment) {
                     Some((t!("insert.image.download_note").into(), pal.muted))
                 } else {
@@ -944,7 +958,8 @@ impl WriterApp {
             source,
             path,
         };
-        let kind = media::kind_of(&edit.destination);
+        let kind = media::kind_of(&edit.destination)
+            .or_else(|| media::youtube_id(&edit.destination).map(|_| MediaKind::Video));
         self.open_image_dialog(sheet.to_path_buf(), kind, Some(edit), window, cx);
     }
 

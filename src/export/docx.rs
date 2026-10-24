@@ -213,6 +213,8 @@ struct ImagePart {
     /// 같은 그림의 SVG(관계 id, `media/imageN.svg`, 내용). Word 2016 이상은 이것을 벡터로 보이고, 다른 앱은
     /// PNG를 쓴다(확장 그림).
     svg: Option<(String, String, Vec<u8>)>,
+    /// YouTube 동영상 ID(ADR-0051). 있으면 그림을 Word의 온라인 비디오로 둔다(누르면 Word 안에서 재생).
+    video: Option<String>,
 }
 
 /// 확장 블록 (이름, 인자).
@@ -598,6 +600,21 @@ impl<'a> DocBuilder<'a> {
 
     fn image(&mut self, image: &ImageLine, ctx: Context) {
         let caption = image.alt.trim().to_string();
+        if let Some(id) = crate::media::youtube_id(&image.destination) {
+            match self.load_youtube(&id) {
+                Some(index) => self.place_image(index, image, &caption, ctx),
+                None => {
+                    let label = if caption.is_empty() {
+                        "YouTube"
+                    } else {
+                        &caption
+                    };
+                    let text = format!("▶ {label} ({})", crate::media::youtube_watch_url(&id));
+                    self.paragraph("Caption", "", &text_run("", &text));
+                }
+            }
+            return;
+        }
         let kind = crate::media::kind_of(&image.destination);
         let resolved = crate::library::resolve_image_path(
             &self.dir,
@@ -817,6 +834,7 @@ impl<'a> DocBuilder<'a> {
             data: png,
             width: (w * DRAWING_RESOLUTION).ceil().max(1.) as u32,
             height: (h * DRAWING_RESOLUTION).ceil().max(1.) as u32,
+            video: None,
             svg: plain.then(|| {
                 (
                     format!("rIdImage{id}Svg"),
@@ -826,6 +844,29 @@ impl<'a> DocBuilder<'a> {
             }),
         });
         Ok(Some(index))
+    }
+
+    /// YouTube 썸네일을 내려받아 온라인 비디오 그림으로 넣는다. 받지 못하면 `None`.
+    fn load_youtube(&mut self, id: &str) -> Option<usize> {
+        let key = PathBuf::from(format!("youtube:{id}"));
+        if let Some(index) = self.image_ids.get(&key) {
+            return Some(*index);
+        }
+        let data = crate::media::youtube_poster(id)?;
+        let size = imagesize::blob_size(&data).ok()?;
+        let index = self.images.len();
+        self.images.push(ImagePart {
+            rel_id: format!("rIdImage{}", index + 1),
+            name: format!("media/image{}.jpeg", index + 1),
+            extension: "jpeg",
+            data,
+            width: size.width.max(1) as u32,
+            height: size.height.max(1) as u32,
+            video: Some(id.to_string()),
+            svg: None,
+        });
+        self.image_ids.insert(key, index);
+        Some(index)
     }
 
     /// 동영상 포스터(첫 장면 PNG)를 그림으로 넣는다. 만들 수 없으면 `None`.
@@ -847,6 +888,7 @@ impl<'a> DocBuilder<'a> {
             data,
             width: size.width.max(1) as u32,
             height: size.height.max(1) as u32,
+            video: None,
             svg: None,
         });
         self.image_ids.insert(key, index);
@@ -882,6 +924,7 @@ impl<'a> DocBuilder<'a> {
             data,
             width: size.width.max(1) as u32,
             height: size.height.max(1) as u32,
+            video: None,
             svg: None,
         });
         self.image_ids.insert(path.to_path_buf(), index);
@@ -894,8 +937,26 @@ impl<'a> DocBuilder<'a> {
         let (cx, cy) = (emu(width), emu(height));
         let id = index + 1;
         let description = escape(description);
+        // 온라인 비디오: 그림 속성에 YouTube 링크와 플레이어(iframe)를 단다. Word가 그림을 누르면 재생한다.
+        let video = part.video.as_ref().map_or(String::new(), |id| {
+            let player = escape(&format!(
+                r#"<iframe width="560" height="315" src="{}?feature=oembed" frameborder="0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen=""></iframe>"#,
+                crate::media::youtube_embed_url(id)
+            ));
+            format!(
+                r#"<a:hlinkClick xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" r:id="{rel}Video"/><a:extLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:ext uri="{{C809E66F-F1BF-436E-b5F7-EEA9579F0CBA}}"><wp15:webVideoPr xmlns:wp15="http://schemas.microsoft.com/office/word/2012/wordprocessingDrawing" embeddedHtml="{player}" h="315" w="560"/></a:ext></a:extLst>"#,
+                rel = part.rel_id
+            )
+        });
+        let doc_pr = if video.is_empty() {
+            format!(r#"<wp:docPr id="{id}" name="그림 {id}" descr="{description}"/>"#)
+        } else {
+            format!(
+                r#"<wp:docPr id="{id}" name="비디오 {id}" descr="{description}">{video}</wp:docPr>"#
+            )
+        };
         format!(
-            r#"<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{cx}" cy="{cy}"/><wp:docPr id="{id}" name="그림 {id}" descr="{description}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="{id}" name="image{id}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{rel}">{svg}</a:blip><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+            r#"<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{cx}" cy="{cy}"/>{doc_pr}<wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="{id}" name="image{id}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{rel}">{svg}</a:blip><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
             rel = part.rel_id,
             svg = part.svg.as_ref().map_or(String::new(), |(svg_rel, _, _)| format!(
                 r#"<a:extLst><a:ext uri="{{96DAC541-7B7A-43D3-8B79-37D633B846F1}}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="{svg_rel}"/></a:ext></a:extLst>"#
@@ -1342,6 +1403,13 @@ fn document_rels(images: &[ImagePart]) -> String {
             r#"<Relationship Id="{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{}"/>"#,
             image.rel_id, image.name
         ));
+        if let Some(id) = &image.video {
+            out.push_str(&format!(
+                r#"<Relationship Id="{}Video" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{}" TargetMode="External"/>"#,
+                image.rel_id,
+                escape(&crate::media::youtube_watch_url(id))
+            ));
+        }
         if let Some((rel, name, _)) = &image.svg {
             out.push_str(&format!(
                 r#"<Relationship Id="{rel}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{name}"/>"#
@@ -1475,6 +1543,32 @@ mod tests {
         // 캔버스 × scale 2 × 해상도 3.
         assert_eq!((image.width(), image.height()), (240, 120));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn youtube_is_an_online_video_or_a_link_line() {
+        // 시험에서는 썸네일을 내려받지 않으므로 링크 줄이다.
+        let project = project("![예고편](https://youtu.be/dQw4w9WgXcQ)\n");
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        build(&project, &DocxOptions::default(), &mut bytes).unwrap();
+        let document = read(&bytes.into_inner(), "word/document.xml");
+        assert!(
+            document.contains("▶ 예고편 (https://www.youtube.com/watch?v=dQw4w9WgXcQ)"),
+            "{document}"
+        );
+        // 썸네일을 받으면 하이퍼링크 관계를 단다.
+        let rels = document_rels(&[ImagePart {
+            rel_id: "rIdImage1".into(),
+            name: "media/image1.jpeg".into(),
+            extension: "jpeg",
+            data: Vec::new(),
+            width: 1280,
+            height: 720,
+            svg: None,
+            video: Some("dQw4w9WgXcQ".into()),
+        }]);
+        assert!(rels.contains(r#"Id="rIdImage1Video""#), "{rels}");
+        assert!(rels.contains(r#"TargetMode="External""#), "{rels}");
     }
 
     #[test]
