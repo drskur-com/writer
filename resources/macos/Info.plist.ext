@@ -2,3 +2,5 @@
   <string>Writer uses the microphone for dictation. Speech is recognized on this Mac and never leaves it.</string>
   <key>NSAudioCaptureUsageDescription</key>
   <string>Writer records system audio, such as the other side of a Zoom call, for dictation. It is recognized on this Mac and never leaves it.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Writer uses macOS dictation to transcribe speech on this Mac. Audio is never sent to Apple.</string>

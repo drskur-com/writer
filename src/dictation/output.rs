@@ -4,13 +4,12 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
 
-/// 문단 채널이 닫힐 때까지 받은 문단을 기록 끝에 덧붙이고 `written`으로 알린다.
+/// 문단이 끝날 때까지(채널이 닫힐 때까지) 받은 문단을 기록 끝에 덧붙이고 `written`으로 알린다.
 /// 쓰기에 실패하면 그 까닭을 돌려준다.
 pub(super) fn write_out(
     mut record: Record,
-    paragraphs: Receiver<String>,
+    paragraphs: impl IntoIterator<Item = String>,
     mut written: impl FnMut(String),
 ) -> io::Result<()> {
     for paragraph in paragraphs {

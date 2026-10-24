@@ -590,6 +590,18 @@ impl OpenSheet {
         self.styles.is_some()
     }
 
+    /// 본문을 `text`(파일에서 다시 읽은 글)로 바꾸고 단어 수·줄 묶음·표·마크업을 다시 맞춘다. 프로그램으로 바꾼
+    /// 글은 변경 소식이 없어, 맞추지 않으면 옛 줄 자리의 마크업(`#` 흐림 등)이 새 글에 남는다.
+    pub(super) fn replace_text(&mut self, text: String, window: &mut Window, cx: &mut App) {
+        self.words = library::count_words(text.chars());
+        self.state
+            .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
+        sync_line_groups(self, &text, cx);
+        sync_tables(self, &text, cx);
+        self.markup.apply_lines(&text, cx);
+        self.markup.apply(markdown::spans(&text), cx);
+    }
+
     /// 본문이 지금 파일과 같다고 표시한다(받아쓰기가 파일에 쓴 것을 본문에도 붙였을 때).
     pub(super) fn mark_saved(&mut self, path: &std::path::Path) {
         self.autosave = None;
@@ -1004,15 +1016,8 @@ impl WriterApp {
         else {
             return;
         };
-        editor.words = library::count_words(text.chars());
         editor.disk_modified = modified;
-        editor
-            .state
-            .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
-        sync_line_groups(editor, &text, cx);
-        sync_tables(editor, &text, cx);
-        editor.markup.apply_lines(&text, cx);
-        editor.markup.apply(markdown::spans(&text), cx);
+        editor.replace_text(text, window, cx);
     }
 
     /// 열린 시트 파일이 다른 그룹으로 옮겨졌을 때 경로와 책 스타일을 새 위치에 맞춘다.

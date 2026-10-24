@@ -57,6 +57,16 @@ pub struct DictationConfig {
     pub source: crate::dictation::AudioSource,
     /// 작은 소리를 말소리 크기로 키운다(자동 음량 맞춤).
     pub auto_gain: bool,
+    /// 녹음한 소리를 기록마다 WAV로 남긴다(`STT/.audio/`). 받아쓰기가 무엇을 들었는지 들어 본다.
+    pub save_audio: bool,
+    /// 말하는 동안 받아 적고 문단을 나누는 엔진(ADR-0056).
+    pub engine: crate::dictation::Engine,
+    /// 받아쓰는 언어 코드(`dictation::DICTATION_LANGUAGES`). macOS 받아쓰기와 Cohere가 쓴다.
+    /// 없으면 앱 언어(없으면 영어).
+    #[serde(alias = "cohere_language")]
+    pub language: Option<String>,
+    /// 문단을 Cohere로 다시 받아 적는다(ADR-0056). 모델을 내려받았을 때만.
+    pub cohere: bool,
     /// 녹음 중 [`SUMMARY_MINUTES`]분마다 요약한다(ADR-0055).
     pub summarize: bool,
     /// 요약을 쓸 언어 코드(`agent::dictation::LANGUAGES`). 없으면 기록의 언어로 쓴다.
@@ -74,6 +84,10 @@ impl Default for DictationConfig {
         Self {
             source: Default::default(),
             auto_gain: true,
+            save_audio: false,
+            engine: Default::default(),
+            language: None,
+            cohere: false,
             summarize: false,
             summary_language: None,
             bedrock_model: None,
@@ -94,6 +108,16 @@ impl DictationConfig {
             Some(model) => backend.with_model(model),
             None => backend,
         })
+    }
+
+    /// 받아쓰는 언어.
+    pub fn language(&self) -> &'static crate::dictation::DictationLanguage {
+        use crate::dictation::{DICTATION_LANGUAGES, DictationLanguage};
+        self.language
+            .as_deref()
+            .and_then(DictationLanguage::find)
+            .or_else(|| DictationLanguage::find(&rust_i18n::locale()[..]))
+            .unwrap_or(&DICTATION_LANGUAGES[1])
     }
 
     /// 요약 언어.

@@ -465,6 +465,10 @@ struct SettingsWindow {
     /// 받아쓰기의 LLM 옵션(ADR-0055). 바꾸면 `config.toml`에 저장한다.
     dictation: DictationConfig,
     summary_language_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
+    /// 받아쓰는 언어(ADR-0056).
+    dictation_language_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
+    /// 실시간 받아쓰기 엔진(ADR-0056).
+    engine_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
     dictation_model_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
     dictation_models: DictationModels,
     /// 모델 목록을 읽은 곳(`Backend::models_key`). 바뀌면 다시 읽는다.
@@ -670,6 +674,45 @@ impl SettingsWindow {
                 cx,
             )
         });
+        // 받아쓰는 언어(macOS 받아쓰기·Cohere)와 실시간 받아쓰기 엔진(ADR-0056).
+        let dictation_language_items: Vec<_> = dictation::DICTATION_LANGUAGES
+            .iter()
+            .map(|language| ChoiceItem {
+                title: language.native.into(),
+                value: Some(language.code.into()),
+            })
+            .collect();
+        let selected_dictation_language = dictation_language_items
+            .iter()
+            .position(|item| item.value.as_deref() == Some(dictation.language().code))
+            .unwrap_or(0);
+        let dictation_language_picker = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(dictation_language_items),
+                Some(IndexPath::new(selected_dictation_language)),
+                window,
+                cx,
+            )
+        });
+        let engine_items: Vec<_> = dictation::Engine::available()
+            .iter()
+            .map(|engine| ChoiceItem {
+                title: engine_title(*engine),
+                value: Some(engine_key(*engine).into()),
+            })
+            .collect();
+        let selected_engine = dictation::Engine::available()
+            .iter()
+            .position(|engine| *engine == dictation.engine)
+            .unwrap_or(0);
+        let engine_picker = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(engine_items),
+                Some(IndexPath::new(selected_engine)),
+                window,
+                cx,
+            )
+        });
         let dictation_model_picker = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(Vec::<ChoiceItem>::new()),
@@ -690,6 +733,31 @@ impl SettingsWindow {
                     };
                     this.dictation.summary_language = code.as_ref().map(ToString::to_string);
                     this.save_dictation(cx);
+                },
+            ),
+            cx.subscribe(
+                &dictation_language_picker,
+                |this, _, event: &SelectEvent<SearchableVec<ChoiceItem>>, cx| {
+                    let SelectEvent::Confirm(Some(Some(code))) = event else {
+                        return;
+                    };
+                    this.dictation.language = Some(code.to_string());
+                    this.save_dictation(cx);
+                },
+            ),
+            cx.subscribe(
+                &engine_picker,
+                |this, _, event: &SelectEvent<SearchableVec<ChoiceItem>>, cx| {
+                    let SelectEvent::Confirm(Some(Some(key))) = event else {
+                        return;
+                    };
+                    if let Some(engine) = dictation::Engine::available()
+                        .iter()
+                        .find(|engine| engine_key(**engine) == key.as_ref())
+                    {
+                        this.dictation.engine = *engine;
+                        this.save_dictation(cx);
+                    }
                 },
             ),
             cx.subscribe(
@@ -819,6 +887,8 @@ impl SettingsWindow {
             model_store,
             dictation,
             summary_language_picker,
+            dictation_language_picker,
+            engine_picker,
             dictation_model_picker,
             dictation_models: DictationModels::Unavailable,
             dictation_models_key: None,
@@ -831,6 +901,10 @@ impl SettingsWindow {
     fn save_dictation(&mut self, cx: &mut Context<Self>) {
         let mut config = Config::load();
         config.dictation.auto_gain = self.dictation.auto_gain;
+        config.dictation.save_audio = self.dictation.save_audio;
+        config.dictation.cohere = self.dictation.cohere;
+        config.dictation.engine = self.dictation.engine;
+        config.dictation.language = self.dictation.language.clone();
         config.dictation.summarize = self.dictation.summarize;
         config.dictation.summary_language = self.dictation.summary_language.clone();
         config.dictation.bedrock_model = self.dictation.bedrock_model.clone();
@@ -1211,8 +1285,24 @@ impl SettingsWindow {
     }
 }
 
+/// 실시간 받아쓰기 엔진의 이름.
+fn engine_title(engine: dictation::Engine) -> SharedString {
+    match engine {
+        dictation::Engine::Apple => t!("settings.dictation.engine.apple").into(),
+        dictation::Engine::Nemotron => "Nemotron Streaming 3.5".into(),
+    }
+}
+
+/// 엔진 고르기의 값(`config.toml`의 이름과 같다).
+fn engine_key(engine: dictation::Engine) -> &'static str {
+    match engine {
+        dictation::Engine::Apple => "apple",
+        dictation::Engine::Nemotron => "nemotron",
+    }
+}
+
 impl SettingsWindow {
-    /// 받아쓰기의 소리 입력: 자동 음량 맞춤.
+    /// 받아쓰기의 소리 입력: 자동 음량 맞춤, 녹음 소리 남기기.
     fn render_dictation_input(&self, cx: &mut Context<Self>, pal: Palette) -> impl IntoElement {
         div()
             .pt_4()
@@ -1233,6 +1323,23 @@ impl SettingsWindow {
                     .text_sm()
                     .text_color(pal.muted)
                     .child(t!("settings.dictation.auto_gain_hint")),
+            )
+            .child(
+                div().pt_2().child(
+                    Checkbox::new("dictation-save-audio")
+                        .label(t!("settings.dictation.save_audio").to_string())
+                        .checked(self.dictation.save_audio)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.dictation.save_audio = *checked;
+                            this.save_dictation(cx);
+                        })),
+                ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(pal.muted)
+                    .child(t!("settings.dictation.save_audio_hint")),
             )
     }
 
@@ -1313,11 +1420,127 @@ impl SettingsWindow {
             ))
     }
 
-    /// 받아쓰기: 음성 인식 모델 카드(내려받기·진행률·내려받음)와 Hugging Face 로그인 안내.
-    fn render_dictation(&self, cx: &App, pal: Palette) -> impl IntoElement {
+    /// 받아쓰기의 엔진(ADR-0056): 실시간 받아쓰기(macOS 받아쓰기·Nemotron)와 받아쓰는 언어.
+    fn render_dictation_engine(&self, pal: Palette) -> impl IntoElement {
+        let hint = |text: SharedString| div().text_sm().text_color(pal.muted).child(text);
+        let engine_hint = match self.dictation.engine {
+            dictation::Engine::Apple => t!("settings.dictation.engine.apple_hint"),
+            dictation::Engine::Nemotron => t!("settings.dictation.engine.nemotron_hint"),
+        };
+        div()
+            .pb_4()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .when(dictation::Engine::available().len() > 1, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(t!("settings.dictation.engine"))
+                        .child(Select::new(&self.engine_picker).large().focus_ring(false))
+                        .child(hint(engine_hint.into())),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(t!("settings.dictation.language"))
+                    .child(
+                        Select::new(&self.dictation_language_picker)
+                            .large()
+                            .focus_ring(false)
+                            .menu_max_h(px(240.0)),
+                    )
+                    .child(hint(t!("settings.dictation.language_hint").into())),
+            )
+    }
+
+    /// 받아쓰기: 음성 인식 모델 카드(Nemotron, Cohere)와 Hugging Face 로그인 안내.
+    fn render_dictation(&self, cx: &mut Context<Self>, pal: Palette) -> impl IntoElement {
+        let cohere_ready = self
+            .model_store
+            .read(cx)
+            .downloaded(&dictation::COHERE)
+            .is_some();
+        let cohere_options = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                Checkbox::new("dictation-cohere")
+                    .label(t!("settings.dictation.cohere.use").to_string())
+                    .checked(self.dictation.cohere)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.dictation.cohere = *checked;
+                        this.save_dictation(cx);
+                    })),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(pal.muted)
+                    .child(t!("settings.dictation.cohere.use_hint")),
+            );
+
+        let login_hint = if dictation::hf_logged_in() {
+            t!("settings.dictation.hint_logged_in")
+        } else {
+            t!("settings.dictation.hint_login")
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(t!("settings.dictation.model"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(pal.muted)
+                    .child(t!("settings.dictation.model_hint")),
+            )
+            .child(self.model_card(
+                &dictation::NEMOTRON,
+                "Nemotron Streaming 3.5",
+                t!("settings.dictation.model_description").into(),
+                true,
+                None,
+                cx,
+                pal,
+            ))
+            .child(self.model_card(
+                &dictation::COHERE,
+                "Cohere Transcribe",
+                t!("settings.dictation.cohere.description").into(),
+                false,
+                // 내려받은 뒤에 켤 수 있다.
+                cohere_ready.then(|| cohere_options.into_any_element()),
+                cx,
+                pal,
+            ))
+            .child(div().text_sm().text_color(pal.muted).child(login_hint))
+    }
+
+    /// 음성 인식 모델 카드 하나: 이름·설명, 언어 수·스트리밍, 내려받기·진행률·내려받음, 그 아래 `extra`.
+    #[allow(clippy::too_many_arguments)]
+    fn model_card(
+        &self,
+        spec: &'static dictation::ModelSpec,
+        name: &'static str,
+        description: SharedString,
+        streaming: bool,
+        extra: Option<AnyElement>,
+        cx: &App,
+        pal: Palette,
+    ) -> impl IntoElement {
         let store = self.model_store.read(cx);
-        let downloaded = store.downloaded().cloned();
-        let size = crate::library::format_size(dictation::MODEL_SIZE);
+        let downloaded = store.downloaded(spec).cloned();
+        let size = crate::library::format_size(spec.size);
+        let id = |name: &str| SharedString::from(format!("{name}-{}", spec.file));
         let meta = |icon: AssetIcon, label: SharedString| {
             div()
                 .flex()
@@ -1327,7 +1550,7 @@ impl SettingsWindow {
                 .child(label)
         };
 
-        let action = if let Some(active) = store.active() {
+        let action = if let Some(active) = store.active(spec) {
             let percent = active.done as f32 * 100.0 / active.total.max(1) as f32;
             let store = self.model_store.clone();
             div()
@@ -1337,15 +1560,17 @@ impl SettingsWindow {
                 .child(
                     div()
                         .w(px(120.0))
-                        .child(Progress::new("model-progress").value(percent)),
+                        .child(Progress::new(id("model-progress")).value(percent)),
                 )
                 .child(div().w(px(36.0)).child(format!("{percent:.0}%")))
                 .child(
-                    Button::new("model-cancel")
+                    Button::new(id("model-cancel"))
                         .ghost()
                         .small()
                         .label(t!("common.cancel"))
-                        .on_click(move |_, _, cx| store.update(cx, |store, cx| store.cancel(cx))),
+                        .on_click(move |_, _, cx| {
+                            store.update(cx, |store, cx| store.cancel(spec, cx))
+                        }),
                 )
                 .into_any_element()
         } else if let Some(file) = downloaded.clone() {
@@ -1355,7 +1580,7 @@ impl SettingsWindow {
                 .gap_1()
                 .child(meta(icons::disk(), size.into()))
                 .child(
-                    Button::new("model-reveal")
+                    Button::new(id("model-reveal"))
                         .ghost()
                         .small()
                         .icon(icons::reveal())
@@ -1365,17 +1590,17 @@ impl SettingsWindow {
                 .into_any_element()
         } else {
             let store = self.model_store.clone();
-            Button::new("model-download")
+            Button::new(id("model-download"))
                 .ghost()
                 .small()
                 .icon(icons::download())
                 .label(size)
                 .tooltip(t!("settings.dictation.download"))
-                .on_click(move |_, _, cx| store.update(cx, |store, cx| store.start(cx)))
+                .on_click(move |_, _, cx| store.update(cx, |store, cx| store.start(spec, cx)))
                 .into_any_element()
         };
 
-        let card = div()
+        div()
             .p_4()
             .flex()
             .flex_col()
@@ -1398,12 +1623,7 @@ impl SettingsWindow {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(
-                                div()
-                                    .text_lg()
-                                    .font_semibold()
-                                    .child("Nemotron Streaming 3.5"),
-                            )
+                            .child(div().text_lg().font_semibold().child(name))
                             .when(downloaded.is_some(), |this| {
                                 this.child(
                                     div()
@@ -1421,12 +1641,7 @@ impl SettingsWindow {
                                 )
                             }),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(pal.muted)
-                            .child(t!("settings.dictation.model_description")),
-                    ),
+                    .child(div().text_sm().text_color(pal.muted).child(description)),
             )
             .child(
                 div()
@@ -1440,47 +1655,34 @@ impl SettingsWindow {
                     .text_color(pal.muted)
                     .child(meta(
                         icons::languages(),
-                        t!(
-                            "settings.dictation.languages",
-                            count = dictation::MODEL_LANGUAGES
-                        )
-                        .into(),
+                        t!("settings.dictation.languages", count = spec.languages).into(),
                     ))
-                    .child(meta(
-                        icons::streaming(),
-                        t!("settings.dictation.streaming").into(),
-                    ))
+                    .when(streaming, |this| {
+                        this.child(meta(
+                            icons::streaming(),
+                            t!("settings.dictation.streaming").into(),
+                        ))
+                    })
                     .child(div().flex_1())
                     .child(action),
             )
-            .when_some(store.failure().cloned(), |this, reason| {
+            .when_some(store.failure(spec).cloned(), |this, reason| {
                 this.child(
                     div()
                         .text_sm()
                         .text_color(pal.danger)
                         .child(t!("settings.dictation.failed", err = reason)),
                 )
-            });
-
-        let login_hint = if dictation::hf_logged_in() {
-            t!("settings.dictation.hint_logged_in")
-        } else {
-            t!("settings.dictation.hint_login")
-        };
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(t!("settings.dictation.model"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(pal.muted)
-                    .child(t!("settings.dictation.model_hint")),
-            )
-            .child(card)
-            .child(div().text_sm().text_color(pal.muted).child(login_hint))
+            })
+            .when_some(extra, |this, extra| {
+                this.child(
+                    div()
+                        .pt_3()
+                        .border_t_1()
+                        .border_color(pal.panel_border)
+                        .child(extra),
+                )
+            })
     }
 }
 
@@ -1493,6 +1695,7 @@ impl Render for SettingsWindow {
             Page::Dictation => div()
                 .flex()
                 .flex_col()
+                .child(self.render_dictation_engine(pal))
                 .child(self.render_dictation(cx, pal))
                 .child(self.render_dictation_input(cx, pal))
                 .child(self.render_dictation_ai(cx, pal))

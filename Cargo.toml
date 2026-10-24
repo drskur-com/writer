@@ -90,7 +90,7 @@ transcribe-cpp = "0.4"
 # 번들 없이 실행할 때(`cargo run`)도 Dock에 앱 아이콘을 보인다. 버전은 gpui가 쓰는 것과 맞춘다.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSData", "NSDictionary", "NSError", "NSString", "NSURL", "NSValue"] }
+objc2-foundation = { version = "0.3", features = ["NSBundle", "NSData", "NSDictionary", "NSError", "NSLocale", "NSString", "NSURL", "NSValue"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder", "NSWindow", "NSView", "NSGraphics", "NSColor", "NSAppearance"] }
 # 에디터의 YouTube 카드를 앱 창에서 재생한다(공식 iframe 플레이어, ADR-0052).
 objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKWebViewConfiguration", "WKPreferences", "WKNavigation", "objc2-app-kit"] }
@@ -107,6 +107,9 @@ objc2-core-media = { version = "0.3", default-features = false, features = ["std
 objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn", "CVBase", "CVPixelBufferIOSurface"] }
 # 이미지의 글자를 읽어 넣는다(OCR 텍스트, ADR-0053). 온디바이스 Vision 문자 인식.
 objc2-vision = { version = "0.3", default-features = false, features = ["std", "VNRequest", "VNRecognizeTextRequest", "VNObservation", "VNRequestHandler", "VNTypes", "VNDefines", "objc2-core-foundation"] }
+# macOS 받아쓰기(ADR-0056): 기기 안의 SFSpeechRecognizer로 말하는 대로 받아 적고 발화 끝에서 문단을 나눈다.
+objc2-speech = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-avf-audio", "SFSpeechRecognitionMetadata", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFSpeechRecognizer", "SFTranscription"] }
+objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "AVAudioBuffer", "AVAudioFormat", "AVAudioTypes"] }
 
 # `cargo bundle --release`로 .app을 만든다.
 [package.metadata.bundle]
@@ -125,6 +128,11 @@ info_plist_exts = ["resources/macos/Info.plist.ext"]
 windows = { version = "0.62", features = ["Foundation", "Foundation_Collections", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage", "Storage_Streams", "Win32_System_Com", "Win32_System_LibraryLoader"] }
 windows-core = "0.62"
 windows-future = "0.3"
+# 받아쓰기 인식(ADR-0054)을 Vulkan으로 가속한다(AMD·NVIDIA·Intel, 내장 GPU 포함). 백엔드를 실행 중에 불러오는
+# 빌드(`dynamic-backends`)라 Vulkan 드라이버가 없는 PC에서는 그 모듈만 건너뛰고 CPU로 돌며, CPU 모듈도 명령어
+# 세트마다 따로 있어 빌드한 PC보다 오래된 CPU에서도 돈다. 빌드하는 PC에 Vulkan SDK(`glslc`)가 있어야 하고,
+# 실행 파일 옆에 transcribe·ggml DLL을 함께 둔다(빌드가 `target/<profile>/`에 놓는다).
+transcribe-cpp = { version = "0.4", features = ["vulkan", "dynamic-backends"] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winres = "0.1"

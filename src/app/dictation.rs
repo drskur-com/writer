@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::speech::{SpeechError, SpeechEvent, SpeechState, SpeechWaveform};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
@@ -20,7 +21,10 @@ use gpui_kit::gpui::*;
 
 use super::style::{Palette, icon_button};
 use super::{Selection, WriterApp};
-use crate::dictation::{AudioSource, NemotronRecognizer, RecordEvent as Event, SourceInput};
+use crate::dictation::{
+    AudioSource, Engine, EventHandler, NemotronRecognizer, RecordEvent as Event, RecordingSetup,
+    Refiner, SourceInput,
+};
 use crate::{icons, library};
 
 mod ai;
@@ -29,15 +33,15 @@ pub(super) use ai::DictationAi;
 /// 녹음을 멈춘 뒤 마지막 문단을 기다리는 시간. 넘으면 녹음 상태만 끝낸다(파일에는 작업 스레드가 마저 쓴다).
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// 받아쓰기 상태(앱에 하나). 모델을 내려받은 뒤 처음 녹음할 때 만든다.
+/// 받아쓰기 상태(앱에 하나). 처음 녹음할 때 만들고, 엔진·모델·언어가 바뀌면 다시 만든다.
 pub(super) struct Dictation {
     speech: Entity<SpeechState>,
-    /// 인식기가 쓰는 모델 파일.
-    model: PathBuf,
+    /// 인식기를 무엇으로 만들었는지(엔진과 모델 파일 또는 로캘).
+    key: String,
     /// 받아 적을 소리. 입력(`SourceInput`)이 녹음을 시작할 때 읽는다.
     source: Rc<Cell<AudioSource>>,
-    /// 이번 녹음의 기록 파일. 인식기가 녹음을 시작할 때 읽는다.
-    target: Rc<RefCell<PathBuf>>,
+    /// 이번 녹음의 기록 파일·Cohere·소리 파일. 인식기가 녹음을 시작할 때 읽는다.
+    setup: Rc<RefCell<RecordingSetup>>,
     /// 인식 작업 스레드를 띄웠는지. 띄우지 못했으면 `Event::Done`이 오지 않는다.
     worker_started: Rc<Cell<bool>>,
     /// 녹음 중(또는 마무리 중)인 기록. 작업 스레드가 끝나야(`Event::Done`) 비운다.
@@ -95,53 +99,90 @@ impl WriterApp {
         self.load_previews(cx);
     }
 
-    /// 받아쓰기 상태를 (없으면) 만든다. 모델이 없으면 안내하고 설정 창을 연다.
+    /// 받아쓰기 상태를 (없거나 설정이 바뀌었으면) 만든다. Nemotron을 골랐는데 모델이 없으면 안내하고 설정 창을
+    /// 연다.
     fn ensure_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let store = crate::dictation::ModelStore::global(cx);
-        store.update(cx, |store, cx| store.refresh(cx));
-        let Some(model) = store.read(cx).downloaded().cloned() else {
-            self.notify(t!("dictation.need_model"), window, cx);
-            crate::settings::open(cx);
-            return false;
+        // 인식 작업 스레드가 모델을 불러오기 전에 백엔드를 등록한다.
+        crate::dictation::init_backends();
+        let config = crate::config::Config::load().dictation;
+        let engine = if Engine::available().contains(&config.engine) {
+            config.engine
+        } else {
+            Engine::Nemotron
+        };
+        let model = match engine {
+            Engine::Apple => None,
+            Engine::Nemotron => {
+                let store = crate::dictation::ModelStore::global(cx);
+                store.update(cx, |store, cx| store.refresh(cx));
+                let Some(model) = store
+                    .read(cx)
+                    .downloaded(&crate::dictation::NEMOTRON)
+                    .cloned()
+                else {
+                    self.notify(t!("dictation.need_model"), window, cx);
+                    crate::settings::open(cx);
+                    return false;
+                };
+                Some(model)
+            }
+        };
+        let locale = config.language().locale;
+        let key = match &model {
+            Some(model) => format!("nemotron:{}", model.display()),
+            None => format!("apple:{locale}"),
         };
         if self
             .dictation
             .as_ref()
-            .is_some_and(|dictation| dictation.model == model)
+            .is_some_and(|dictation| dictation.key == key)
         {
             return true;
         }
-        let saved = crate::config::Config::load().dictation.source;
+        let saved = config.source;
         let source = Rc::new(Cell::new(if AudioSource::available().contains(&saved) {
             saved
         } else {
             AudioSource::Microphone
         }));
-        let target = Rc::new(RefCell::new(PathBuf::new()));
+        let setup = Rc::new(RefCell::new(RecordingSetup::default()));
         let worker_started = Rc::new(Cell::new(false));
         // 작업 스레드의 소식은 창 없이(`&mut App`) 온다. 에디터에 글을 붙이려면 창이 있어야 한다.
         let (app, handle) = (cx.entity().downgrade(), window.window_handle());
-        let recognizer = NemotronRecognizer {
-            model: model.clone(),
-            target: target.clone(),
-            started: worker_started.clone(),
-            on_event: Rc::new(move |event, cx| {
-                let app = app.clone();
-                let _ = handle.update(cx, |_, window, cx| {
-                    app.update(cx, |this, cx| this.on_dictation_event(event, window, cx))
-                });
-            }),
-        };
-        // 음성은 기기 밖으로 보내지 않는다: 시스템 인식기(Windows는 온라인 서비스)로 넘어가지 않게 한다.
-        let speech = cx.new(|cx| {
-            SpeechState::new(cx)
-                .recognizer(recognizer)
-                .input(SourceInput {
-                    source: source.clone(),
-                })
-                .system_fallback(false)
-                .stop_timeout(STOP_TIMEOUT)
+        let on_event: EventHandler = Rc::new(move |event, cx| {
+            let app = app.clone();
+            let _ = handle.update(cx, |_, window, cx| {
+                app.update(cx, |this, cx| this.on_dictation_event(event, window, cx))
+            });
         });
+        let input = SourceInput {
+            source: source.clone(),
+        };
+        let speech = match model {
+            Some(model) => speech_state(
+                NemotronRecognizer {
+                    model,
+                    setup: setup.clone(),
+                    started: worker_started.clone(),
+                    on_event,
+                },
+                input,
+                cx,
+            ),
+            #[cfg(target_os = "macos")]
+            None => speech_state(
+                crate::dictation::AppleRecognizer {
+                    locale: locale.to_string(),
+                    setup: setup.clone(),
+                    started: worker_started.clone(),
+                    on_event,
+                },
+                input,
+                cx,
+            ),
+            #[cfg(not(target_os = "macos"))]
+            None => unreachable!("macOS 받아쓰기는 macOS에서만 고른다"),
+        };
         let subscriptions = vec![
             cx.subscribe(&speech, |this, _, event: &SpeechEvent, cx| {
                 if let Some(dictation) = &mut this.dictation {
@@ -158,9 +199,9 @@ impl WriterApp {
         ];
         self.dictation = Some(Dictation {
             speech,
-            model,
+            key,
             source,
-            target,
+            setup,
             worker_started,
             recording: None,
             error: None,
@@ -228,7 +269,24 @@ impl WriterApp {
         let Some(dictation) = &mut self.dictation else {
             return;
         };
-        *dictation.target.borrow_mut() = path.clone();
+        // Cohere(ADR-0056): 켜고 내려받았으면 문단을 고른 언어로 다시 받아 적는다.
+        let config = crate::config::Config::load().dictation;
+        let cohere = crate::dictation::ModelStore::global(cx)
+            .read(cx)
+            .downloaded(&crate::dictation::COHERE)
+            .cloned()
+            .filter(|_| config.cohere);
+        *dictation.setup.borrow_mut() = RecordingSetup {
+            target: path.clone(),
+            refiner: cohere.map(|model| Refiner {
+                model,
+                language: config.language().code.to_string(),
+            }),
+            audio_file: config
+                .save_audio
+                .then(|| crate::dictation::audio_path(&path))
+                .flatten(),
+        };
         dictation.worker_started.set(false);
         dictation.error = None;
         dictation.recording = Some(Recording {
@@ -329,6 +387,10 @@ impl WriterApp {
             if let Err(err) = std::fs::remove_file(&recording.path) {
                 eprintln!("빈 받아쓰기 기록을 지우지 못했습니다: {err}");
             }
+            // 말없이 끝났으니 남긴 소리도 지운다.
+            if let Some(audio) = crate::dictation::audio_path(&recording.path) {
+                let _ = std::fs::remove_file(audio);
+            }
         } else {
             self.reload_recorded_sheet(&recording.path, window, cx);
         }
@@ -354,9 +416,7 @@ impl WriterApp {
         };
         let current = editor.state().read(cx).value();
         if current.trim_end() != text.trim_end() {
-            editor
-                .state()
-                .update(cx, |state, cx| state.set_value(text, window, cx));
+            editor.replace_text(text, window, cx);
         }
         editor.mark_saved(path);
     }
@@ -476,6 +536,11 @@ impl WriterApp {
         let tools = target
             .as_deref()
             .and_then(|record| self.render_record_tools(record, cx, pal));
+        // 고른 기록의 녹음 소리(설정에서 남기기를 켰을 때)를 시스템 앱으로 연다.
+        let audio = target
+            .as_deref()
+            .and_then(crate::dictation::audio_path)
+            .filter(|path| path.is_file());
 
         div()
             .flex()
@@ -498,6 +563,16 @@ impl WriterApp {
                     )
                     .when(choices.len() > 1, |this| {
                         this.child(self.render_source_picker(choices, current, cx))
+                    })
+                    .when_some(audio, |this, audio| {
+                        this.child(div().flex_1()).child(
+                            Button::new("dictation-listen")
+                                .small()
+                                .ghost()
+                                .icon(icons::play())
+                                .label(t!("dictation.listen"))
+                                .on_click(move |_, _, cx| cx.open_with_system(&audio)),
+                        )
                     }),
             )
             .children(hint.map(|hint| div().text_xs().text_color(pal.muted).child(hint)))
@@ -650,6 +725,22 @@ impl WriterApp {
                 .is_some_and(|lib| path.parent() == Some(lib.stt.path.as_path()))
         })
     }
+}
+
+/// `recognizer`로 받아 적는 녹음 상태. 음성은 기기 밖으로 보내지 않는다: 시스템 인식기(Windows는 온라인
+/// 서비스)로 넘어가지 않게 한다.
+fn speech_state(
+    recognizer: impl gpui_kit::component::speech::SpeechRecognizer + 'static,
+    input: SourceInput,
+    cx: &mut App,
+) -> Entity<SpeechState> {
+    cx.new(|cx| {
+        SpeechState::new(cx)
+            .recognizer(recognizer)
+            .input(input)
+            .system_fallback(false)
+            .stop_timeout(STOP_TIMEOUT)
+    })
 }
 
 /// 녹음 버튼: 둥근 버튼 안의 빨간 점.
