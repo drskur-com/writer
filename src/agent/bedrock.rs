@@ -148,7 +148,7 @@ fn image_placement(backend: &Backend) -> ImagePlacement {
 }
 
 /// 한 번의 답에 쓸 최대 출력 토큰. 모델의 상한을 넘겨 부르면 거절한다.
-fn max_tokens(backend: &Backend) -> u64 {
+pub(super) fn max_tokens(backend: &Backend) -> u64 {
     match backend {
         Backend::Bedrock { .. } => MAX_TOKENS,
         Backend::TokenPlan { model, .. } => {
@@ -158,7 +158,7 @@ fn max_tokens(backend: &Backend) -> u64 {
 }
 
 /// 이 곳에서 부를 rig 모델.
-fn completion_model(backend: &Backend) -> DynModel<Completion> {
+pub(super) fn completion_model(backend: &Backend) -> DynModel<Completion> {
     match backend {
         Backend::Bedrock {
             profile,

@@ -59,11 +59,11 @@ enum ModelLookup {
     Failed(SharedString),
 }
 
-/// 모델 고르기의 선택지 하나. 값은 부를 ID다.
+/// 모델 고르기의 선택지 하나. 값은 부를 ID다. OCR 텍스트 삽입의 모델 고르기도 쓴다.
 #[derive(Clone)]
-struct ModelItem {
-    title: SharedString,
-    id: SharedString,
+pub(super) struct ModelItem {
+    pub(super) title: SharedString,
+    pub(super) id: SharedString,
 }
 
 impl SearchableListItem for ModelItem {

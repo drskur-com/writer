@@ -100,6 +100,11 @@ pub fn video() -> IconName {
     IconName::Video
 }
 
+/// 이미지의 글자 인식(OCR 텍스트 삽입 대화상자).
+pub fn scan_text() -> IconName {
+    IconName::ScanText
+}
+
 /// 오디오(삽입 대화상자·에디터의 오디오 카드).
 pub fn audio() -> IconName {
     IconName::Music

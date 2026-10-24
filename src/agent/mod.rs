@@ -11,6 +11,9 @@ mod review;
 pub mod skills;
 pub mod token_plan;
 mod tools;
+// OCR 텍스트 삽입(macOS·Windows)에서만 쓴다.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub mod transcribe;
 mod web;
 
 pub use bedrock::{ChatRequest, stream};
@@ -214,6 +217,27 @@ impl Backend {
                     ToString::to_string,
                 ),
             }),
+        }
+    }
+
+    /// 같은 곳에서 다른 모델(`model` ID)을 부른다.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn with_model(mut self, model: String) -> Self {
+        match &mut self {
+            Backend::Bedrock { model: current, .. } | Backend::TokenPlan { model: current, .. } => {
+                *current = model;
+            }
+        }
+        self
+    }
+
+    /// 이 곳의 모델(`id`)이 그림을 볼 수 있는지. Bedrock에서 고를 수 있는 모델은 모두 보고, Token Plan은 아는
+    /// 모델의 표를 따른다(표에 없으면 보낸 뒤 모델이 정한다).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn reads_images(&self, id: &str) -> bool {
+        match self {
+            Backend::Bedrock { .. } => true,
+            Backend::TokenPlan { .. } => token_plan::find(id).is_none_or(|model| model.vision),
         }
     }
 

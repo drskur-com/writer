@@ -22,6 +22,8 @@ mod gif_player;
 mod insert_extension;
 mod insert_footnote;
 mod insert_image;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod insert_ocr;
 mod insert_special_char;
 mod insert_table;
 mod library_ops;
@@ -674,6 +676,8 @@ impl Render for WriterApp {
             .on_action(cx.listener(Self::on_run_extension_command))
             .on_action(cx.listener(Self::on_manage_extensions))
             .on_action(cx.listener(Self::on_quit));
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let root = root.on_action(cx.listener(Self::on_insert_ocr_text));
 
         // 커스텀 타이틀바 + 메뉴바 (macOS는 투명 타이틀바 + 네이티브 메뉴를 쓰므로 생략)
         #[cfg(not(target_os = "macos"))]

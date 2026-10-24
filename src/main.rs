@@ -28,6 +28,8 @@ mod library;
 mod markdown;
 mod media;
 mod menus;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod ocr;
 mod settings;
 mod text_transform;
 mod theme;
@@ -50,6 +52,7 @@ actions!(
         InsertAudio,
         InsertFootnote,
         InsertTable,
+        InsertOcrText,
         InsertExtension,
         InsertSpecialChar,
         ManageExtensions,

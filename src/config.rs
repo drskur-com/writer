@@ -40,6 +40,40 @@ pub struct Config {
     pub token_plan_model: Option<String>,
     /// UI 언어(`en`·`ko`). 없으면 시스템 언어를 따른다.
     pub language: Option<String>,
+    /// OCR 텍스트 삽입 대화상자의 옵션(ADR-0053). 다음에 열 때도 그대로 쓴다.
+    pub ocr: OcrConfig,
+}
+
+/// OCR 텍스트 삽입 옵션(`[ocr]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OcrConfig {
+    /// 이미지를 AI(LLM 비전)로 읽는다. 아니면 기기의 문자 인식만 쓴다.
+    pub use_ai: bool,
+    /// AI로 읽을 Bedrock 모델(추론 프로필) ID. 없으면 어시스턴트의 모델.
+    pub bedrock_model: Option<String>,
+    /// AI로 읽을 Token Plan 모델 ID. 없으면 어시스턴트의 모델.
+    pub token_plan_model: Option<String>,
+    /// 기기 문자 인식 결과를 초안으로 함께 보낸다.
+    pub send_draft: bool,
+    /// AI에 덧붙이는 지시.
+    pub instruction: String,
+    /// 이미지의 줄바꿈을 그대로 둔다.
+    pub keep_breaks: bool,
+}
+
+impl Default for OcrConfig {
+    /// 초안은 기본으로 함께 보낸다(빠뜨리거나 지어내는 줄이 준다).
+    fn default() -> Self {
+        Self {
+            use_ai: false,
+            bedrock_model: None,
+            token_plan_model: None,
+            send_draft: true,
+            instruction: String::new(),
+            keep_breaks: false,
+        }
+    }
 }
 
 /// 설정 디렉터리 (`<config_dir>/Writer`).

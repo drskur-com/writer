@@ -5,6 +5,8 @@ use gpui_kit::gpui::*;
 
 #[cfg(target_os = "macos")]
 use crate::APP_NAME;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use crate::InsertOcrText;
 use crate::{
     CloseLibrary, CompileProject, InsertAudio, InsertExtension, InsertFootnote, InsertImage,
     InsertSpecialChar, InsertTable, InsertVideo, ManageExtensions, NewSheet, OpenLibrary,
@@ -85,16 +87,26 @@ pub(crate) fn build_menus(
     }
     menus.push(Menu::new(t!("menu.edit")).items(edit_items));
 
-    menus.push(Menu::new(t!("menu.insert")).items([
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        allow(unused_mut)
+    )]
+    let mut insert_items = vec![
         MenuItem::action(t!("menu.insert_image"), InsertImage),
         MenuItem::action(t!("menu.insert_video"), InsertVideo),
         MenuItem::action(t!("menu.insert_audio"), InsertAudio),
         MenuItem::action(t!("menu.insert_table"), InsertTable),
         MenuItem::action(t!("menu.insert_footnote"), InsertFootnote),
+    ];
+    // 이미지의 글자 인식은 운영체제의 인식기(macOS Vision, Windows.Media.Ocr)로 한다(ADR-0053).
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    insert_items.push(MenuItem::action(t!("menu.insert_ocr_text"), InsertOcrText));
+    insert_items.extend([
         MenuItem::action(t!("menu.insert_extension"), InsertExtension),
         MenuItem::separator(),
         MenuItem::action(t!("menu.special_characters"), InsertSpecialChar),
-    ]));
+    ]);
+    menus.push(Menu::new(t!("menu.insert")).items(insert_items));
 
     {
         let mut items = Vec::new();

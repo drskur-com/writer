@@ -64,6 +64,7 @@
 | [0050](./0050-editor-video-audio.md) | 동영상·오디오는 이미지 줄 문법으로 넣고, 에디터에서 재생하며, ePub에는 재생 요소로, PDF에는 포스터와 첨부파일로 내보낸다 | Proposed | 2026-10-24 |
 | [0051](./0051-youtube-cards.md) | YouTube 주소는 썸네일 카드로 보이고, 내보내기에서는 링크(ePub·PDF)와 Word 온라인 비디오(DOCX)로 바꾼다 | Proposed | 2026-10-24 |
 | [0052](./0052-youtube-player-window-and-paste.md) | YouTube 카드는 앱의 새 창(웹뷰)에서 재생하고, 빈 줄에 붙여넣은 YouTube 주소는 카드가 된다 | Proposed | 2026-10-24 |
+| [0053](./0053-ocr-text-insert.md) | 이미지의 글자는 운영체제의 인식기(macOS Vision, Windows.Media.Ocr)로 읽고(필요하면 LLM 비전으로), 고칠 수 있는 미리보기를 거쳐 커서 자리에 넣는다 | Proposed | 2026-10-24 |
 
 ## 작성 규칙
 
