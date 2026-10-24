@@ -18,6 +18,7 @@ mod aws_profiles;
 #[allow(dead_code)]
 mod cache;
 mod config;
+mod dictation;
 mod dock_icon;
 pub mod export;
 mod extension;
@@ -58,6 +59,7 @@ actions!(
         ManageExtensions,
         ToggleLineGroup,
         CompileProject,
+        OpenDictation,
         OpenLibrary,
         CloseLibrary,
         OpenSettings,

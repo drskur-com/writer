@@ -7,17 +7,15 @@ use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::Path;
 
-use crate::library::MARKER_DIR;
+use crate::library::{MARKER_DIR, STT_DIR};
 
 /// `root` 감시를 시작한다. 반환한 watcher를 버리면 감시가 멈춘다.
 pub fn watch(root: &Path) -> notify::Result<(RecommendedWatcher, UnboundedReceiver<()>)> {
     let (tx, rx) = unbounded();
-    // 앱 내부 상태(.writer/)의 변경은 목록과 무관하므로 무시한다.
+    // 앱 내부 상태(.writer/)와 받아쓰기 기록(STT/, 녹음 중 계속 덧붙는다)의 변경은 목록과 무관하므로 무시한다.
     // 이벤트 경로는 정규화된 경로(macOS: /private/var …)로 오므로 같은 형태로 비교한다.
-    let internal = root
-        .canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
-        .join(MARKER_DIR);
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let ignored = [canonical.join(MARKER_DIR), canonical.join(STT_DIR)];
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
         let Ok(event) = result else {
             return;
@@ -25,7 +23,12 @@ pub fn watch(root: &Path) -> notify::Result<(RecommendedWatcher, UnboundedReceiv
         if matches!(event.kind, EventKind::Access(_)) {
             return;
         }
-        if !event.paths.is_empty() && event.paths.iter().all(|path| path.starts_with(&internal)) {
+        if !event.paths.is_empty()
+            && event
+                .paths
+                .iter()
+                .all(|path| ignored.iter().any(|dir| path.starts_with(dir)))
+        {
             return;
         }
         let _ = tx.unbounded_send(());

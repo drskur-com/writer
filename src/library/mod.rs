@@ -6,6 +6,7 @@
 //! ├─ .writer/library.toml          # 라이브러리 마커
 //! ├─ Notes/<Group>/.writer.toml    # 그룹 메타(아이콘·시트 순서)
 //! │  └─ <Sheet>.md
+//! ├─ STT/<ULID>.md                 # 받아쓰기 기록(ADR-0054)
 //! └─ Projects/<Project>/.writer.toml
 //!    ├─ <Sheet>.md
 //!    ├─ <Group>/…                  # 원고 그룹(하위 그룹 가능, 빌드 대상)
@@ -61,6 +62,10 @@ pub const MARKER_FILE: &str = "library.toml";
 
 /// 그룹 폴더 안의 메타 파일 이름.
 pub const GROUP_META_FILE: &str = ".writer.toml";
+
+/// 받아쓰기 기록(`<ULID>.md`)을 두는 라이브러리 루트의 폴더(ADR-0054). 섹션이 아니라 사이드바의
+/// "받아쓰기" 줄 하나로 보인다([`Library::stt`]).
+pub const STT_DIR: &str = "STT";
 
 /// 고정 섹션 순서.
 pub const SECTIONS: [SectionKind; 2] = [SectionKind::Notes, SectionKind::Projects];
@@ -199,6 +204,9 @@ impl SortMode {
 pub struct Library {
     pub root: PathBuf,
     pub sections: Vec<Section>,
+    /// 받아쓰기 기록 그룹(`STT/`). 섹션 밖이라 섹션을 도는 곳(모두·그룹 옮기기 등)에는 나오지 않고,
+    /// 경로로 찾을 때([`Library::find_group`])만 나온다. 폴더가 없어도 빈 그룹으로 둔다.
+    pub stt: Group,
 }
 
 /// 섹션과 그 항목(시트/그룹).
@@ -327,6 +335,9 @@ impl Library {
 
     /// 모든 섹션에서 경로로 그룹을 찾는다(하위·추가자료 포함).
     pub fn find_group(&self, path: &Path) -> Option<&Group> {
+        if self.stt.path == path {
+            return Some(&self.stt);
+        }
         self.sections
             .iter()
             .flat_map(Section::groups)
@@ -334,6 +345,9 @@ impl Library {
     }
 
     pub fn find_group_mut(&mut self, path: &Path) -> Option<&mut Group> {
+        if self.stt.path == path {
+            return Some(&mut self.stt);
+        }
         self.sections
             .iter_mut()
             .flat_map(|section| &mut section.entries)
@@ -376,6 +390,8 @@ impl Library {
                 SortMode::Manual
             }
             Ok(_) => return (SortMode::Manual, false),
+            // 받아쓰기 기록은 녹음한 순서(최근 것이 위)가 기본이다.
+            Err(_) if path == self.stt.path => SortMode::Created,
             Err(_) => SortMode::Modified,
         };
         let mode = self
@@ -438,6 +454,7 @@ pub fn scan(root: &Path) -> io::Result<Library> {
     Ok(Library {
         root: root.to_path_buf(),
         sections,
+        stt: scan_stt(&root.join(STT_DIR))?,
     })
 }
 
@@ -467,6 +484,30 @@ fn scan_section(dir: &Path, kind: SectionKind) -> io::Result<Vec<Entry>> {
 }
 
 /// 그룹 폴더를 하위 그룹까지 읽는다. 프로젝트(`project`)면 안의 `Extras/`를 추가자료로 읽는다.
+/// 받아쓰기 기록 그룹. 이름은 화면 언어로 붙이고, 폴더가 아직 없으면 빈 그룹이다.
+fn scan_stt(dir: &Path) -> io::Result<Group> {
+    let mut group = if dir.is_dir() {
+        scan_group(dir, false)?
+    } else {
+        Group {
+            name: String::new(),
+            path: dir.to_path_buf(),
+            icon: None,
+            color: None,
+            sort: None,
+            descending: None,
+            kind: GroupKind::Sheets,
+            sheets: Vec::new(),
+            files: Vec::new(),
+            groups: Vec::new(),
+            extras: Vec::new(),
+        }
+    };
+    group.name = t!("core.stt").to_string();
+    group.groups.clear();
+    Ok(group)
+}
+
 fn scan_group(dir: &Path, project: bool) -> io::Result<Group> {
     let meta = read_group_meta(dir);
     let kind = GroupKind::from_key(meta.kind.as_deref());

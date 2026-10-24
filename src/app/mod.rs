@@ -6,6 +6,7 @@ mod book_preview;
 mod book_style;
 mod code_highlight;
 mod compile_dialog;
+mod dictation;
 mod editor;
 mod editor_extension;
 mod editor_format;
@@ -48,9 +49,9 @@ use gpui_kit::component::menu::AppMenuBar;
 
 use crate::menus::{PanelsVisible, install_menus};
 use crate::{
-    APP_NAME, CloseLibrary, CompileProject, OpenLibrary, QuitApp, SaveSheet, SetTheme, ShowAbout,
-    ToggleAssistant, ToggleBold, ToggleItalic, ToggleLineGroup, TogglePreview, ToggleSidebar,
-    ToggleTheme, icons, library, markdown, theme,
+    APP_NAME, CloseLibrary, CompileProject, OpenDictation, OpenLibrary, QuitApp, SaveSheet,
+    SetTheme, ShowAbout, ToggleAssistant, ToggleBold, ToggleItalic, ToggleLineGroup, TogglePreview,
+    ToggleSidebar, ToggleTheme, icons, library, markdown, theme,
 };
 use style::*;
 
@@ -132,6 +133,10 @@ pub(crate) struct WriterApp {
     book_style: Option<Entity<book_style::BookStyleView>>,
     /// 파일 그룹 목록에서 보여 줄 파일 종류. None이면 모두.
     file_filter: Option<library::FileKind>,
+    /// 받아쓰기(ADR-0054). 처음 녹음할 때 만든다.
+    dictation: Option<dictation::Dictation>,
+    /// 받아쓰기의 녹음 중 요약(ADR-0055).
+    dictation_ai: dictation::DictationAi,
     /// 앱 종료 직전에 열린 시트를 저장하는 구독.
     _quit_subscription: Subscription,
     _prefs_subscription: Subscription,
@@ -198,6 +203,8 @@ impl WriterApp {
             open_file: None,
             book_style: None,
             file_filter: None,
+            dictation: None,
+            dictation_ai: Default::default(),
             _quit_subscription: quit_subscription,
             _prefs_subscription: prefs_subscription,
             _theme_subscription: theme_subscription,
@@ -296,6 +303,8 @@ impl WriterApp {
     }
 
     fn on_close_library(&mut self, _: &CloseLibrary, _: &mut Window, cx: &mut Context<Self>) {
+        // 녹음은 멈춘다. 남은 문단은 작업 스레드가 기록 파일에 마저 쓴다.
+        self.stop_dictation(cx);
         self.close_sheet(cx);
         self.watcher = None;
         self.preview_task = None;
@@ -378,6 +387,16 @@ impl WriterApp {
             self.collapsed_sections.insert(kind);
         }
         cx.notify();
+    }
+
+    /// 사이드바의 받아쓰기 그룹을 고른다(ADR-0054).
+    fn on_open_dictation(
+        &mut self,
+        _: &OpenDictation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_dictation(window, cx);
     }
 
     fn on_toggle_preview(
@@ -614,8 +633,12 @@ impl WriterApp {
     fn find_sheet(&self, path: &PathBuf) -> Option<library::Sheet> {
         self.library
             .iter()
-            .flat_map(|lib| &lib.sections)
-            .flat_map(library::Section::sheets)
+            .flat_map(|lib| {
+                lib.sections
+                    .iter()
+                    .flat_map(library::Section::sheets)
+                    .chain(&lib.stt.sheets)
+            })
             .find(|sheet| &sheet.path == path)
             .cloned()
     }
@@ -671,6 +694,7 @@ impl Render for WriterApp {
             .on_action(cx.listener(Self::on_toggle_bold))
             .on_action(cx.listener(Self::on_toggle_italic))
             .on_action(cx.listener(Self::on_toggle_preview))
+            .on_action(cx.listener(Self::on_open_dictation))
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_set_theme))
             .on_action(cx.listener(Self::on_run_extension_command))

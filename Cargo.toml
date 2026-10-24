@@ -80,6 +80,12 @@ aws-sdk-bedrock = "1"
 unicode-normalization = "0.1.26"
 similar = { version = "3.2.0", features = ["inline"] }
 mlua = { version = "0.12.2", features = ["luau"] }
+# 받아쓰기 모델(Nemotron GGUF)을 Hugging Face 캐시에 내려받는다(ADR-0054). `hf auth login` 토큰을 쓴다.
+hf-hub = "1"
+# 받아쓰기의 마이크·시스템 소리(루프백) 입력(ADR-0054). rodio와 같은 판이어야 네이티브 라이브러리(ALSA) 링크가 겹치지 않는다.
+cpal = "0.18"
+# 받아쓰기 인식(ADR-0054): transcribe.cpp(ggml)로 Nemotron GGUF를 스트리밍으로 돌린다. macOS는 Metal, 그 밖은 CPU.
+transcribe-cpp = "0.4"
 
 # 번들 없이 실행할 때(`cargo run`)도 Dock에 앱 아이콘을 보인다. 버전은 gpui가 쓰는 것과 맞춘다.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -95,7 +101,8 @@ objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
 block2 = "0.6"
 # 에디터의 동영상 재생(ADR-0050): AVPlayer가 풀고, 프레임(CVPixelBuffer)을 gpui `paint_surface`로 그린다.
 # objc2-core-video는 gpui와 같은 판이어야 프레임 타입이 맞는다.
-objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "AVAsset", "AVTime", "objc2-core-media", "objc2-core-video"] }
+# 받아쓰기의 마이크 권한 확인은 AVCaptureDevice로 한다(ADR-0054).
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "AVAsset", "AVTime", "objc2-core-media", "objc2-core-video"] }
 objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime", "CMSync"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn", "CVBase", "CVPixelBufferIOSurface"] }
 # 이미지의 글자를 읽어 넣는다(OCR 텍스트, ADR-0053). 온디바이스 Vision 문자 인식.
@@ -107,6 +114,10 @@ name = "Writer"
 identifier = "com.drskur.writer"
 icon = ["resources/icon/writer.icns", "resources/icon/writer.png"]
 category = "public.app-category.productivity"
+
+[package.metadata.bundle.osx]
+# 받아쓰기의 마이크·시스템 소리 녹음 사용 설명(ADR-0054). 없으면 macOS가 묻지 않고 막는다.
+info_plist_exts = ["resources/macos/Info.plist.ext"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # 이미지의 글자를 읽어 넣는다(OCR 텍스트, ADR-0053). WinRT `Windows.Media.Ocr`. 버전은 gpui가 쓰는 것과 맞춘다.

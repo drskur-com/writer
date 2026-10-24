@@ -7,8 +7,10 @@ use gpui_kit::assets::IconName as AssetIcon;
 #[cfg(not(target_os = "macos"))]
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::DialogButtonProps;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::progress::Progress;
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{
@@ -20,7 +22,8 @@ use gpui_kit::gpui::*;
 
 use crate::app::style::{PANEL_INSET, Palette, TOOLBAR_HEIGHT, window_drag_area};
 use crate::aws_profiles::{self, AwsProfile};
-use crate::config::Config;
+use crate::config::{Config, DictationConfig};
+use crate::dictation::{self, ModelStore};
 use crate::i18n::{self, Language};
 use crate::{icons, theme};
 
@@ -298,15 +301,17 @@ pub fn open(cx: &mut App) {
 enum Page {
     General,
     Ai,
+    Dictation,
 }
 
 impl Page {
-    const ALL: [Page; 2] = [Page::General, Page::Ai];
+    const ALL: [Page; 3] = [Page::General, Page::Ai, Page::Dictation];
 
     fn id(self) -> &'static str {
         match self {
             Page::General => "general",
             Page::Ai => "ai",
+            Page::Dictation => "dictation",
         }
     }
 
@@ -314,6 +319,7 @@ impl Page {
         match self {
             Page::General => t!("settings.page.general").into(),
             Page::Ai => t!("settings.page.ai").into(),
+            Page::Dictation => t!("settings.page.dictation").into(),
         }
     }
 
@@ -321,6 +327,7 @@ impl Page {
         match self {
             Page::General => icons::settings(),
             Page::Ai => icons::ai_settings(),
+            Page::Dictation => icons::dictation(),
         }
     }
 }
@@ -453,7 +460,26 @@ struct SettingsWindow {
     token_plan_key: Entity<InputState>,
     /// 창을 열 때 읽은 AWS 프로필.
     aws_profiles: Vec<AwsProfile>,
+    /// 받아쓰기 모델 캐시와 내려받기(앱 전역).
+    model_store: Entity<ModelStore>,
+    /// 받아쓰기의 LLM 옵션(ADR-0055). 바꾸면 `config.toml`에 저장한다.
+    dictation: DictationConfig,
+    translate_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
+    dictation_model_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
+    dictation_models: DictationModels,
+    /// 모델 목록을 읽은 곳(`Backend::models_key`). 바뀌면 다시 읽는다.
+    dictation_models_key: Option<String>,
+    _dictation_model_lookup: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// 받아쓰기 LLM 모델 확인 상태.
+enum DictationModels {
+    /// 아직 읽지 않았거나 AI를 설정하지 않았다.
+    Unavailable,
+    Loading,
+    Ready,
+    Failed(SharedString),
 }
 
 impl SettingsWindow {
@@ -613,7 +639,73 @@ impl SettingsWindow {
             input
         });
 
+        // 받아쓰기 모델: 창을 열 때 캐시를 다시 살핀다(밖에서 받거나 지웠을 수 있다).
+        let model_store = ModelStore::global(cx);
+        model_store.update(cx, |store, cx| store.refresh(cx));
+
+        // 받아쓰기 번역 언어: 맨 앞은 "번역하지 않음".
+        let dictation = Config::load().dictation;
+        let translate_items: Vec<_> = std::iter::once(ChoiceItem {
+            title: t!("settings.dictation.translate.none").into(),
+            value: None,
+        })
+        .chain(
+            crate::agent::dictation::LANGUAGES
+                .iter()
+                .map(|language| ChoiceItem {
+                    title: language.native.into(),
+                    value: Some(language.code.into()),
+                }),
+        )
+        .collect();
+        let selected_translate = translate_items
+            .iter()
+            .position(|item| item.value.as_deref() == dictation.translate_to.as_deref())
+            .unwrap_or(0);
+        let translate_picker = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(translate_items),
+                Some(IndexPath::new(selected_translate)),
+                window,
+                cx,
+            )
+        });
+        let dictation_model_picker = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(Vec::<ChoiceItem>::new()),
+                None,
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+
         let subscriptions = vec![
+            cx.observe(&model_store, |_, _, cx| cx.notify()),
+            cx.subscribe(
+                &translate_picker,
+                |this, _, event: &SelectEvent<SearchableVec<ChoiceItem>>, cx| {
+                    let SelectEvent::Confirm(Some(code)) = event else {
+                        return;
+                    };
+                    this.dictation.translate_to = code.as_ref().map(ToString::to_string);
+                    this.save_dictation(cx);
+                },
+            ),
+            cx.subscribe(
+                &dictation_model_picker,
+                |this, _, event: &SelectEvent<SearchableVec<ChoiceItem>>, cx| {
+                    let SelectEvent::Confirm(Some(Some(id))) = event else {
+                        return;
+                    };
+                    let id = Some(id.to_string());
+                    match cx.global::<Prefs>().ai_provider {
+                        Some(AiProvider::TokenPlan) => this.dictation.token_plan_model = id,
+                        _ => this.dictation.bedrock_model = id,
+                    }
+                    this.save_dictation(cx);
+                },
+            ),
             cx.subscribe(
                 &language_picker,
                 |_, _, event: &SelectEvent<SearchableVec<ChoiceItem>>, cx| {
@@ -703,6 +795,10 @@ impl SettingsWindow {
                     *this = Self::new(window, cx);
                     this.page = page;
                 }
+                // AI 제공자·프로필이 바뀌면 받아쓰기 모델 목록을 다시 읽는다.
+                if this.page == Page::Dictation {
+                    this.load_dictation_models(window, cx);
+                }
                 cx.notify();
             }),
         ];
@@ -720,8 +816,83 @@ impl SettingsWindow {
             region_picker,
             token_plan_key,
             aws_profiles,
+            model_store,
+            dictation,
+            translate_picker,
+            dictation_model_picker,
+            dictation_models: DictationModels::Unavailable,
+            dictation_models_key: None,
+            _dictation_model_lookup: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// 받아쓰기 LLM 옵션을 저장한다(다음 녹음부터).
+    fn save_dictation(&mut self, cx: &mut Context<Self>) {
+        let mut config = Config::load();
+        config.dictation.translate_to = self.dictation.translate_to.clone();
+        config.dictation.summarize = self.dictation.summarize;
+        config.dictation.bedrock_model = self.dictation.bedrock_model.clone();
+        config.dictation.token_plan_model = self.dictation.token_plan_model.clone();
+        if let Err(err) = config.save() {
+            eprintln!("설정 저장 실패: {err}");
+        }
+        cx.notify();
+    }
+
+    /// 받아쓰기에 쓸 수 있는 모델을 읽어 고르기를 채운다. 같은 곳을 이미 읽었으면 그대로 둔다.
+    fn load_dictation_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(backend) = crate::agent::Backend::from_prefs(cx.global::<Prefs>()) else {
+            self.dictation_models = DictationModels::Unavailable;
+            self.dictation_models_key = None;
+            return;
+        };
+        let key = backend.models_key();
+        if self.dictation_models_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.dictation_models_key = Some(key);
+        self.dictation_models = DictationModels::Loading;
+        let lookup = backend.available_models();
+        self._dictation_model_lookup = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = lookup
+                .await
+                .unwrap_or_else(|_| Err(t!("assistant.model.lookup_stopped").into()));
+            this.update_in(cx, |this, window, cx| {
+                let models = match result {
+                    Ok(models) => models,
+                    Err(err) => {
+                        this.dictation_models = DictationModels::Failed(err.into());
+                        cx.notify();
+                        return;
+                    }
+                };
+                // 저장한 모델이 없으면 어시스턴트의 모델을 고른다.
+                let saved = match cx.global::<Prefs>().ai_provider {
+                    Some(AiProvider::TokenPlan) => this.dictation.token_plan_model.clone(),
+                    _ => this.dictation.bedrock_model.clone(),
+                };
+                let wanted = saved.unwrap_or_else(|| backend.model().to_string());
+                let selected = models
+                    .iter()
+                    .position(|(model, _)| model.matches(&wanted))
+                    .or_else(|| (!models.is_empty()).then_some(0));
+                let items: Vec<_> = models
+                    .iter()
+                    .map(|(model, id)| ChoiceItem {
+                        title: model.name.to_string().into(),
+                        value: Some(id.clone().into()),
+                    })
+                    .collect();
+                this.dictation_model_picker.update(cx, |picker, cx| {
+                    picker.set_items(SearchableVec::new(items), window, cx);
+                    picker.set_selected_index(selected.map(IndexPath::new), window, cx);
+                });
+                this.dictation_models = DictationModels::Ready;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// 왼쪽 떠 있는 페이지 패널(메인 창의 라이브러리 패널과 같은 모양).
@@ -749,8 +920,12 @@ impl SettingsWindow {
                     this.hover(move |style| style.bg(pal.hover))
                 })
                 .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     this.page = page;
+                    if page == Page::Dictation {
+                        this.model_store.update(cx, |store, cx| store.refresh(cx));
+                        this.load_dictation_models(window, cx);
+                    }
                     cx.notify();
                 }))
                 .child(Icon::new(page.icon()).small().text_color(icon_color))
@@ -1035,12 +1210,268 @@ impl SettingsWindow {
     }
 }
 
+impl SettingsWindow {
+    /// 받아쓰기의 AI(ADR-0055): 녹음 중 번역 언어, 녹음 중 요약, 모델, 글이 어디로 가는지.
+    fn render_dictation_ai(&self, cx: &mut Context<Self>, pal: Palette) -> impl IntoElement {
+        let provider = cx.global::<Prefs>().ai_provider;
+        let configured = crate::agent::Backend::from_prefs(cx.global::<Prefs>()).is_some();
+        let hint = |text: SharedString| div().text_sm().text_color(pal.muted).child(text);
+        let section = div().pt_4().flex().flex_col().gap_4().child(
+            div()
+                .text_lg()
+                .font_semibold()
+                .child(t!("settings.dictation.ai")),
+        );
+        let Some(provider) = provider.filter(|_| configured) else {
+            return section.child(hint(t!("settings.dictation.ai_hint_none").into()));
+        };
+        let model: AnyElement = match &self.dictation_models {
+            DictationModels::Unavailable => div().into_any_element(),
+            DictationModels::Loading => {
+                hint(t!("settings.dictation.models_loading").into()).into_any_element()
+            }
+            DictationModels::Failed(err) => div()
+                .text_sm()
+                .text_color(pal.danger)
+                .child(t!("settings.dictation.models_failed", err = err))
+                .into_any_element(),
+            DictationModels::Ready => Select::new(&self.dictation_model_picker)
+                .large()
+                .focus_ring(false)
+                .menu_max_h(px(240.0))
+                .into_any_element(),
+        };
+        let minutes = self.dictation.summary_minutes;
+        section
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(t!("settings.dictation.translate"))
+                    .child(
+                        Select::new(&self.translate_picker)
+                            .large()
+                            .focus_ring(false)
+                            .menu_max_h(px(240.0)),
+                    )
+                    .child(hint(t!("settings.dictation.translate_hint").into())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        Checkbox::new("dictation-summarize")
+                            .label(t!("settings.dictation.summarize").to_string())
+                            .checked(self.dictation.summarize)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.dictation.summarize = *checked;
+                                this.save_dictation(cx);
+                            })),
+                    )
+                    .child(hint(
+                        t!("settings.dictation.summarize_hint", minutes = minutes).into(),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(t!("settings.dictation.ai_model"))
+                    .child(model)
+                    .child(hint(t!("settings.dictation.ai_model_hint").into())),
+            )
+            .child(hint(
+                t!("settings.dictation.ai_hint", provider = provider.title()).into(),
+            ))
+    }
+
+    /// 받아쓰기: 음성 인식 모델 카드(내려받기·진행률·내려받음)와 Hugging Face 로그인 안내.
+    fn render_dictation(&self, cx: &App, pal: Palette) -> impl IntoElement {
+        let store = self.model_store.read(cx);
+        let downloaded = store.downloaded().cloned();
+        let size = crate::library::format_size(dictation::MODEL_SIZE);
+        let meta = |icon: AssetIcon, label: SharedString| {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(Icon::new(icon).small())
+                .child(label)
+        };
+
+        let action = if let Some(active) = store.active() {
+            let percent = active.done as f32 * 100.0 / active.total.max(1) as f32;
+            let store = self.model_store.clone();
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(120.0))
+                        .child(Progress::new("model-progress").value(percent)),
+                )
+                .child(div().w(px(36.0)).child(format!("{percent:.0}%")))
+                .child(
+                    Button::new("model-cancel")
+                        .ghost()
+                        .small()
+                        .label(t!("common.cancel"))
+                        .on_click(move |_, _, cx| store.update(cx, |store, cx| store.cancel(cx))),
+                )
+                .into_any_element()
+        } else if let Some(file) = downloaded.clone() {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(meta(icons::disk(), size.into()))
+                .child(
+                    Button::new("model-reveal")
+                        .ghost()
+                        .small()
+                        .icon(icons::reveal())
+                        .tooltip(t!("common.reveal_in_finder"))
+                        .on_click(move |_, _, cx| cx.reveal_path(&file)),
+                )
+                .into_any_element()
+        } else {
+            let store = self.model_store.clone();
+            Button::new("model-download")
+                .ghost()
+                .small()
+                .icon(icons::download())
+                .label(size)
+                .tooltip(t!("settings.dictation.download"))
+                .on_click(move |_, _, cx| store.update(cx, |store, cx| store.start(cx)))
+                .into_any_element()
+        };
+
+        let card = div()
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .rounded_xl()
+            .border_1()
+            .border_color(if downloaded.is_some() {
+                pal.accent
+            } else {
+                pal.panel_border
+            })
+            .bg(pal.panel)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_semibold()
+                                    .child("Nemotron Streaming 3.5"),
+                            )
+                            .when(downloaded.is_some(), |this| {
+                                this.child(
+                                    div()
+                                        .px_2()
+                                        .py_0p5()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .rounded_full()
+                                        .bg(pal.accent)
+                                        .text_xs()
+                                        .text_color(pal.accent_foreground)
+                                        .child(Icon::new(icons::downloaded()).xsmall())
+                                        .child(t!("settings.dictation.downloaded")),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(pal.muted)
+                            .child(t!("settings.dictation.model_description")),
+                    ),
+            )
+            .child(
+                div()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(pal.panel_border)
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .text_sm()
+                    .text_color(pal.muted)
+                    .child(meta(
+                        icons::languages(),
+                        t!(
+                            "settings.dictation.languages",
+                            count = dictation::MODEL_LANGUAGES
+                        )
+                        .into(),
+                    ))
+                    .child(meta(
+                        icons::streaming(),
+                        t!("settings.dictation.streaming").into(),
+                    ))
+                    .child(div().flex_1())
+                    .child(action),
+            )
+            .when_some(store.failure().cloned(), |this, reason| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(pal.danger)
+                        .child(t!("settings.dictation.failed", err = reason)),
+                )
+            });
+
+        let login_hint = if dictation::hf_logged_in() {
+            t!("settings.dictation.hint_logged_in")
+        } else {
+            t!("settings.dictation.hint_login")
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(t!("settings.dictation.model"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(pal.muted)
+                    .child(t!("settings.dictation.model_hint")),
+            )
+            .child(card)
+            .child(div().text_sm().text_color(pal.muted).child(login_hint))
+    }
+}
+
 impl Render for SettingsWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = Palette::from_theme(cx.theme());
         let content = match self.page {
             Page::General => self.render_general(cx, pal).into_any_element(),
             Page::Ai => self.render_ai(cx, pal).into_any_element(),
+            Page::Dictation => div()
+                .flex()
+                .flex_col()
+                .child(self.render_dictation(cx, pal))
+                .child(self.render_dictation_ai(cx, pal))
+                .into_any_element(),
         };
 
         let body = div()
@@ -1069,6 +1500,8 @@ impl Render for SettingsWindow {
                             .pb_8()
                             .flex()
                             .justify_center()
+                            // 기본(stretch)이면 폼이 칸 높이로 늘었다 잘려 넘치는 만큼 스크롤되지 않는다.
+                            .items_start()
                             .child(div().w_full().max_w(px(FORM_MAX_WIDTH)).child(content)),
                     ),
             );

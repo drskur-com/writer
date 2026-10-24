@@ -571,6 +571,7 @@ impl WriterApp {
             .bg(pal.background)
             .child(toolbar)
             .child(body)
+            .children(self.render_dictation_bar(cx, pal))
     }
 }
 
@@ -587,6 +588,13 @@ impl OpenSheet {
 
     pub(super) fn has_book_styles(&self) -> bool {
         self.styles.is_some()
+    }
+
+    /// 본문이 지금 파일과 같다고 표시한다(받아쓰기가 파일에 쓴 것을 본문에도 붙였을 때).
+    pub(super) fn mark_saved(&mut self, path: &std::path::Path) {
+        self.autosave = None;
+        self.dirty = false;
+        self.disk_modified = library::modified_nanos(path);
     }
 }
 
@@ -610,6 +618,8 @@ impl WriterApp {
             self.editor = None;
             if let Some(path) = &path {
                 self.open_sheet(path.clone(), window, cx);
+                // 녹음 중인 받아쓰기 기록은 읽기 전용이다.
+                self.sync_recording_readonly(cx);
             }
         }
         self.selected_sheet = path;
@@ -903,10 +913,18 @@ impl WriterApp {
 
     /// 열린 시트에 저장하지 않은 변경이 있으면 원자적으로 저장한다.
     pub(super) fn save_open_sheet(&mut self, cx: &mut Context<Self>) -> std::io::Result<()> {
+        let recording = self.recording_path().map(std::path::Path::to_path_buf);
         let Some(editor) = &mut self.editor else {
             return Ok(());
         };
         if !editor.dirty {
+            return Ok(());
+        }
+        // 녹음 중인 받아쓰기 기록은 작업 스레드만 쓴다. 본문은 읽기 전용이고 붙인 문단은 이미 파일에 있다.
+        // (덮어쓰면 원자적 저장이 파일을 바꿔치워 작업 스레드가 쓰는 문단이 사라진다.)
+        if recording.as_deref() == Some(editor.path.as_path()) {
+            editor.autosave = None;
+            editor.dirty = false;
             return Ok(());
         }
         editor.autosave = None;
@@ -935,6 +953,7 @@ impl WriterApp {
     /// - 밖에서 바뀌었고 저장하지 않은 변경이 없으면 다시 읽는다.
     ///   (저장하지 않은 변경이 있으면 지금은 그대로 두고 다음 저장이 덮어쓴다.)
     pub(super) fn sync_open_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let recording = self.recording_path().map(std::path::Path::to_path_buf);
         let Some(editor) = &mut self.editor else {
             return;
         };
@@ -973,7 +992,11 @@ impl WriterApp {
             return;
         }
         let modified = library::modified_nanos(&editor.path);
-        if editor.dirty || modified == editor.disk_modified {
+        // 녹음 중인 기록은 문단이 올 때마다 본문 끝에 붙이므로 다시 읽지 않는다(끝나면 맞춘다).
+        if editor.dirty
+            || modified == editor.disk_modified
+            || recording.as_deref() == Some(editor.path.as_path())
+        {
             return;
         }
         let Ok(text) =

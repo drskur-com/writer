@@ -42,6 +42,59 @@ pub struct Config {
     pub language: Option<String>,
     /// OCR 텍스트 삽입 대화상자의 옵션(ADR-0053). 다음에 열 때도 그대로 쓴다.
     pub ocr: OcrConfig,
+    /// 받아쓰기 창의 옵션(ADR-0054). 다음에 열 때도 그대로 쓴다.
+    pub dictation: DictationConfig,
+}
+
+/// 받아쓰기 옵션(`[dictation]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DictationConfig {
+    /// 받아 적을 소리(`microphone`·`system`·`both`).
+    pub source: crate::dictation::AudioSource,
+    /// 녹음 중 번역할 언어 코드(`agent::dictation::LANGUAGES`, ADR-0055). 없으면 번역하지 않는다.
+    pub translate_to: Option<String>,
+    /// 녹음 중 몇 분마다 요약한다.
+    pub summarize: bool,
+    /// 요약 주기(분).
+    pub summary_minutes: u64,
+    /// 번역·요약에 쓸 Bedrock 모델(추론 프로필) ID. 없으면 어시스턴트의 모델.
+    pub bedrock_model: Option<String>,
+    /// 번역·요약에 쓸 Token Plan 모델 ID. 없으면 어시스턴트의 모델.
+    pub token_plan_model: Option<String>,
+}
+
+impl Default for DictationConfig {
+    fn default() -> Self {
+        Self {
+            source: Default::default(),
+            translate_to: None,
+            summarize: false,
+            summary_minutes: 5,
+            bedrock_model: None,
+            token_plan_model: None,
+        }
+    }
+}
+
+impl DictationConfig {
+    /// 번역·요약에 부를 곳. AI를 설정하지 않았으면 `None`.
+    pub fn backend(&self, prefs: &crate::settings::Prefs) -> Option<crate::agent::Backend> {
+        let backend = crate::agent::Backend::from_prefs(prefs)?;
+        let model = match backend {
+            crate::agent::Backend::Bedrock { .. } => self.bedrock_model.clone(),
+            crate::agent::Backend::TokenPlan { .. } => self.token_plan_model.clone(),
+        };
+        Some(match model {
+            Some(model) => backend.with_model(model),
+            None => backend,
+        })
+    }
+
+    /// 번역 언어.
+    pub fn translation_language(&self) -> Option<&'static crate::agent::dictation::Language> {
+        crate::agent::dictation::Language::find(self.translate_to.as_deref()?)
+    }
 }
 
 /// OCR 텍스트 삽입 옵션(`[ocr]`).

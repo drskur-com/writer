@@ -635,7 +635,7 @@ async fn run(request: &ChatRequest, tx: &mpsc::UnboundedSender<ChatEvent>) -> Re
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     #[test]
@@ -758,7 +758,7 @@ mod tests {
 
     /// 실제 모델을 부를 곳. `WRITER_TOKEN_PLAN_KEY`가 있으면 Token Plan,
     /// 없으면 `WRITER_AI_PROFILE`의 Bedrock. 모델은 `WRITER_AI_MODEL`, 없으면 그 제공자의 기본.
-    pub(super) fn live_backend() -> Backend {
+    pub(in crate::agent) fn live_backend() -> Backend {
         let model = std::env::var("WRITER_AI_MODEL").ok();
         if let Ok(api_key) = std::env::var("WRITER_TOKEN_PLAN_KEY") {
             return Backend::TokenPlan {

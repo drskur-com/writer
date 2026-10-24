@@ -9,9 +9,9 @@ use crate::APP_NAME;
 use crate::InsertOcrText;
 use crate::{
     CloseLibrary, CompileProject, InsertAudio, InsertExtension, InsertFootnote, InsertImage,
-    InsertSpecialChar, InsertTable, InsertVideo, ManageExtensions, NewSheet, OpenLibrary,
-    OpenSettings, QuitApp, RunExtensionCommand, SaveSheet, SetTheme, ShowAbout, ToggleAssistant,
-    ToggleBold, ToggleItalic, ToggleLineGroup, ToggleSidebar, theme,
+    InsertSpecialChar, InsertTable, InsertVideo, ManageExtensions, NewSheet, OpenDictation,
+    OpenLibrary, OpenSettings, QuitApp, RunExtensionCommand, SaveSheet, SetTheme, ShowAbout,
+    ToggleAssistant, ToggleBold, ToggleItalic, ToggleLineGroup, ToggleSidebar, theme,
 };
 
 /// 메뉴 트리.
@@ -54,6 +54,9 @@ pub(crate) fn build_menus(
         MenuItem::action(t!("menu.save"), SaveSheet),
         MenuItem::separator(),
         MenuItem::action(t!("menu.compile_project"), CompileProject),
+        MenuItem::separator(),
+        // 녹음해 라이브러리의 STT 폴더에 받아 적는 창(ADR-0054).
+        MenuItem::action(t!("menu.dictation"), OpenDictation),
         MenuItem::separator(),
         MenuItem::action(t!("menu.open_library"), OpenLibrary),
         MenuItem::action(t!("menu.close_library"), CloseLibrary),

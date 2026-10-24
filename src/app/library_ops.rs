@@ -190,8 +190,11 @@ impl WriterApp {
         };
         self.library = Some(scanned);
         self.refresh_library_themes(cx);
+        // 받아쓰기 그룹은 폴더가 아직 없어도(첫 녹음 전) 고를 수 있다.
+        let stt = self.library.as_ref().map(|lib| lib.stt.path.clone());
         if let Some(Selection::Group(path)) = &self.selected
             && !path.is_dir()
+            && Some(path) != stt.as_ref()
         {
             self.selected = None;
         }
@@ -526,7 +529,7 @@ impl WriterApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if source_path == target_path {
+        if source_path == target_path || self.refuse_recording_sheets(paths, window, cx) {
             return;
         }
         let Some(source) = self
@@ -653,6 +656,9 @@ impl WriterApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_recording_sheets(&paths, window, cx) {
+            return;
+        }
         let description = match paths.len() {
             0 => return,
             1 => t!("library.sheet.delete_one", label = label),

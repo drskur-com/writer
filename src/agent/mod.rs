@@ -2,6 +2,7 @@
 //! 패널은 [`Conversation`]을 들고 그리기만 한다.
 
 mod bedrock;
+pub mod dictation;
 mod diff;
 mod edit;
 mod history;
@@ -221,7 +222,6 @@ impl Backend {
     }
 
     /// 같은 곳에서 다른 모델(`model` ID)을 부른다.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn with_model(mut self, model: String) -> Self {
         match &mut self {
             Backend::Bedrock { model: current, .. } | Backend::TokenPlan { model: current, .. } => {

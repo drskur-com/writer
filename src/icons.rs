@@ -196,6 +196,51 @@ pub fn ai_settings() -> IconName {
     IconName::Sparkles
 }
 
+/// 설정 창의 "받아쓰기" 페이지.
+pub fn dictation() -> IconName {
+    IconName::Mic
+}
+
+/// 받아쓰기 소리: 마이크.
+pub fn microphone() -> IconName {
+    IconName::Mic
+}
+
+/// 받아쓰기 소리: 시스템 소리(다른 앱이 내는 소리).
+pub fn system_audio() -> IconName {
+    IconName::Volume2
+}
+
+/// 받아쓰기 요약(ADR-0055).
+pub fn summary() -> IconName {
+    IconName::ListChecks
+}
+
+/// 내려받기.
+pub fn download() -> IconName {
+    IconName::Download
+}
+
+/// 받아쓰기 모델 카드: 내려받음 표시.
+pub fn downloaded() -> IconName {
+    IconName::Check
+}
+
+/// 받아쓰기 모델 카드: 언어 수.
+pub fn languages() -> IconName {
+    IconName::Globe
+}
+
+/// 받아쓰기 모델 카드: 스트리밍(말하는 대로 받아씀).
+pub fn streaming() -> IconName {
+    IconName::AudioLines
+}
+
+/// 받아쓰기 모델 카드: 디스크에 차지하는 크기.
+pub fn disk() -> IconName {
+    IconName::HardDrive
+}
+
 /// 검토 점수의 별: 가득, 반, 빈 별.
 pub fn star_full() -> IconName {
     IconName::StarFill
