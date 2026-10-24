@@ -39,7 +39,7 @@
 | 이미지 붙여넣기 → 첨부 | P1 | `Editor::on_paste` 훅 | attachment | M2 | ⬜ |
 | 인라인 이미지 미리보기 | P2 | 이미지 줄 아래 줄 블록에 그림, gpui-base 패치(ADR-0008) | display_map / `thumbnail` | M2/M4 | ✅ |
 | 동영상·오디오 삽입·재생 | P2 | 이미지 줄 문법(확장자로 구분), 동영상은 AVPlayer → `paint_surface`(macOS), 오디오는 rodio(ADR-0050) | `media` / `media_player` | M4 | ✅ |
-| YouTube 카드 | P2 | 썸네일 카드 + 브라우저로 열기, ePub·PDF 링크, DOCX 온라인 비디오(ADR-0051) | `media::youtube_id` | M4 | ✅ |
+| YouTube 카드 | P2 | 썸네일 카드 + 새 창(WKWebView)에서 재생, 빈 줄에 주소 붙여넣기 → 카드, ePub·PDF 링크, DOCX 온라인 비디오(ADR-0051, ADR-0052) | `media::youtube_id` / `youtube_player` | M4 | ✅ |
 | 맞춤법/문법 검사 | — | 범위 외(후속 LSP 연동 가능) | `Lsp` 훅 | — | 🚫 |
 | 협업 편집 | — | 범위 외 | — | — | 🚫 |
 

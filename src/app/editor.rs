@@ -488,6 +488,8 @@ impl WriterApp {
                     .flex_1()
                     .min_h_0()
                     .relative()
+                    // 에디터보다 먼저 받아 YouTube 주소 붙여넣기를 카드로 바꾼다.
+                    .capture_action(cx.listener(Self::on_paste_youtube))
                     // 입력창은 영역을 꽉 채워 스크롤바가 오른쪽 끝에 붙게 하고,
                     // 본문은 좌우 여백으로 가독 폭(EDITOR_MAX_WIDTH) 가운데에 둔다.
                     .child(

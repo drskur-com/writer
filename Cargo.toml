@@ -85,7 +85,9 @@ mlua = { version = "0.12.2", features = ["luau"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSData", "NSDictionary", "NSError", "NSString", "NSURL", "NSValue"] }
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder", "NSWindow", "NSView", "NSGraphics", "NSColor", "NSAppearance"] }
+# 에디터의 YouTube 카드를 앱 창에서 재생한다(공식 iframe 플레이어, ADR-0052).
+objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKWebViewConfiguration", "WKPreferences", "WKNavigation", "objc2-app-kit"] }
 # 썸네일은 Finder와 같은 QuickLook으로 만든다(이미지·동영상, 시스템 캐시).
 objc2-quick-look-thumbnailing = { version = "0.3", features = ["QLThumbnailGenerator", "QLThumbnailGenerationRequest", "QLThumbnailRepresentation", "block2", "objc2-core-foundation", "objc2-core-graphics"] }
 objc2-core-graphics = { version = "0.3", features = ["CGImage", "CGContext", "CGBitmapContext", "CGColorSpace"] }

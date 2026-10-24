@@ -17,7 +17,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::DialogFooter;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Paste};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, Sizable as _, WindowExt as _,
@@ -1156,6 +1156,36 @@ impl WriterApp {
         true
     }
 
+    /// 빈 줄에 YouTube 주소 하나를 붙여넣으면 YouTube 카드 줄(`![](주소)`)로 넣는다(ADR-0051).
+    /// 그 밖의 붙여넣기는 에디터의 보통 붙여넣기로 넘긴다.
+    pub(super) fn on_paste_youtube(
+        &mut self,
+        _: &Paste,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(clipboard) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let handled = editor.state().update(cx, |state, cx| {
+            let text = state.value();
+            let Some((range, line)) = youtube_paste(&text, state.selected_range(), &clipboard)
+            else {
+                return false;
+            };
+            state.set_selected_range(range, cx);
+            state.replace(line, window, cx);
+            true
+        });
+        if handled {
+            cx.stop_propagation();
+            self.on_editor_changed(window, cx);
+        }
+    }
+
     /// 시트의 첨부파일 기준 폴더(프로젝트 폴더나 `Notes/`). 라이브러리 밖이면 `None`.
     fn attachment_base_of(&self, sheet: &Path) -> Option<PathBuf> {
         self.library.as_ref()?.attachment_base_of(sheet)
@@ -1181,9 +1211,53 @@ fn paragraph_around(before: &str, after: &str, block: &str) -> String {
     format!("{lead}{block}{trail}")
 }
 
+/// `clipboard`가 YouTube 주소 하나이고 `selection`이 든 줄에 다른 글이 없으면, 그 줄을 바꿀 범위와 카드 줄.
+fn youtube_paste(
+    text: &str,
+    selection: Range<usize>,
+    clipboard: &str,
+) -> Option<(Range<usize>, String)> {
+    let url = clipboard.trim();
+    if url.contains(char::is_whitespace) {
+        return None;
+    }
+    media::youtube_id(url)?;
+    let start = text[..selection.start].rfind('\n').map_or(0, |i| i + 1);
+    let end = text[selection.end..]
+        .find('\n')
+        .map_or(text.len(), |i| selection.end + i);
+    let blank = |part: &str| part.trim().is_empty();
+    (blank(&text[start..selection.start]) && blank(&text[selection.end..end])).then(|| {
+        (
+            start..end,
+            markdown::image("", url, &ImageOptions::default()),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::paragraph_around;
+    use super::{paragraph_around, youtube_paste};
+
+    #[test]
+    fn youtube_address_on_an_empty_line_becomes_a_card() {
+        let url = "https://youtu.be/dQw4w9WgXcQ";
+        let card = format!("![]({url})");
+        assert_eq!(youtube_paste("", 0..0, url), Some((0..0, card.clone())));
+        assert_eq!(
+            youtube_paste("글\n\n다음", 4..4, &format!(" {url}\n")),
+            Some((4..4, card.clone()))
+        );
+        // 줄 전체를 고르고 붙여넣으면 그 줄을 바꾼다.
+        assert_eq!(
+            youtube_paste("글\n옛 줄\n", 4..11, url),
+            Some((4..11, card))
+        );
+        // 글 사이에 붙여넣거나 YouTube가 아니면 보통 붙여넣기.
+        assert_eq!(youtube_paste("보세요 ", 10..10, url), None);
+        assert_eq!(youtube_paste("", 0..0, "https://vimeo.com/123456"), None);
+        assert_eq!(youtube_paste("", 0..0, &format!("{url} {url}")), None);
+    }
 
     #[test]
     fn image_becomes_its_own_paragraph() {

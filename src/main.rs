@@ -33,6 +33,7 @@ mod text_transform;
 mod theme;
 mod thumbnail;
 mod watch;
+mod youtube_player;
 
 use app::WriterApp;
 #[cfg(target_os = "macos")]

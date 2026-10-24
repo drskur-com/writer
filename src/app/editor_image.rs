@@ -9,7 +9,8 @@
 //! 재생 단추를 두고, 재생하면 프레임을 그린다. 오디오는 한 줄 카드다. 단추·진행 막대는 눌러도 커서가
 //! 줄로 가지 않는다.
 //!
-//! YouTube 주소(ADR-0051)는 썸네일 카드로 그린다. 재생 단추를 누르면 브라우저에서 연다(앱 안에서 재생하지 않는다).
+//! YouTube 주소(ADR-0051)는 썸네일 카드로 그린다. 재생 단추를 누르면 새 창에서 재생한다(ADR-0052, 에디터 안에서는
+//! 재생하지 않는다).
 
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
@@ -183,7 +184,9 @@ impl ImageBlocks {
                 placement.size,
                 pal,
             ),
-            Source::YouTube(id) => render_youtube(&id, placement.size, pal),
+            Source::YouTube(id) => {
+                render_youtube(&id, placement.caption.clone(), placement.size, pal)
+            }
             Source::Audio(player) => render_audio(
                 player,
                 self.players.clone(),
@@ -572,9 +575,15 @@ fn render_video(
         .into_any_element()
 }
 
-/// YouTube 카드: 썸네일(16:9 칸에 채움), 가운데 재생 단추(누르면 브라우저에서 연다), 왼쪽 아래 `YouTube` 표시.
-fn render_youtube(id: &str, shown: Size<Pixels>, pal: Palette) -> AnyElement {
-    let watch = media::youtube_watch_url(id);
+/// YouTube 카드: 썸네일(16:9 칸에 채움), 가운데 재생 단추(누르면 새 창에서 재생한다), 왼쪽 아래 `YouTube` 표시.
+fn render_youtube(
+    id: &str,
+    caption: Option<SharedString>,
+    shown: Size<Pixels>,
+    pal: Palette,
+) -> AnyElement {
+    let id = id.to_string();
+    let thumbnail = media::youtube_thumbnail_url(&id);
     div()
         .relative()
         .flex_shrink_0()
@@ -584,7 +593,7 @@ fn render_youtube(id: &str, shown: Size<Pixels>, pal: Palette) -> AnyElement {
         .rounded(px(CORNER_RADIUS))
         .bg(gpui_kit::gpui::black())
         .child(
-            img(SharedUri::from(media::youtube_thumbnail_url(id)))
+            img(SharedUri::from(thumbnail))
                 .absolute()
                 .size_full()
                 .object_fit(ObjectFit::Cover)
@@ -619,7 +628,7 @@ fn render_youtube(id: &str, shown: Size<Pixels>, pal: Palette) -> AnyElement {
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             window.prevent_default();
                             cx.stop_propagation();
-                            cx.open_url(&watch);
+                            crate::youtube_player::open(&id, caption.as_deref().unwrap_or(""), cx);
                         }),
                 ),
         )
