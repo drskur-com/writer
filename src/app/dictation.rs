@@ -57,8 +57,8 @@ struct Recording {
     /// 받아 적은 문단 수.
     paragraphs: usize,
     started: Instant,
-    /// 번역을 기다리는 문단(아직 파일에 없다). 녹음 막대에 흐리게 보인다.
-    queued: Vec<SharedString>,
+    /// 번역·다듬기 답을 기다리는 묶음 수(원문은 이미 기록에 있다).
+    pending: usize,
     /// 마지막 번역 실패. 원문만 썼다.
     translation_error: Option<SharedString>,
 }
@@ -254,7 +254,7 @@ impl WriterApp {
             created,
             paragraphs: 0,
             started: Instant::now(),
-            queued: Vec::new(),
+            pending: 0,
             translation_error: None,
         });
         let speech = dictation.speech.clone();
@@ -280,20 +280,19 @@ impl WriterApp {
 
     fn on_dictation_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            Event::Queued(text) => {
-                if let Some(recording) = self.recording_mut() {
-                    recording.queued.push(text);
-                }
-                cx.notify();
-            }
             Event::Written { text, originals } => {
                 if let Some(recording) = self.recording_mut() {
-                    let consumed = originals.len().min(recording.queued.len());
-                    recording.queued.drain(..consumed);
                     recording.paragraphs += originals.len();
                 }
-                self.on_written(&text, window, cx);
+                self.on_written(None, &text, window, cx);
                 self.on_summary_written(&originals, cx);
+            }
+            Event::Inserted { line, text } => self.on_written(Some(line), &text, window, cx),
+            Event::Pending(count) => {
+                if let Some(recording) = self.recording_mut() {
+                    recording.pending = count;
+                }
+                cx.notify();
             }
             Event::TranslationFailed(reason) => {
                 if let Some(recording) = self.recording_mut() {
@@ -312,8 +311,16 @@ impl WriterApp {
             .and_then(|dictation| dictation.recording.as_mut())
     }
 
-    /// 쓰기 스레드가 파일 끝에 덧붙인 줄을 열린 에디터와 목록 미리보기에도 반영한다.
-    fn on_written(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// 쓰기 스레드가 기록에 쓴 줄을 열린 에디터와 목록 미리보기에도 반영한다. `line`이 있으면 그 줄(0부터)
+    /// 앞에 끼워 넣고(번역·다듬은 줄), 없으면 끝에 덧붙인다(원문). 에디터 본문은 쓰기 스레드가 든 기록과 줄이
+    /// 같다(녹음 전에 저장했고, 녹음 중에는 읽기 전용이다).
+    fn on_written(
+        &mut self,
+        line: Option<usize>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(path) = self.recording_path().map(Path::to_path_buf) else {
             return;
         };
@@ -321,14 +328,16 @@ impl WriterApp {
             let paragraph = text.to_string();
             editor.state().update(cx, |state, cx| {
                 let value = state.value();
-                let end = value.len();
-                let insert = if value.is_empty() || value.ends_with('\n') {
-                    paragraph
-                } else {
-                    format!("\n{paragraph}")
+                let (at, insert) = match line.and_then(|line| line_start(&value, line)) {
+                    Some(at) => (at, format!("{paragraph}\n")),
+                    None if value.is_empty() || value.ends_with('\n') => (value.len(), paragraph),
+                    None => (value.len(), format!("\n{paragraph}")),
                 };
-                state.set_selected_range(end..end, cx);
+                state.set_selected_range(at..at, cx);
                 state.replace(insert, window, cx);
+                // 붙인 글이 보이게 맨 아래로 내린다(넘치는 값은 다음 레이아웃에서 맨 아래로 맞춰진다).
+                let x = state.scroll_offset().x;
+                state.set_scroll_offset(point(x, px(-1.0e9)), cx);
             });
             // 프로그램으로 넣은 글은 변경 소식이 없어 단어 수·마크업을 직접 맞춘다(저장은 하지 않는다).
             self.on_editor_changed(window, cx);
@@ -457,6 +466,11 @@ impl WriterApp {
             .as_ref()
             .and_then(|dictation| dictation.error.clone());
 
+        // 요약 칸은 녹음 중이면 그 기록, 아니면 고른 기록의 것이다.
+        let summary = recording
+            .map(|recording| recording.path.clone())
+            .or_else(|| self.selected_record())
+            .and_then(|record| self.render_summary_panel(&record, cx, pal));
         let content = match (recording, &self.dictation) {
             (Some(recording), Some(dictation)) => {
                 self.render_recording(dictation, recording, cx, pal)
@@ -475,6 +489,7 @@ impl WriterApp {
                 .border_t_1()
                 .border_color(pal.panel_border)
                 .bg(pal.background)
+                .children(summary)
                 .child(content)
                 .when_some(error, |this, error| {
                     this.child(div().text_sm().text_color(pal.danger).child(error))
@@ -587,7 +602,7 @@ impl WriterApp {
             .into_any_element()
     }
 
-    /// 녹음 중: 일시 정지, 파형, 지난 시간, 요약 보기, 번역을 기다리는 글과 지금 말하는 글.
+    /// 녹음 중: 일시 정지, 파형, 지난 시간, 번역·다듬기를 기다리는 묶음 수와 요약 보기, 지금 말하는 글.
     fn render_recording(
         &self,
         dictation: &Dictation,
@@ -618,13 +633,8 @@ impl WriterApp {
             .is_capturing()
             .then(|| crate::media::format_time(recording.started.elapsed()));
         let summary_button = self.render_live_summary(cx);
-        // 번역을 기다리는 문단과 지금 말하는 글을 흐리게 이어 보인다.
-        let waiting: Vec<SharedString> = recording
-            .queued
-            .iter()
-            .cloned()
-            .chain((!hypothesis.is_empty()).then(|| hypothesis.clone()))
-            .collect();
+        let pending = (recording.pending > 0)
+            .then(|| t!("dictation.pending", count = recording.pending).to_string());
 
         div()
             .flex()
@@ -650,15 +660,26 @@ impl WriterApp {
                             .children(elapsed),
                     ),
             )
-            .children(summary_button.map(|button| div().flex().justify_end().child(button)))
-            .when(!waiting.is_empty(), |this| {
+            .when(summary_button.is_some() || pending.is_some(), |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_xs()
+                        .text_color(pal.muted)
+                        .child(div().flex_1().children(pending))
+                        .children(summary_button),
+                )
+            })
+            .when(!hypothesis.is_empty(), |this| {
                 this.child(
                     div()
                         .text_sm()
                         .text_color(pal.muted)
                         .line_clamp(3)
                         .text_ellipsis()
-                        .child(SharedString::from(waiting.join(" "))),
+                        .child(hypothesis),
                 )
             })
             .children(
@@ -678,6 +699,17 @@ impl WriterApp {
                 .is_some_and(|lib| path.parent() == Some(lib.stt.path.as_path()))
         })
     }
+}
+
+/// `text`의 `line`번째 줄(0부터)이 시작하는 바이트 위치. 줄이 그만큼 없으면 `None`(끝에 덧붙인다).
+fn line_start(text: &str, line: usize) -> Option<usize> {
+    if line == 0 {
+        return (!text.is_empty()).then_some(0);
+    }
+    text.match_indices('\n')
+        .nth(line - 1)
+        .map(|(at, _)| at + 1)
+        .filter(|&at| at < text.len())
 }
 
 /// 녹음 버튼: 둥근 버튼 안의 빨간 점.
@@ -712,5 +744,23 @@ fn error_message(error: &SpeechError) -> SharedString {
         SpeechError::PermissionDenied => t!("dictation.error.permission").into(),
         SpeechError::NoInputDevice => t!("dictation.error.no_device").into(),
         other => t!("dictation.error.other", err = other.to_string()).into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // `super::*`는 gpui의 `test` 매크로까지 들여와 `#[test]`를 가린다.
+    use super::line_start;
+
+    #[test]
+    fn line_start_finds_insert_points() {
+        let text = "# 제목\n첫\n둘";
+        assert_eq!(line_start(text, 0), Some(0));
+        assert_eq!(line_start(text, 1), Some("# 제목\n".len()));
+        assert_eq!(line_start(text, 2), Some("# 제목\n첫\n".len()));
+        // 끝 뒤면 덧붙인다.
+        assert_eq!(line_start(text, 3), None);
+        assert_eq!(line_start("첫\n", 1), None);
+        assert_eq!(line_start("", 0), None);
     }
 }

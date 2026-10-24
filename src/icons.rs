@@ -211,6 +211,11 @@ pub fn system_audio() -> IconName {
     IconName::Volume2
 }
 
+/// 닫기.
+pub fn close() -> IconName {
+    IconName::X
+}
+
 /// 받아쓰기 요약(ADR-0055).
 pub fn summary() -> IconName {
     IconName::ListChecks

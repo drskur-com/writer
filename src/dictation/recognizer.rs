@@ -37,13 +37,15 @@ const MAX_PARAGRAPH_MS: i64 = 180_000;
 
 /// 받아쓰기를 쓰는 쪽에 알리는 일.
 pub enum Event {
-    /// 맺은 문단이 번역을 기다린다(아직 파일에 없다).
-    Queued(SharedString),
-    /// 파일 끝에 덧붙였다. `text`는 덧붙인 줄들(번역했으면 번역문과 `> 원문`), `originals`는 받아쓰기 원문.
+    /// 파일 끝에 원문을 덧붙였다. `text`는 덧붙인 줄, `originals`는 그 받아쓰기 원문.
     Written {
         text: SharedString,
         originals: Vec<String>,
     },
+    /// 에디터 본문의 `line`번째 줄(0부터) 앞에 번역·다듬은 줄(`> …`)을 끼워 넣었다.
+    Inserted { line: usize, text: SharedString },
+    /// 번역·다듬기 답을 기다리는 묶음 수.
+    Pending(usize),
     /// 번역하지 못해 원문만 썼다.
     TranslationFailed(SharedString),
     /// 작업 스레드가 끝났다. 이제 기록 파일에 더 쓰지 않는다.
@@ -103,8 +105,15 @@ impl SpeechRecognizer for NemotronRecognizer {
                 cx.update(|cx| match event {
                     WorkerEvent::Ready => sink.ready(cx),
                     WorkerEvent::Hypothesis(text) => sink.hypothesis(text, cx),
-                    WorkerEvent::Output(Output::Queued(text)) => {
-                        on_event(Event::Queued(text.into()), cx)
+                    WorkerEvent::Output(Output::Inserted { line, text }) => on_event(
+                        Event::Inserted {
+                            line,
+                            text: text.into(),
+                        },
+                        cx,
+                    ),
+                    WorkerEvent::Output(Output::Pending(count)) => {
+                        on_event(Event::Pending(count), cx)
                     }
                     WorkerEvent::Output(Output::Written { text, originals }) => on_event(
                         Event::Written {

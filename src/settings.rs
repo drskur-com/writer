@@ -830,6 +830,7 @@ impl SettingsWindow {
     /// 받아쓰기 LLM 옵션을 저장한다(다음 녹음부터).
     fn save_dictation(&mut self, cx: &mut Context<Self>) {
         let mut config = Config::load();
+        config.dictation.auto_gain = self.dictation.auto_gain;
         config.dictation.translate_to = self.dictation.translate_to.clone();
         config.dictation.summarize = self.dictation.summarize;
         config.dictation.bedrock_model = self.dictation.bedrock_model.clone();
@@ -1211,6 +1212,30 @@ impl SettingsWindow {
 }
 
 impl SettingsWindow {
+    /// 받아쓰기의 소리 입력: 자동 음량 맞춤.
+    fn render_dictation_input(&self, cx: &mut Context<Self>, pal: Palette) -> impl IntoElement {
+        div()
+            .pt_4()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                Checkbox::new("dictation-auto-gain")
+                    .label(t!("settings.dictation.auto_gain").to_string())
+                    .checked(self.dictation.auto_gain)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.dictation.auto_gain = *checked;
+                        this.save_dictation(cx);
+                    })),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(pal.muted)
+                    .child(t!("settings.dictation.auto_gain_hint")),
+            )
+    }
+
     /// 받아쓰기의 AI(ADR-0055): 녹음 중 번역 언어, 녹음 중 요약, 모델, 글이 어디로 가는지.
     fn render_dictation_ai(&self, cx: &mut Context<Self>, pal: Palette) -> impl IntoElement {
         let provider = cx.global::<Prefs>().ai_provider;
@@ -1470,6 +1495,7 @@ impl Render for SettingsWindow {
                 .flex()
                 .flex_col()
                 .child(self.render_dictation(cx, pal))
+                .child(self.render_dictation_input(cx, pal))
                 .child(self.render_dictation_ai(cx, pal))
                 .into_any_element(),
         };

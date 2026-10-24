@@ -1,14 +1,14 @@
 //! 받아쓰기의 녹음 중 요약(ADR-0055). 녹음 중 번역은 쓰기 스레드(`dictation::output`)가 한다.
 //!
 //! 파일 하나에는 쓰는 쪽이 하나다. 요약은 기록과 짝인 요약 파일(`STT/.summaries/<기록>.md`)에만 쓰고,
-//! 녹음이 끝난 뒤 사용자가 고르면 기록 맨 위에 넣는다. 요약은 따로 연 창(요약 보기)에서 본다. 녹음하며 다른
-//! 시트에 메모할 수 있게 모달이 아닌 창이다.
+//! 녹음이 끝난 뒤 사용자가 고르면 기록 맨 끝에 넣는다. 요약은 "요약 보기"로 녹음 막대 위쪽에 펼쳐 본다.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _};
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::{Icon, Sizable as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 
@@ -18,12 +18,15 @@ use crate::agent::dictation::{Language, SummaryRequest};
 use crate::agent::{self, Backend};
 use crate::{icons, library};
 
+/// 요약 패널 본문의 높이. 넘치면 패널 안에서 스크롤한다.
+const SUMMARY_PANEL_HEIGHT: f32 = 220.0;
+
 /// 받아쓰기 요약 상태(앱에 하나). 녹음이 끝난 뒤 마지막 요약까지 이어진다.
 #[derive(Default)]
 pub(in crate::app) struct DictationAi {
     summary: Option<SummaryJob>,
-    /// 열어 둔 요약 창(하나만 둔다).
-    summary_window: Option<AnyWindowHandle>,
+    /// 녹음 막대 위쪽에 요약을 펼쳐 보이는지.
+    summary_open: bool,
     /// 마지막 요약·요약 넣기 실패.
     summary_error: Option<SharedString>,
 }
@@ -70,27 +73,20 @@ fn summary_section(lines: &[&str]) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
-/// 본문의 요약 구간을 `summary`로 바꾸거나(없으면 제목 줄 뒤에) 넣는다.
+/// 본문의 요약 구간을 지우고(있으면) 맨 끝에 `summary`로 새로 넣는다. 받아 적은 글을 다 읽은 뒤에 보는
+/// 정리라 끝에 둔다(이어서 녹음한 뒤 다시 넣으면 새 끝으로 옮겨 간다).
 fn with_summary(body: &str, summary: &str) -> String {
-    let lines: Vec<&str> = body.lines().collect();
+    let mut lines: Vec<&str> = body.lines().collect();
+    if let Some((start, end)) = summary_section(&lines) {
+        lines.drain(start..end);
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
     let heading = summary_heading();
-    let bullets: Vec<&str> = summary
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    let mut out: Vec<&str> = Vec::with_capacity(lines.len() + bullets.len() + 1);
-    let (keep_before, keep_after) = match summary_section(&lines) {
-        Some((start, end)) => (start, end),
-        None => {
-            let after_title = usize::from(lines.first().is_some_and(|line| line.starts_with("# ")));
-            (after_title, after_title)
-        }
-    };
-    out.extend(&lines[..keep_before]);
-    out.push(&heading);
-    out.extend(bullets);
-    out.extend(&lines[keep_after..]);
-    let mut text = out.join("\n");
+    lines.push(&heading);
+    lines.extend(summary.lines().filter(|line| !line.trim().is_empty()));
+    let mut text = lines.join("\n");
     if body.ends_with('\n') {
         text.push('\n');
     }
@@ -234,7 +230,7 @@ impl WriterApp {
         cx.notify();
     }
 
-    /// 요약 파일을 기록 맨 위(제목 줄 뒤)의 요약 구간에 넣고 요약 파일을 지운다.
+    /// 요약 파일을 기록 맨 끝의 요약 구간에 넣고 요약 파일을 지운다.
     fn insert_summary(&mut self, record: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let result = (|| -> std::io::Result<()> {
             let summary_file = summary_path(&record).ok_or(std::io::ErrorKind::NotFound)?;
@@ -254,7 +250,7 @@ impl WriterApp {
         match result {
             Ok(()) => {
                 self.dictation_ai.summary_error = None;
-                self.close_summary_window(cx);
+                self.dictation_ai.summary_open = false;
                 self.reload_recorded_sheet(&record, window, cx);
                 self.load_previews(cx);
             }
@@ -271,7 +267,7 @@ impl WriterApp {
             let _ = std::fs::remove_file(path);
         }
         self.dictation_ai.summary_error = None;
-        self.close_summary_window(cx);
+        self.dictation_ai.summary_open = false;
         cx.notify();
     }
 
@@ -310,7 +306,7 @@ impl WriterApp {
                     .gap_2()
                     .child(Icon::new(icons::summary()).small().text_color(pal.muted))
                     .child(div().flex_1().child(t!("dictation.summary.ready")))
-                    .child(summary_button(record.to_path_buf(), cx))
+                    .child(summary_button(self.dictation_ai.summary_open, cx))
                     .child(
                         Button::new("dictation-summary-discard")
                             .small()
@@ -338,164 +334,131 @@ impl WriterApp {
 
     /// 녹음 중 "요약 보기" 버튼. 요약을 켜지 않았으면 `None`.
     pub(super) fn render_live_summary(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let record = self.dictation_ai.summary.as_ref()?.record.clone();
-        Some(summary_button(record, cx).into_any_element())
+        self.dictation_ai.summary.as_ref()?;
+        Some(summary_button(self.dictation_ai.summary_open, cx).into_any_element())
     }
 
-    /// 요약 창을 닫는다(넣거나 버린 뒤).
-    fn close_summary_window(&mut self, cx: &mut App) {
-        if let Some(handle) = self.dictation_ai.summary_window.take() {
-            let _ = handle.update(cx, |_, window, _| window.remove_window());
+    /// 녹음 막대 위쪽의 요약 패널. "요약 보기"를 켰고 `record`에 요약(진행 중이거나 요약 파일)이 있을 때만.
+    /// 앱의 다른 떠 있는 패널과 같은 모양이고, 머리줄(제목·상태·닫기) 아래 본문은 따로 스크롤된다.
+    pub(super) fn render_summary_panel(
+        &self,
+        record: &Path,
+        cx: &mut Context<Self>,
+        pal: Palette,
+    ) -> Option<AnyElement> {
+        if !self.dictation_ai.summary_open {
+            return None;
         }
-    }
-
-    /// 기록 `record`의 요약 창을 연다. 이미 열려 있으면 닫고 이 기록으로 새로 연다.
-    fn open_summary_window(&mut self, record: PathBuf, cx: &mut Context<Self>) {
-        self.close_summary_window(cx);
-        let title = self
-            .previews
-            .get(&record)
-            .map(|(_, preview)| preview.title.clone())
-            .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| t!("core.stt").to_string());
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                size(px(420.0), px(520.0)),
-                cx,
-            ))),
-            window_min_size: Some(size(px(280.0), px(240.0))),
-            titlebar: Some(TitlebarOptions {
-                title: Some(t!("dictation.summary.window_title", title = title).into()),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let job = self
+            .dictation_ai
+            .summary
+            .as_ref()
+            .filter(|job| job.record == record);
+        let text = match job {
+            Some(job) => job.text.clone(),
+            None => std::fs::read_to_string(summary_path(record)?).ok()?,
         };
-        // 이 앱을 고치는 중이라 창을 만들며 앱을 읽을 수 없다. 첫 내용은 여기서 채워 넘긴다.
-        let app = cx.entity();
-        let mut view = SummaryView {
-            record,
-            text: String::new(),
-            minutes: None,
-            error: None,
-        };
-        view.refresh(self);
-        match gpui_kit::open_window(options, cx, move |_, cx| {
-            cx.new(|cx: &mut Context<SummaryView>| {
-                cx.observe(&app, |this, app, cx| {
-                    this.refresh(app.read(cx));
-                    cx.notify();
+        let empty = text.trim().is_empty();
+        let status: Option<SharedString> = job.map(|job| {
+            t!(
+                "dictation.summary.waiting",
+                minutes = job.interval.as_secs() / 60
+            )
+            .into()
+        });
+        let body = div()
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .text_sm()
+            .when(empty, |this| {
+                this.text_color(pal.muted).child(if job.is_some() {
+                    t!("dictation.summary.first")
+                } else {
+                    t!("dictation.summary.none")
                 })
-                .detach();
-                view
             })
-        }) {
-            Ok((handle, _)) => self.dictation_ai.summary_window = Some(handle),
-            Err(err) => eprintln!("요약 창을 열 수 없습니다: {err}"),
-        }
+            .when(!empty, |this| {
+                this.children(
+                    text.trim()
+                        .lines()
+                        .map(|line| div().child(SharedString::from(line.to_string()))),
+                )
+            });
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .rounded_xl()
+                .bg(pal.panel)
+                .border_1()
+                .border_color(pal.panel_border)
+                .shadow_md()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .px_3()
+                        .py_1p5()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(pal.panel_border)
+                        .child(Icon::new(icons::summary()).small().text_color(pal.muted))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(t!("dictation.summary.heading")),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(pal.muted)
+                                .children(status),
+                        )
+                        .child(
+                            Button::new("dictation-summary-close")
+                                .xsmall()
+                                .ghost()
+                                .icon(icons::close())
+                                .tooltip(t!("dictation.summary.hide"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.dictation_ai.summary_open = false;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("dictation-summary-body")
+                        .h(px(SUMMARY_PANEL_HEIGHT))
+                        .child(div().size_full().overflow_y_scrollbar().child(body)),
+                )
+                .into_any_element(),
+        )
     }
 }
 
-/// "요약 보기" 버튼.
-fn summary_button(record: PathBuf, cx: &mut Context<WriterApp>) -> Button {
+/// "요약 보기" 버튼. 누를 때마다 녹음 막대 위쪽의 요약 칸을 펼치고 접는다.
+fn summary_button(open: bool, cx: &mut Context<WriterApp>) -> Button {
     Button::new("dictation-summary-view")
         .small()
         .ghost()
         .icon(icons::summary())
-        .label(t!("dictation.summary.view"))
-        .on_click(cx.listener(move |this, _, _, cx| this.open_summary_window(record.clone(), cx)))
-}
-
-/// 요약 창. 녹음 중이면 요약이 고쳐질 때마다, 끝났으면 요약 파일을 보인다.
-struct SummaryView {
-    record: PathBuf,
-    text: String,
-    /// 녹음 중 요약 주기(분). 녹음 중이 아니면 `None`.
-    minutes: Option<u64>,
-    error: Option<SharedString>,
-}
-
-impl SummaryView {
-    /// 앱의 요약 일(이 기록이면)이나 요약 파일에서 요약을 읽는다.
-    fn refresh(&mut self, app: &WriterApp) {
-        self.error = app.dictation_ai.summary_error.clone();
-        match app
-            .dictation_ai
-            .summary
-            .as_ref()
-            .filter(|job| job.record == self.record)
-        {
-            Some(job) => {
-                self.text.clone_from(&job.text);
-                self.minutes = Some(job.interval.as_secs() / 60);
-            }
-            None => {
-                self.minutes = None;
-                if let Some(text) =
-                    summary_path(&self.record).and_then(|path| std::fs::read_to_string(path).ok())
-                {
-                    self.text = text;
-                }
-            }
-        }
-    }
-}
-
-impl Render for SummaryView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let pal = Palette::from_theme(cx.theme());
-        let empty = self.text.trim().is_empty();
-        let body: SharedString = match (empty, self.minutes) {
-            (false, _) => self.text.trim().to_string().into(),
-            (true, Some(minutes)) => t!("dictation.summary.waiting", minutes = minutes).into(),
-            (true, None) => t!("dictation.summary.none").into(),
-        };
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(pal.background)
-            .text_color(pal.foreground)
-            .child(
-                div()
-                    .id("dictation-summary")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .text_sm()
-                    .when(empty, |this| this.text_color(pal.muted).child(body.clone()))
-                    .when(!empty, |this| {
-                        this.children(
-                            body.lines()
-                                .map(|line| div().child(SharedString::from(line.to_string()))),
-                        )
-                    }),
-            )
-            .when_some(self.minutes.filter(|_| !empty), |this, minutes| {
-                this.child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .border_t_1()
-                        .border_color(pal.panel_border)
-                        .text_xs()
-                        .text_color(pal.muted)
-                        .child(t!("dictation.summary.waiting", minutes = minutes)),
-                )
-            })
-            .children(self.error.clone().map(|error| {
-                div()
-                    .px_4()
-                    .pb_2()
-                    .text_xs()
-                    .text_color(pal.danger)
-                    .child(error)
-            }))
-    }
+        .label(if open {
+            t!("dictation.summary.hide")
+        } else {
+            t!("dictation.summary.view")
+        })
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.dictation_ai.summary_open = !this.dictation_ai.summary_open;
+            cx.notify();
+        }))
 }
 
 #[cfg(test)]
@@ -505,23 +468,26 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn summary_goes_after_title_and_replaces_old_section() {
+    fn summary_goes_to_end_and_replaces_old_section() {
         let heading = summary_heading();
         let body = "# 받아쓰기 2026-10-25 10:00\n첫 문단\n둘째 문단\n";
         let once = with_summary(body, "- 하나\n\n- 둘\n");
         assert_eq!(
             once,
-            format!("# 받아쓰기 2026-10-25 10:00\n{heading}\n- 하나\n- 둘\n첫 문단\n둘째 문단\n")
+            format!("# 받아쓰기 2026-10-25 10:00\n첫 문단\n둘째 문단\n{heading}\n- 하나\n- 둘\n")
         );
-        let twice = with_summary(&once, "- 셋");
+        // 이어서 녹음한 뒤 다시 넣으면 옛 구간은 지우고 새 끝에 넣는다.
+        let continued = format!("{once}셋째 문단\n");
         assert_eq!(
-            twice,
-            format!("# 받아쓰기 2026-10-25 10:00\n{heading}\n- 셋\n첫 문단\n둘째 문단\n")
+            with_summary(&continued, "- 셋"),
+            format!(
+                "# 받아쓰기 2026-10-25 10:00\n첫 문단\n둘째 문단\n셋째 문단\n{heading}\n- 셋\n"
+            )
         );
-        assert_eq!(with_summary("본문", "- a"), format!("{heading}\n- a\n본문"));
+        assert_eq!(with_summary("본문", "- a"), format!("본문\n{heading}\n- a"));
         // 마크다운으로 저장해도 구간이 그대로 돌아온다.
-        let markdown = crate::text_transform::to_markdown(&twice);
-        assert_eq!(crate::text_transform::to_editor(&markdown), twice);
+        let markdown = crate::text_transform::to_markdown(&once);
+        assert_eq!(crate::text_transform::to_editor(&markdown), once);
     }
 
     #[test]

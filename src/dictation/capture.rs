@@ -3,7 +3,8 @@
 //! gpui-kit의 `Microphone`(`speech` 기능)은 cpal 0.15를 써서 rodio(cpal 0.18)와 함께 빌드할 수 없다.
 //! 마이크(기본 입력 장치), 시스템 소리(기본 출력 장치의 루프백: macOS 14.6+ Core Audio 프로세스 탭,
 //! Windows WASAPI 루프백), 또는 둘을 섞어 받는다. 장치마다 모노로 섞고 인식기가 바라는 형식(16 kHz)으로
-//! 바꾼 뒤, 둘이면 표본끼리 더한다.
+//! 바꾼 뒤, 둘이면 표본끼리 더한다. 자동 음량 맞춤([`AutoGain`])을 켰으면 섞은 소리의 크기를 말소리에 맞춰
+//! 키운다(파형도 키운 소리로 보인다).
 
 use std::cell::Cell;
 use std::f32::consts::TAU;
@@ -66,6 +67,79 @@ pub struct SourceInput {
     pub source: Rc<Cell<AudioSource>>,
 }
 
+/// 자동 음량 맞춤이 겨누는 말소리 크기(RMS, 약 -20 dBFS).
+const TARGET_RMS: f32 = 0.1;
+
+/// 이보다 조용한 구간(RMS, 약 -50 dBFS)은 잡음으로 보고 음량을 더 키우지 않는다.
+const GATE_RMS: f32 = 0.003;
+
+/// 가장 크게 키우는 배수(약 +24 dB). 줄이지는 않는다(큰 소리는 리미터가 막는다).
+const MAX_GAIN: f32 = 16.0;
+
+/// 음량을 고치는 단위(16 kHz의 10 ms).
+const GAIN_BLOCK: usize = 160;
+
+/// 자동 음량 맞춤: 말소리가 작으면 천천히 키우고, 너무 커지면 빨리 줄이며, 넘치는 표본은 부드럽게 눌러
+/// 찢어지지 않게 한다. 쉬는 구간(잡음)에서는 더 키우지 않는다.
+struct AutoGain {
+    gain: f32,
+    /// 다음 블록을 채우는 중인 표본.
+    pending: Vec<i16>,
+}
+
+impl AutoGain {
+    fn new() -> Self {
+        Self {
+            gain: 1.0,
+            pending: Vec::with_capacity(GAIN_BLOCK),
+        }
+    }
+
+    /// 표본을 받아 다 찬 블록만큼 음량을 맞춰 돌려준다(남은 것은 다음에 잇는다).
+    fn process(&mut self, samples: &[i16]) -> Vec<i16> {
+        self.pending.extend_from_slice(samples);
+        let full = self.pending.len() / GAIN_BLOCK * GAIN_BLOCK;
+        let mut output = Vec::with_capacity(full);
+        for block in self.pending[..full].chunks(GAIN_BLOCK) {
+            let rms = (block
+                .iter()
+                .map(|&s| (f32::from(s) / 32768.0).powi(2))
+                .sum::<f32>()
+                / block.len() as f32)
+                .sqrt();
+            let wanted = if rms < GATE_RMS {
+                // 잡음은 키우지 않는다(줄이지도 않아 말이 다시 시작될 때 작게 들어오지 않는다).
+                self.gain.min((TARGET_RMS / GATE_RMS).min(MAX_GAIN))
+            } else {
+                (TARGET_RMS / rms).clamp(1.0, MAX_GAIN)
+            };
+            // 줄일 때는 빨리(블록마다 절반쯤), 키울 때는 천천히(약 1초에 걸쳐) 다가간다.
+            let rate = if wanted < self.gain { 0.5 } else { 0.01 };
+            let next = self.gain + (wanted - self.gain) * rate;
+            let step = (next - self.gain) / block.len() as f32;
+            for (ix, &sample) in block.iter().enumerate() {
+                let gain = self.gain + step * ix as f32;
+                output.push(limit(f32::from(sample) / 32768.0 * gain));
+            }
+            self.gain = next;
+        }
+        self.pending.drain(..full);
+        output
+    }
+}
+
+/// 넘치는 표본을 부드럽게 누른다: 0.9까지는 그대로, 그 위는 1.0에 다가가게 굽힌다.
+fn limit(x: f32) -> i16 {
+    const KNEE: f32 = 0.9;
+    let magnitude = x.abs();
+    let y = if magnitude <= KNEE {
+        magnitude
+    } else {
+        KNEE + (1.0 - KNEE) * ((magnitude - KNEE) / (1.0 - KNEE)).tanh()
+    };
+    (y.copysign(x) * f32::from(i16::MAX)) as i16
+}
+
 impl AudioInput for SourceInput {
     fn start(
         &self,
@@ -74,6 +148,7 @@ impl AudioInput for SourceInput {
         cx: &mut App,
     ) -> Result<Subscription, SpeechError> {
         let source = self.source.get();
+        let auto_gain = crate::config::Config::load().dictation.auto_gain;
         #[cfg(target_os = "macos")]
         if source.uses_microphone() && macos::is_microphone_denied() {
             return Err(SpeechError::PermissionDenied);
@@ -115,6 +190,7 @@ impl AudioInput for SourceInput {
                 .map(|&rate| Converter::new(rate, format))
                 .collect();
             let mut mixer = Mixer::new(converters.len());
+            let mut gain = auto_gain.then(AutoGain::new);
             let mut mono: Vec<Vec<f32>> = vec![Vec::new(); converters.len()];
             while let Some(first) = rx.next().await {
                 // 장치는 10 ms 남짓씩 보낸다. 쌓인 것을 한 번에 넘겨 녹음 상태가 묶음마다 한 번만 바뀌게 한다.
@@ -134,6 +210,10 @@ impl AudioInput for SourceInput {
                     samples.clear();
                 }
                 let samples = mixer.take();
+                let samples = match gain.as_mut() {
+                    Some(gain) => gain.process(&samples),
+                    None => samples,
+                };
                 cx.update(|cx| {
                     if !samples.is_empty() {
                         sink.push(samples, cx);
@@ -376,7 +456,52 @@ mod macos {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioFormat, Converter, MAX_LAG, Mixer};
+    use super::{
+        AudioFormat, AutoGain, Converter, GAIN_BLOCK, MAX_GAIN, MAX_LAG, Mixer, TARGET_RMS,
+    };
+
+    fn rms(samples: &[i16]) -> f32 {
+        (samples
+            .iter()
+            .map(|&s| (f32::from(s) / 32768.0).powi(2))
+            .sum::<f32>()
+            / samples.len() as f32)
+            .sqrt()
+    }
+
+    fn tone(amplitude: f32, len: usize) -> Vec<i16> {
+        (0..len)
+            .map(|ix| ((ix as f32 * 0.2).sin() * amplitude * 32767.0) as i16)
+            .collect()
+    }
+
+    #[test]
+    fn auto_gain_raises_quiet_speech_toward_target() {
+        let mut gain = AutoGain::new();
+        // 약 -37 dBFS의 작은 말소리 3초.
+        let quiet = tone(0.02, 16_000 * 3);
+        let output: Vec<i16> = quiet
+            .chunks(173)
+            .flat_map(|chunk| gain.process(chunk))
+            .collect();
+        assert_eq!(output.len(), quiet.len() / GAIN_BLOCK * GAIN_BLOCK);
+        let last = rms(&output[output.len() - 1_600..]);
+        assert!(last > TARGET_RMS * 0.8 && last < TARGET_RMS * 1.2, "{last}");
+    }
+
+    #[test]
+    fn auto_gain_does_not_boost_noise_or_clip_loud_sound() {
+        let mut gain = AutoGain::new();
+        let noise = tone(0.001, 16_000 * 3);
+        let output = gain.process(&noise);
+        assert!(gain.gain < 1.5, "{}", gain.gain);
+        assert!(rms(&output) < 0.002);
+        // 크게 키운 뒤 갑자기 큰 소리가 와도 넘치지 않는다.
+        gain.gain = MAX_GAIN;
+        let loud = gain.process(&tone(0.9, 1_600));
+        assert!(loud.iter().all(|&s| s > i16::MIN));
+        assert!(gain.gain < 2.0, "{}", gain.gain);
+    }
 
     #[test]
     fn mixer_passes_single_track() {

@@ -52,6 +52,8 @@ pub struct Config {
 pub struct DictationConfig {
     /// 받아 적을 소리(`microphone`·`system`·`both`).
     pub source: crate::dictation::AudioSource,
+    /// 작은 소리를 말소리 크기로 키운다(자동 음량 맞춤).
+    pub auto_gain: bool,
     /// 녹음 중 번역할 언어 코드(`agent::dictation::LANGUAGES`, ADR-0055). 없으면 번역하지 않는다.
     pub translate_to: Option<String>,
     /// 녹음 중 몇 분마다 요약한다.
@@ -68,6 +70,7 @@ impl Default for DictationConfig {
     fn default() -> Self {
         Self {
             source: Default::default(),
+            auto_gain: true,
             translate_to: None,
             summarize: false,
             summary_minutes: 5,
