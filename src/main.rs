@@ -26,6 +26,7 @@ mod i18n;
 mod icons;
 mod library;
 mod markdown;
+mod media;
 mod menus;
 mod settings;
 mod text_transform;
@@ -44,6 +45,8 @@ actions!(
         NewSheet,
         SaveSheet,
         InsertImage,
+        InsertVideo,
+        InsertAudio,
         InsertFootnote,
         InsertTable,
         InsertExtension,
@@ -57,6 +60,7 @@ actions!(
         ToggleBold,
         ToggleItalic,
         ToggleSidebar,
+        ToggleAssistant,
         TogglePreview,
         ToggleTheme,
         ShowAbout,

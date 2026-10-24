@@ -38,6 +38,7 @@
 | 할 일 목록(GFM `- [ ]`·`- [x]`) | P2 | 표준 표기만. 에디터는 기호 위에 체크 상자를 겹쳐 그리고 눌러 체크, 완료는 취소선(ADR-0023). 미리보기·PDF·DOCX·ePub은 ☐·☑ | markdown-rs GFM, gpui-base 패치 | M2/M7 | ✅ |
 | 이미지 붙여넣기 → 첨부 | P1 | `Editor::on_paste` 훅 | attachment | M2 | ⬜ |
 | 인라인 이미지 미리보기 | P2 | 이미지 줄 아래 줄 블록에 그림, gpui-base 패치(ADR-0008) | display_map / `thumbnail` | M2/M4 | ✅ |
+| 동영상·오디오 삽입·재생 | P2 | 이미지 줄 문법(확장자로 구분), 동영상은 AVPlayer → `paint_surface`(macOS), 오디오는 rodio(ADR-0050) | `media` / `media_player` | M4 | ✅ |
 | 맞춤법/문법 검사 | — | 범위 외(후속 LSP 연동 가능) | `Lsp` 훅 | — | 🚫 |
 | 협업 편집 | — | 범위 외 | — | — | 🚫 |
 

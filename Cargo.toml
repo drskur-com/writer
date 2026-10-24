@@ -36,8 +36,9 @@ lyon = "1.0"
 i_overlay = "9"
 # 확장의 모양 목록을 픽셀로 그린다: 화면, 어시스턴트가 보는 PNG, DOCX(ADR-0042).
 vello_cpu = { version = "0.3", default-features = false, features = ["std", "u8_pipeline"] }
-# 플레이 창 확장의 소리(ADR-0040). 합성은 앱이 하고 출력만 쓴다(파일 디코더는 넣지 않는다).
-rodio = { version = "0.23", default-features = false, features = ["playback"] }
+# 플레이 창 확장의 소리(ADR-0040)와 에디터의 오디오 재생(ADR-0050). 확장 소리는 앱이 합성하고, 오디오 파일은
+# symphonia 디코더(MP3·AAC/M4A·WAV·FLAC·Ogg Vorbis)로 푼다.
+rodio = { version = "0.23", default-features = false, features = ["playback", "mp3", "mp4", "wav", "flac", "vorbis"] }
 dirs = "5"
 # 대화 기록을 오늘·어제·지난 7일로 묶을 때 지역 날짜를 구한다.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -83,13 +84,18 @@ mlua = { version = "0.12.2", features = ["luau"] }
 # 번들 없이 실행할 때(`cargo run`)도 Dock에 앱 아이콘을 보인다. 버전은 gpui가 쓰는 것과 맞춘다.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSData", "NSError", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.3", features = ["NSData", "NSDictionary", "NSError", "NSString", "NSURL", "NSValue"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder"] }
 # 썸네일은 Finder와 같은 QuickLook으로 만든다(이미지·동영상, 시스템 캐시).
 objc2-quick-look-thumbnailing = { version = "0.3", features = ["QLThumbnailGenerator", "QLThumbnailGenerationRequest", "QLThumbnailRepresentation", "block2", "objc2-core-foundation", "objc2-core-graphics"] }
 objc2-core-graphics = { version = "0.3", features = ["CGImage", "CGContext", "CGBitmapContext", "CGColorSpace"] }
 objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
 block2 = "0.6"
+# 에디터의 동영상 재생(ADR-0050): AVPlayer가 풀고, 프레임(CVPixelBuffer)을 gpui `paint_surface`로 그린다.
+# objc2-core-video는 gpui와 같은 판이어야 프레임 타입이 맞는다.
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "AVAsset", "AVTime", "objc2-core-media", "objc2-core-video"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime", "CMSync"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn", "CVBase", "CVPixelBufferIOSurface"] }
 
 # `cargo bundle --release`로 .app을 만든다.
 [package.metadata.bundle]

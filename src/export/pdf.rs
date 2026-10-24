@@ -29,6 +29,8 @@ pub struct PdfDocument {
     pub title: String,
     pub authors: Vec<String>,
     pub pages: Vec<PdfPage>,
+    /// 첨부파일로 넣을 파일(동영상·오디오, ADR-0050). PDF 뷰어의 첨부 목록에서 열어 재생한다.
+    pub attachments: Vec<PathBuf>,
 }
 
 /// 한 페이지. 길이는 pt, 원점은 왼쪽 위.
@@ -63,6 +65,14 @@ pub enum PdfItem {
         width: f32,
         height: f32,
         color: [u8; 3],
+    },
+    /// 동영상 자리: 포스터(첫 장면)와 가운데 재생 표시. 포스터를 만들 수 없으면 어두운 칸이다.
+    Video {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        path: PathBuf,
     },
     /// 확장 블록 그림(ADR-0026): `canvas` 크기의 모양 목록을 칸에 맞춰 벡터로 그린다.
     Drawing {
@@ -111,6 +121,7 @@ pub fn write(document: &PdfDocument, target: &Path) -> Result<(), ExportError> {
 pub fn render(document: &PdfDocument) -> Result<Vec<u8>, ExportError> {
     let mut fonts = Fonts::new();
     let mut images: HashMap<PathBuf, Option<Image>> = HashMap::new();
+    let mut posters: HashMap<PathBuf, Option<Image>> = HashMap::new();
     let mut pdf = Document::new();
     let mut metadata = Metadata::new().title(document.title.clone());
     if !document.authors.is_empty() {
@@ -167,6 +178,29 @@ pub fn render(document: &PdfDocument) -> Result<Vec<u8>, ExportError> {
                         draw_image(&mut surface, image, *x, *y, *width, *height, *cover);
                     }
                 }
+                PdfItem::Video {
+                    x,
+                    y,
+                    width,
+                    height,
+                    path,
+                } => {
+                    let poster = posters
+                        .entry(path.clone())
+                        .or_insert_with(|| {
+                            crate::media::poster_png(path)
+                                .and_then(|png| Image::from_png(Arc::new(png).into(), true).ok())
+                        })
+                        .clone();
+                    match poster {
+                        Some(poster) => {
+                            fill_rect(&mut surface, *x, *y, *width, *height, [0, 0, 0]);
+                            draw_image(&mut surface, poster, *x, *y, *width, *height, false);
+                        }
+                        None => fill_rect(&mut surface, *x, *y, *width, *height, [40, 40, 40]),
+                    }
+                    draw_play_badge(&mut surface, *x, *y, *width, *height);
+                }
                 PdfItem::Drawing {
                     x,
                     y,
@@ -180,9 +214,67 @@ pub fn render(document: &PdfDocument) -> Result<Vec<u8>, ExportError> {
         surface.finish();
         pdf_page.finish();
     }
+    for path in &document.attachments {
+        embed_attachment(&mut pdf, path);
+    }
     pdf.finish().map_err(|err| {
         ExportError::InvalidProject(t!("export.error.pdf", err = format!("{err:?}")).into_owned())
     })
+}
+
+/// 파일을 문서 첨부파일로 넣는다. 읽지 못하면 넘어간다.
+fn embed_attachment(pdf: &mut Document, path: &Path) {
+    let Ok(data) = std::fs::read(path) else {
+        return;
+    };
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    pdf.embed_file(krilla::embed::EmbeddedFile {
+        path: name.clone(),
+        mime_type: krilla::embed::MimeType::new(crate::media::mime_type(path)),
+        description: Some(name),
+        association_kind: krilla::embed::AssociationKind::Supplement,
+        data: Arc::new(data).into(),
+        modification_date: None,
+        // 동영상·오디오는 이미 압축되어 있다.
+        compress: Some(false),
+        location: None,
+    });
+}
+
+/// 동영상 칸 가운데의 재생 표시: 반투명 검은 원과 흰 삼각형.
+fn draw_play_badge(surface: &mut Surface, x: f32, y: f32, width: f32, height: f32) {
+    let radius = (width.min(height) * 0.12).clamp(6., 24.);
+    let (cx, cy) = (x + width / 2., y + height / 2.);
+    // 원은 베지어 네 개로 그린다(k = 4(√2 − 1)/3).
+    let k = radius * 0.552_284_8;
+    let mut circle = PathBuilder::new();
+    circle.move_to(cx + radius, cy);
+    circle.cubic_to(cx + radius, cy + k, cx + k, cy + radius, cx, cy + radius);
+    circle.cubic_to(cx - k, cy + radius, cx - radius, cy + k, cx - radius, cy);
+    circle.cubic_to(cx - radius, cy - k, cx - k, cy - radius, cx, cy - radius);
+    circle.cubic_to(cx + k, cy - radius, cx + radius, cy - k, cx + radius, cy);
+    circle.close();
+    if let Some(path) = circle.finish() {
+        surface.set_fill(Some(Fill {
+            paint: rgb::Color::new(0, 0, 0).into(),
+            opacity: NormalizedF32::new(0.55).unwrap_or(NormalizedF32::ONE),
+            rule: FillRule::default(),
+        }));
+        surface.draw_path(&path);
+    }
+    let side = radius * 0.9;
+    let mut triangle = PathBuilder::new();
+    triangle.move_to(cx - side * 0.4, cy - side * 0.55);
+    triangle.line_to(cx + side * 0.6, cy);
+    triangle.line_to(cx - side * 0.4, cy + side * 0.55);
+    triangle.close();
+    if let Some(path) = triangle.finish() {
+        surface.set_fill(Some(fill([255, 255, 255])));
+        surface.draw_path(&path);
+    }
 }
 
 fn fill_rect(surface: &mut Surface, x: f32, y: f32, width: f32, height: f32, color: [u8; 3]) {
@@ -947,6 +1039,7 @@ mod tests {
         let document = PdfDocument {
             title: "시험".into(),
             authors: vec!["지은이".into()],
+            attachments: Vec::new(),
             pages: vec![
                 PdfPage {
                     width: 420.,
@@ -978,6 +1071,38 @@ mod tests {
         };
         let bytes = render(&document).unwrap();
         assert!(bytes.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    fn videos_become_posters_and_media_files_are_attached() {
+        let dir = std::env::temp_dir().join(format!("writer-pdf-media-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = dir.join("clip.mp4");
+        let audio = dir.join("song.mp3");
+        std::fs::write(&video, b"not a movie").unwrap();
+        std::fs::write(&audio, b"ID3 sound").unwrap();
+        let document = PdfDocument {
+            title: "시험".into(),
+            authors: Vec::new(),
+            attachments: vec![video.clone(), audio.clone()],
+            pages: vec![PdfPage {
+                width: 420.,
+                height: 595.,
+                items: vec![PdfItem::Video {
+                    x: 50.,
+                    y: 50.,
+                    width: 320.,
+                    height: 180.,
+                    path: video,
+                }],
+            }],
+        };
+        let bytes = render(&document).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("/EmbeddedFile"), "첨부파일이 없다");
+        assert!(text.contains("clip.mp4") && text.contains("song.mp3"));
+        assert!(text.contains("/video#2Fmp4") || text.contains("video/mp4"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1014,6 +1139,7 @@ mod tests {
         let document = PdfDocument {
             title: "그림".into(),
             authors: Vec::new(),
+            attachments: Vec::new(),
             pages: vec![PdfPage {
                 width: 200.,
                 height: 200.,
@@ -1039,6 +1165,7 @@ mod tests {
             blurred.extend(shapes.iter().cloned());
         }
         let document = PdfDocument {
+            attachments: Vec::new(),
             pages: vec![PdfPage {
                 width: 200.,
                 height: 200.,

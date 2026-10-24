@@ -4,11 +4,15 @@
 //! 그 아래에 gpui-base 줄 블록(`EditorState::set_line_blocks`)으로 이미지와 캡션을 그린다.
 //! 이미지 줄 글자는 커서가 그 줄에 들어올 때만 보인다(`LineStyle::collapsed`).
 //! 크기·정렬은 속성을 따르고, 없으면 원본 크기를 본문 폭 안에 맞춘다.
+//!
+//! 경로가 동영상·오디오면(ADR-0050) 같은 자리에 재생기를 그린다. 동영상은 포스터(첫 장면 썸네일) 위에
+//! 재생 단추를 두고, 재생하면 프레임을 그린다. 오디오는 한 줄 카드다. 단추·진행 막대는 눌러도 커서가
+//! 줄로 가지 않는다.
 
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -17,8 +21,10 @@ use std::time::Instant;
 
 use super::editor::EDITOR_MAX_WIDTH;
 use super::gif_player::GifPlayer;
+use super::media_player::MediaPlayer;
 use super::style::Palette;
 use crate::markdown::{self, ImageAlign, ImageOptions};
+use crate::media::{self, MediaKind};
 use crate::{icons, library};
 
 /// 이미지 위 여백.
@@ -48,6 +54,30 @@ const MAX_GIF_BYTES: u64 = 64 * 1024 * 1024;
 /// 이미지 모서리 반경.
 const CORNER_RADIUS: f32 = 4.0;
 
+/// 크기를 모르는 동영상의 원본 크기(16:9).
+const DEFAULT_VIDEO_SIZE: (f32, f32) = (640.0, 360.0);
+
+/// 오디오 카드 높이와 기본 폭.
+const AUDIO_HEIGHT: f32 = 48.0;
+const AUDIO_WIDTH: f32 = 440.0;
+
+/// 동영상 위 조작 줄 높이.
+const CONTROLS_HEIGHT: f32 = 32.0;
+
+/// 포스터 가운데 재생 단추 지름.
+const BIG_PLAY_SIZE: f32 = 48.0;
+
+/// 열린 시트의 재생기(경로마다 하나). 재생 단추가 다른 재생기를 멈출 때 함께 본다.
+type Players = Rc<RefCell<HashMap<PathBuf, Rc<RefCell<MediaPlayer>>>>>;
+
+/// 동영상·오디오 파일 정보. 헤더만 읽는다.
+#[derive(Clone, Copy)]
+struct MediaFile {
+    /// 동영상의 화면 크기(px). 오디오는 `None`.
+    size: Option<(f32, f32)>,
+    modified: u128,
+}
+
 /// 로컬 이미지 파일 정보. 헤더만 읽는다.
 #[derive(Clone, Copy)]
 struct ImageFile {
@@ -63,6 +93,9 @@ enum Source {
     /// 움직이는 GIF(ADR-0049)와 표시 크기의 긴 변.
     Animated(Rc<RefCell<GifPlayer>>, Pixels),
     Url(SharedUri),
+    /// 동영상: 파일, 수정 시각, 포스터 긴 변, 재생기.
+    Video(PathBuf, u128, Pixels, Rc<RefCell<MediaPlayer>>),
+    Audio(Rc<RefCell<MediaPlayer>>),
     /// 파일이 없거나 이미지로 읽을 수 없다. 적힌 경로를 보여 준다.
     Missing(String),
 }
@@ -85,6 +118,9 @@ pub(super) struct ImageBlocks {
     files: RefCell<HashMap<PathBuf, ImageFile>>,
     /// 프레임이 여럿인 GIF의 재생기. 헤더를 읽을 때 함께 만들고, 스레드는 처음 그릴 때 띄운다.
     gifs: RefCell<HashMap<PathBuf, Rc<RefCell<GifPlayer>>>>,
+    /// 읽은 동영상·오디오 헤더. 없는 파일은 남기지 않는다.
+    media: RefCell<HashMap<PathBuf, MediaFile>>,
+    players: Players,
 }
 
 impl ImageBlocks {
@@ -93,6 +129,8 @@ impl ImageBlocks {
             dir: sheet.parent().map(Path::to_path_buf).unwrap_or_default(),
             files: RefCell::default(),
             gifs: RefCell::default(),
+            media: RefCell::default(),
+            players: Players::default(),
         }
     }
 
@@ -132,6 +170,22 @@ impl ImageBlocks {
                 .child(Icon::new(icons::image()).small())
                 .child(t!("editor.image.not_found", path = destination))
                 .into_any_element(),
+            Source::Video(path, modified, long_side, player) => render_video(
+                path,
+                modified,
+                long_side,
+                player,
+                self.players.clone(),
+                placement.size,
+                pal,
+            ),
+            Source::Audio(player) => render_audio(
+                player,
+                self.players.clone(),
+                placement.caption.clone(),
+                placement.size,
+                pal,
+            ),
             Source::Animated(player, long_side) => {
                 let bleed = px(EDGE_BLEED);
                 div()
@@ -171,7 +225,10 @@ impl ImageBlocks {
                         ObjectFit::Cover,
                     ),
                     Source::Url(uri) => (uri.into(), ObjectFit::Contain),
-                    Source::Animated(..) | Source::Missing(_) => unreachable!(),
+                    Source::Animated(..)
+                    | Source::Video(..)
+                    | Source::Audio(_)
+                    | Source::Missing(_) => unreachable!(),
                 };
                 // gpui는 아틀라스에서 이미지를 선형 보간으로 읽는데 타일 경계에서 멈추지 않는다.
                 // 그래서 줄이거나 소수 픽셀 위치(줄 높이 25.6px)에 그리면 오른쪽·아래 가장자리에
@@ -236,6 +293,9 @@ impl ImageBlocks {
         let image = markdown::image_line(line)?;
         let destination = image.destination;
         let caption = (!image.alt.trim().is_empty()).then(|| image.alt.trim().to_string().into());
+        if let Some(kind) = media::kind_of(&destination) {
+            return Some(self.place_media(kind, destination, &image.options, caption, width));
+        }
         if library::is_web_address(&destination) {
             return Some(Placement {
                 size: image_size(None, &image.options, width),
@@ -271,6 +331,96 @@ impl ImageBlocks {
         })
     }
 
+    /// 동영상·오디오 줄. 웹 주소는 재생하지 않는다(첨부파일로 넣어야 내보내기에도 들어간다).
+    fn place_media(
+        &self,
+        kind: MediaKind,
+        destination: String,
+        options: &ImageOptions,
+        caption: Option<SharedString>,
+        width: Pixels,
+    ) -> Placement {
+        let resolved = (!library::is_web_address(&destination))
+            .then(|| library::resolve_image_path(&self.dir, None, &destination))
+            .flatten()
+            .and_then(|path| self.media_file(kind, &path).map(|file| (path, file)));
+        let Some((path, file)) = resolved else {
+            return Placement {
+                source: Source::Missing(destination),
+                size: size(width, px(MISSING_HEIGHT)),
+                align: ImageAlign::Left,
+                caption: None,
+            };
+        };
+        let player = self.player(&path, kind);
+        match kind {
+            MediaKind::Video => {
+                let (w, h) = file.size.unwrap_or(DEFAULT_VIDEO_SIZE);
+                let natural = size(px(w), px(h));
+                let largest = image_size(Some(natural), options, px(EDITOR_MAX_WIDTH));
+                Placement {
+                    size: image_size(Some(natural), options, width),
+                    source: Source::Video(
+                        path,
+                        file.modified,
+                        largest.width.max(largest.height),
+                        player,
+                    ),
+                    align: options.align,
+                    caption,
+                }
+            }
+            // 오디오 카드는 캡션을 제목으로 안에 보인다.
+            MediaKind::Audio => Placement {
+                size: size(
+                    options
+                        .width
+                        .map_or(px(AUDIO_WIDTH), |width| px(width as f32))
+                        .min(width)
+                        .max(px(160.)),
+                    px(AUDIO_HEIGHT),
+                ),
+                source: Source::Audio(player),
+                align: options.align,
+                caption: None,
+            },
+        }
+    }
+
+    fn media_file(&self, kind: MediaKind, path: &Path) -> Option<MediaFile> {
+        if let Some(file) = self.media.borrow().get(path) {
+            return Some(*file);
+        }
+        if !path.is_file() {
+            return None;
+        }
+        let info = match kind {
+            MediaKind::Video => media::video_info(path),
+            MediaKind::Audio => None,
+        };
+        let file = MediaFile {
+            size: info.map(|info| (info.width as f32, info.height as f32)),
+            modified: library::modified_nanos(path),
+        };
+        self.media.borrow_mut().insert(path.to_path_buf(), file);
+        Some(file)
+    }
+
+    /// 경로의 재생기. 처음 보면 만든다(파일은 재생할 때 연다). 길이는 헤더에서 읽어 둔다.
+    fn player(&self, path: &Path, kind: MediaKind) -> Rc<RefCell<MediaPlayer>> {
+        self.players
+            .borrow_mut()
+            .entry(path.to_path_buf())
+            .or_insert_with(|| {
+                let duration = match kind {
+                    MediaKind::Video => media::video_info(path).and_then(|info| info.duration),
+                    MediaKind::Audio => media::audio_duration(path),
+                };
+                Rc::new(RefCell::new(MediaPlayer::new(path.to_path_buf(), duration)))
+            })
+            .clone()
+    }
+
     /// 프레임이 여럿인 GIF면 재생기를 만들어 둔다. 아니면(한 장, 너무 큼, 못 읽음) 썸네일로 보인다.
     fn add_gif(&self, path: &Path) {
         let small = std::fs::metadata(path).is_ok_and(|meta| meta.len() <= MAX_GIF_BYTES);
@@ -304,6 +454,292 @@ impl ImageBlocks {
         }
         self.files.borrow_mut().insert(path.to_path_buf(), file);
         Some(file)
+    }
+}
+
+/// 동영상: 포스터 위에 (재생을 시작했으면) 프레임을 그리고, 아래에 조작 줄을 겹친다.
+fn render_video(
+    path: PathBuf,
+    modified: u128,
+    long_side: Pixels,
+    player: Rc<RefCell<MediaPlayer>>,
+    players: Players,
+    shown: Size<Pixels>,
+    pal: Palette,
+) -> AnyElement {
+    let started = player.borrow().started();
+    let playing = player.borrow().playing();
+    // 동영상 재생은 macOS에서만 된다(AVFoundation). 다른 OS는 포스터만 보인다.
+    let playable = cfg!(target_os = "macos") && !player.borrow().failed();
+    let painter = player.clone();
+    div()
+        .relative()
+        .flex_shrink_0()
+        .w(shown.width)
+        .h(shown.height)
+        .overflow_hidden()
+        .rounded(px(CORNER_RADIUS))
+        .bg(gpui_kit::gpui::black())
+        .child(
+            img(crate::thumbnail::source(path, modified, long_side))
+                .absolute()
+                .size_full()
+                .object_fit(ObjectFit::Contain)
+                .with_fallback(move || {
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(icons::video()).text_color(pal.muted))
+                        .into_any_element()
+                }),
+        )
+        .when(started, |this| {
+            this.child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        painter.borrow_mut().paint_video(bounds, window);
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+        })
+        .when(playable && !playing && !started, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .size(px(BIG_PLAY_SIZE))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(gpui_kit::gpui::black().opacity(0.55))
+                            .text_color(gpui_kit::gpui::white())
+                            .cursor_pointer()
+                            .child(Icon::new(icons::play()))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                toggle_handler(player.clone(), players.clone(), MediaKind::Video),
+                            ),
+                    ),
+            )
+        })
+        .when(playable, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(CONTROLS_HEIGHT))
+                    .px_2()
+                    .bg(gpui_kit::gpui::black().opacity(0.45))
+                    .text_color(gpui_kit::gpui::white())
+                    .child(controls(
+                        player,
+                        players,
+                        MediaKind::Video,
+                        None,
+                        gpui_kit::gpui::white(),
+                        gpui_kit::gpui::white().opacity(0.35),
+                    )),
+            )
+        })
+        .into_any_element()
+}
+
+/// 오디오 카드: [재생] 제목 ─── 진행 막대 ─── 시간.
+fn render_audio(
+    player: Rc<RefCell<MediaPlayer>>,
+    players: Players,
+    caption: Option<SharedString>,
+    shown: Size<Pixels>,
+    pal: Palette,
+) -> AnyElement {
+    let title: SharedString = caption.unwrap_or_else(|| {
+        player
+            .borrow()
+            .path()
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+            .into()
+    });
+    div()
+        .flex_shrink_0()
+        .w(shown.width)
+        .h(shown.height)
+        .px_3()
+        .rounded(px(CORNER_RADIUS * 2.))
+        .border_1()
+        .border_color(pal.panel_border)
+        .bg(pal.panel)
+        .text_color(pal.foreground)
+        .child(controls(
+            player,
+            players,
+            MediaKind::Audio,
+            Some(title),
+            pal.foreground,
+            pal.panel_border,
+        ))
+        .into_any_element()
+}
+
+/// 재생 단추, (제목), 진행 막대, 시간을 한 줄로 둔다.
+fn controls(
+    player: Rc<RefCell<MediaPlayer>>,
+    players: Players,
+    kind: MediaKind,
+    title: Option<SharedString>,
+    fill: Hsla,
+    track: Hsla,
+) -> impl IntoElement {
+    let (playing, position, duration, failed) = {
+        let player = player.borrow();
+        (
+            player.playing(),
+            player.position(),
+            player.duration(),
+            player.failed(),
+        )
+    };
+    let fraction = duration
+        .filter(|duration| !duration.is_zero())
+        .map_or(0., |duration| {
+            (position.as_secs_f32() / duration.as_secs_f32()).clamp(0., 1.)
+        });
+    let time = match duration {
+        Some(duration) if position.is_zero() && !playing => media::format_time(duration),
+        Some(duration) => format!(
+            "{} / {}",
+            media::format_time(position),
+            media::format_time(duration)
+        ),
+        None => media::format_time(position),
+    };
+    // 진행 막대를 누른 자리를 길이의 비율로 바꾸려고 막대 칸을 그릴 때 적어 둔다.
+    let bar = Rc::new(Cell::new(Bounds::<Pixels>::default()));
+    let bar_painted = bar.clone();
+    let seeker = player.clone();
+    let refresher = player.clone();
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .size(px(24.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .when(!failed, |this| this.cursor_pointer())
+                .when(failed, |this| this.opacity(0.4))
+                .child(
+                    Icon::new(if playing {
+                        icons::pause()
+                    } else {
+                        icons::play()
+                    })
+                    .small(),
+                )
+                .on_mouse_down(MouseButton::Left, toggle_handler(player, players, kind)),
+        )
+        .when_some(title, |this, title| {
+            this.child(
+                div()
+                    .flex_shrink(1.)
+                    .min_w(px(40.))
+                    .max_w(relative(0.4))
+                    .text_sm()
+                    .truncate()
+                    .child(title),
+            )
+        })
+        .child(
+            div()
+                .flex_1()
+                .h(px(16.))
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, move |event, window, _| {
+                    window.prevent_default();
+                    let bounds = bar.get();
+                    if bounds.size.width > px(0.) {
+                        let fraction = (event.position.x - bounds.origin.x) / bounds.size.width;
+                        seeker.borrow_mut().seek(kind, fraction);
+                        window.refresh();
+                    }
+                })
+                .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .relative()
+                        .w_full()
+                        .h(px(4.))
+                        .rounded_full()
+                        .bg(track)
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top_0()
+                                .h_full()
+                                .w(relative(fraction))
+                                .rounded_full()
+                                .bg(fill),
+                        )
+                        .child(
+                            canvas(
+                                move |bounds, _, _| bar_painted.set(bounds),
+                                move |_, _, window, cx| {
+                                    refresher.borrow_mut().schedule_refresh(window, cx);
+                                },
+                            )
+                            .absolute()
+                            .size_full(),
+                        ),
+                ),
+        )
+        .child(div().flex_shrink_0().text_xs().opacity(0.8).child(time))
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            // 조작 줄 어디를 눌러도 커서가 이미지 줄로 가지 않는다.
+            window.prevent_default();
+            cx.stop_propagation();
+        })
+}
+
+/// 재생 단추: 다른 재생기를 멈추고 이것을 재생하거나 멈춘다.
+fn toggle_handler(
+    player: Rc<RefCell<MediaPlayer>>,
+    players: Players,
+    kind: MediaKind,
+) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+    move |_, window, cx| {
+        window.prevent_default();
+        cx.stop_propagation();
+        if !player.borrow().playing() {
+            for other in players.borrow().values() {
+                if !Rc::ptr_eq(other, &player) {
+                    other.borrow_mut().pause();
+                }
+            }
+        }
+        player.borrow_mut().toggle(kind);
+        window.refresh();
     }
 }
 

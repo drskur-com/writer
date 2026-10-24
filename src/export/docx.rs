@@ -598,11 +598,47 @@ impl<'a> DocBuilder<'a> {
 
     fn image(&mut self, image: &ImageLine, ctx: Context) {
         let caption = image.alt.trim().to_string();
-        let Some(path) = crate::library::resolve_image_path(
+        let kind = crate::media::kind_of(&image.destination);
+        let resolved = crate::library::resolve_image_path(
             &self.dir,
             Some(&self.project.dir),
             &image.destination,
-        ) else {
+        )
+        .filter(|path| kind.is_none() || path.is_file());
+        // 동영상·오디오(ADR-0050): Word에는 로컬 파일을 재생하는 그림이 없어 동영상은 포스터, 오디오는 제목 한 줄이다.
+        if let Some(kind) = kind {
+            let Some(path) = resolved else {
+                self.paragraph(
+                    "Caption",
+                    "",
+                    &text_run(
+                        "",
+                        &format!("[미디어를 찾을 수 없음: {}]", image.destination),
+                    ),
+                );
+                return;
+            };
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let poster = match kind {
+                crate::media::MediaKind::Video => self.load_poster(&path),
+                crate::media::MediaKind::Audio => None,
+            };
+            let Some(index) = poster else {
+                let label = if caption.is_empty() { &name } else { &caption };
+                let mark = match kind {
+                    crate::media::MediaKind::Video => "▶",
+                    crate::media::MediaKind::Audio => "♪",
+                };
+                self.paragraph("Caption", "", &text_run("", &format!("{mark} {label}")));
+                return;
+            };
+            self.place_image(index, image, &caption, ctx);
+            return;
+        }
+        let Some(path) = resolved else {
             self.paragraph(
                 "Caption",
                 "",
@@ -621,6 +657,12 @@ impl<'a> DocBuilder<'a> {
             );
             return;
         };
+        self.place_image(index, image, &caption, ctx);
+    }
+
+    /// 넣은 그림(`index`)을 이미지 줄의 크기·정렬대로 한 문단에 두고 캡션을 단다.
+    fn place_image(&mut self, index: usize, image: &ImageLine, caption: &str, ctx: Context) {
+        let caption = caption.to_string();
         let (natural_w, natural_h) = {
             let part = &self.images[index];
             (
@@ -784,6 +826,31 @@ impl<'a> DocBuilder<'a> {
             }),
         });
         Ok(Some(index))
+    }
+
+    /// 동영상 포스터(첫 장면 PNG)를 그림으로 넣는다. 만들 수 없으면 `None`.
+    fn load_poster(&mut self, path: &Path) -> Option<usize> {
+        let key = path.with_extension(format!(
+            "{}.poster",
+            path.extension().unwrap_or_default().to_string_lossy()
+        ));
+        if let Some(index) = self.image_ids.get(&key) {
+            return Some(*index);
+        }
+        let data = crate::media::poster_png(path)?;
+        let size = imagesize::blob_size(&data).ok()?;
+        let index = self.images.len();
+        self.images.push(ImagePart {
+            rel_id: format!("rIdImage{}", index + 1),
+            name: format!("media/image{}.png", index + 1),
+            extension: "png",
+            data,
+            width: size.width.max(1) as u32,
+            height: size.height.max(1) as u32,
+            svg: None,
+        });
+        self.image_ids.insert(key, index);
+        Some(index)
     }
 
     fn load_image(&mut self, path: &Path) -> Option<usize> {

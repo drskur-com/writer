@@ -56,6 +56,37 @@ pub fn source(path: impl Into<PathBuf>, modified: u128, size: Pixels) -> ImageSo
     }))
 }
 
+/// `path`의 썸네일을 PNG로 만든다(긴 변 `side` px까지). 기다리는 동안 부른 스레드를 막으므로 백그라운드
+/// 작업(내보내기)에서 부른다. 동영상은 macOS에서만 된다(첫 장면, ADR-0050).
+pub fn png(path: &std::path::Path, side: u32) -> Option<Vec<u8>> {
+    let key = ThumbnailKey {
+        path: path.to_path_buf(),
+        modified: 0,
+        size: side.max(1),
+    };
+    #[cfg(target_os = "macos")]
+    let frame = futures::executor::block_on(macos::request(&key).ok()?)
+        .ok()?
+        .ok()?;
+    #[cfg(not(target_os = "macos"))]
+    let frame = Frame::new(
+        image::open(&key.path)
+            .ok()?
+            .thumbnail(key.size, key.size)
+            .into_rgba8(),
+    );
+    let mut rgba = frame.into_buffer();
+    // macOS 썸네일은 BGRA다.
+    #[cfg(target_os = "macos")]
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    let mut out = Vec::new();
+    rgba.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .ok()?;
+    Some(out)
+}
+
 fn error(message: impl Into<SharedString>) -> ImageCacheError {
     ImageCacheError::Asset(message.into())
 }

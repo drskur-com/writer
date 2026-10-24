@@ -1815,6 +1815,7 @@ return {
         let document = crate::export::pdf::PdfDocument {
             title: "그림".into(),
             authors: Vec::new(),
+            attachments: Vec::new(),
             pages: vec![crate::export::pdf::PdfPage {
                 width: 100.,
                 height: 100.,

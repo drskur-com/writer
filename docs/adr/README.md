@@ -61,6 +61,7 @@
 | [0047](./0047-library-themes.md) | 시스템 테마 4개는 바이너리에 두고, 라이브러리 `Themes/*.json`의 테마를 더한다 | Proposed | 2026-10-23 |
 | [0048](./0048-alibaba-token-plan.md) | 어시스턴트 제공자에 Alibaba Token Plan을 더하고, OpenAI 호환 Chat 와이어로 같은 도구 루프를 돈다 | Proposed | 2026-10-23 |
 | [0049](./0049-editor-animated-gif.md) | 움직이는 GIF는 원본을 압축된 채 들고 필요한 프레임만 푼다(에디터 재생, 확장의 `img:frameAt(t)`) | Proposed | 2026-10-24 |
+| [0050](./0050-editor-video-audio.md) | 동영상·오디오는 이미지 줄 문법으로 넣고, 에디터에서 재생하며, ePub에는 재생 요소로, PDF에는 포스터와 첨부파일로 내보낸다 | Proposed | 2026-10-24 |
 
 ## 작성 규칙
 

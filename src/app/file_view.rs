@@ -51,6 +51,8 @@ fn kind_label(file: &library::FileItem) -> String {
         .unwrap_or_default();
     match file.kind {
         library::FileKind::Image => t!("library.file.kind_image", ext = extension).to_string(),
+        library::FileKind::Video => t!("library.file.kind_video", ext = extension).to_string(),
+        library::FileKind::Audio => t!("library.file.kind_audio", ext = extension).to_string(),
         library::FileKind::Text => t!("library.file.kind_text").to_string(),
         library::FileKind::Pdf => t!("library.file.kind_pdf").to_string(),
         library::FileKind::Other if extension.is_empty() => {
@@ -64,6 +66,8 @@ fn kind_label(file: &library::FileItem) -> String {
 fn kind_filter_title(kind: library::FileKind) -> SharedString {
     match kind {
         library::FileKind::Image => t!("library.file.filter_image"),
+        library::FileKind::Video => t!("library.file.filter_video"),
+        library::FileKind::Audio => t!("library.file.filter_audio"),
         library::FileKind::Text => t!("library.file.filter_text"),
         library::FileKind::Pdf | library::FileKind::Other => t!("library.file.filter_other"),
     }
@@ -214,7 +218,8 @@ impl WriterApp {
                 .rounded_sm()
                 .bg(pal.panel)
                 .map(|this| match file.kind {
-                    library::FileKind::Image => this.child(
+                    // 동영상도 QuickLook 썸네일(첫 장면)이 있다(macOS).
+                    library::FileKind::Image | library::FileKind::Video => this.child(
                         img(crate::thumbnail::source(
                             file.path.clone(),
                             file.modified,
@@ -223,7 +228,7 @@ impl WriterApp {
                         .size_full()
                         .object_fit(ObjectFit::Cover)
                         .with_fallback(move || {
-                            Icon::new(icons::file_kind(library::FileKind::Image))
+                            Icon::new(icons::file_kind(file.kind))
                                 .text_color(pal.muted)
                                 .into_any_element()
                         }),

@@ -111,8 +111,16 @@ impl std::fmt::Debug for PageDrawing {
 /// 그릴 이미지.
 #[derive(Clone, Debug)]
 pub(super) enum ImageFile {
-    File { path: PathBuf, modified: u128 },
+    File {
+        path: PathBuf,
+        modified: u128,
+    },
     Url(SharedUri),
+    /// 동영상(ADR-0050): 화면에는 포스터(첫 장면)와 재생 표시를, PDF에는 포스터를 그린다.
+    Video {
+        path: PathBuf,
+        modified: u128,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -135,6 +143,8 @@ pub(super) struct BookLayout {
     pub setup: PageSetup,
     pub pages: Vec<Page>,
     pub toc: Vec<TocEntry>,
+    /// 본문에 넣은 동영상·오디오 파일(나온 순서, 한 번씩). PDF는 첨부파일로 넣는다(ADR-0050).
+    pub media: Vec<PathBuf>,
 }
 
 /// 원고를 배치한다. PDF는 표지 → 속표지 → 선택적 차례 → 본문, ePub은 표지 → 속표지 → 본문 순이다.
@@ -203,7 +213,12 @@ pub(super) fn layout_book(
     let mut pages = front;
     pages.extend(toc_pages);
     pages.extend(body.pages);
-    BookLayout { setup, pages, toc }
+    BookLayout {
+        setup,
+        pages,
+        toc,
+        media: body.media,
+    }
 }
 
 /// 글자 모양 하나(대상 스타일을 배치 단위로 옮긴 것).
@@ -272,6 +287,7 @@ struct Body {
     toc: Vec<TocEntry>,
     /// 쪽 번호를 찍지 않는 페이지.
     no_folio: Vec<usize>,
+    media: Vec<PathBuf>,
 }
 
 /// 페이지를 채워 가는 배치기.
@@ -294,6 +310,8 @@ struct Flow<'a> {
     dir: PathBuf,
     /// 확장 블록 그림. 없으면 확장 블록은 코드 블록이다.
     drawings: Option<&'a super::Drawings>,
+    /// 본문의 동영상·오디오 파일.
+    media: Vec<PathBuf>,
 }
 
 impl<'a> Flow<'a> {
@@ -317,6 +335,7 @@ impl<'a> Flow<'a> {
             numbers: library::HeadingNumbers::default(),
             dir: PathBuf::new(),
             drawings: None,
+            media: Vec::new(),
         }
     }
 
@@ -512,6 +531,7 @@ impl<'a> Flow<'a> {
             pages: self.pages,
             toc: self.toc,
             no_folio: self.no_folio,
+            media: self.media,
         }
     }
 
@@ -1146,7 +1166,15 @@ impl<'a> Flow<'a> {
             after: px(0.),
             ..self.body_style().scaled(0.85)
         };
-        let file = image_source(&self.dir, &image.destination);
+        let kind = crate::media::kind_of(&image.destination);
+        if kind == Some(crate::media::MediaKind::Audio) {
+            self.audio(image, ctx);
+            return;
+        }
+        let file = match kind {
+            Some(_) => self.video_source(&image.destination),
+            None => image_source(&self.dir, &image.destination),
+        };
         let Some(file) = file else {
             let style = TextStyle {
                 align: Align::Left,
@@ -1156,7 +1184,11 @@ impl<'a> Flow<'a> {
             };
             self.space(self.em(0.5));
             let top = self.reserve(style.line_height, px(0.));
-            let text = format!("[이미지를 찾을 수 없음: {}]", image.destination);
+            let text = if kind.is_some() {
+                format!("[미디어를 찾을 수 없음: {}]", image.destination)
+            } else {
+                format!("[이미지를 찾을 수 없음: {}]", image.destination)
+            };
             self.place_text(&markdown::plain(text), &style, ctx.left, ctx.width, top);
             self.space(self.em(0.5));
             return;
@@ -1247,6 +1279,89 @@ impl<'a> Flow<'a> {
                 top + shown.height + self.em(0.5),
             );
         }
+        self.space(self.em(1.));
+    }
+
+    /// 동영상 파일 → 포스터로 그릴 이미지. 크기는 헤더에서 읽고, 모르면 16:9다. 웹 주소·없는 파일은 `None`.
+    fn video_source(&mut self, destination: &str) -> Option<ResolvedImage> {
+        if library::is_web_address(destination) {
+            return None;
+        }
+        let path = library::resolve_image_path(&self.dir, None, destination)?;
+        if !path.is_file() {
+            return None;
+        }
+        let size = crate::media::video_info(&path)
+            .map_or((640., 360.), |info| (info.width as f32, info.height as f32));
+        if !self.media.contains(&path) {
+            self.media.push(path.clone());
+        }
+        Some(ResolvedImage {
+            source: ImageFile::Video {
+                modified: library::modified_nanos(&path),
+                path,
+            },
+            size: Some(size),
+        })
+    }
+
+    /// 오디오: 옅은 칸 안에 `♪ 제목`(캡션, 없으면 파일 이름) 한 줄. PDF에는 파일을 첨부한다.
+    fn audio(&mut self, image: &ImageLine, ctx: &Context) {
+        let path = (!library::is_web_address(&image.destination))
+            .then(|| library::resolve_image_path(&self.dir, None, &image.destination))
+            .flatten()
+            .filter(|path| path.is_file());
+        let style = TextStyle {
+            align: Align::Left,
+            indent: px(0.),
+            color: MUTED_INK,
+            before: px(0.),
+            after: px(0.),
+            ..self.body_style().scaled(0.9)
+        };
+        let Some(path) = path else {
+            self.space(self.em(0.5));
+            let top = self.reserve(style.line_height, px(0.));
+            let text = format!("[미디어를 찾을 수 없음: {}]", image.destination);
+            self.place_text(&markdown::plain(text), &style, ctx.left, ctx.width, top);
+            self.space(self.em(0.5));
+            return;
+        };
+        let title = match image.alt.trim() {
+            "" => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            caption => caption.to_string(),
+        };
+        if !self.media.contains(&path) {
+            self.media.push(path);
+        }
+        let pad = self.em(0.6);
+        let height = style.line_height + pad * 2.;
+        let width = image
+            .options
+            .width
+            .map_or(ctx.width, |width| px(width as f32 * self.setup.px))
+            .min(ctx.width);
+        let left = match image.options.align {
+            ImageAlign::Left => ctx.left,
+            ImageAlign::Center => ctx.left + (ctx.width - width) / 2.,
+            ImageAlign::Right => ctx.left + ctx.width - width,
+        };
+        self.space(self.em(1.));
+        let top = self.reserve(height, px(0.));
+        self.page.items.push(Item::Rule {
+            bounds: Bounds::new(point(left, top), size(width, height)),
+            color: MUTED_INK.opacity(0.12),
+        });
+        self.place_text(
+            &markdown::plain(format!("♪ {title}")),
+            &style,
+            left + pad,
+            width - pad * 2.,
+            top + pad,
+        );
         self.space(self.em(1.));
     }
 

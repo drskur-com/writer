@@ -6,10 +6,10 @@ use gpui_kit::gpui::*;
 #[cfg(target_os = "macos")]
 use crate::APP_NAME;
 use crate::{
-    CloseLibrary, CompileProject, InsertExtension, InsertFootnote, InsertImage, InsertSpecialChar,
-    InsertTable, ManageExtensions, NewSheet, OpenLibrary, OpenSettings, QuitApp,
-    RunExtensionCommand, SaveSheet, SetTheme, ShowAbout, ToggleBold, ToggleItalic, ToggleLineGroup,
-    TogglePreview, ToggleSidebar, ToggleTheme, theme,
+    CloseLibrary, CompileProject, InsertAudio, InsertExtension, InsertFootnote, InsertImage,
+    InsertSpecialChar, InsertTable, InsertVideo, ManageExtensions, NewSheet, OpenLibrary,
+    OpenSettings, QuitApp, RunExtensionCommand, SaveSheet, SetTheme, ShowAbout, ToggleAssistant,
+    ToggleBold, ToggleItalic, ToggleLineGroup, ToggleSidebar, theme,
 };
 
 /// 메뉴 트리.
@@ -23,6 +23,7 @@ use crate::{
 pub(crate) fn build_menus(
     theme_names: &[SharedString],
     active_theme: &str,
+    panels: PanelsVisible,
     extension_commands: &[(String, usize, String)],
 ) -> Vec<Menu> {
     let theme_items: Vec<MenuItem> = theme_names
@@ -86,6 +87,8 @@ pub(crate) fn build_menus(
 
     menus.push(Menu::new(t!("menu.insert")).items([
         MenuItem::action(t!("menu.insert_image"), InsertImage),
+        MenuItem::action(t!("menu.insert_video"), InsertVideo),
+        MenuItem::action(t!("menu.insert_audio"), InsertAudio),
         MenuItem::action(t!("menu.insert_table"), InsertTable),
         MenuItem::action(t!("menu.insert_footnote"), InsertFootnote),
         MenuItem::action(t!("menu.insert_extension"), InsertExtension),
@@ -119,10 +122,19 @@ pub(crate) fn build_menus(
         menus.push(Menu::new(t!("menu.extensions")).items(items));
     }
 
+    let sidebar_label = if panels.sidebar {
+        t!("menu.hide_sidebar")
+    } else {
+        t!("menu.show_sidebar")
+    };
+    let assistant_label = if panels.assistant {
+        t!("menu.hide_assistant")
+    } else {
+        t!("menu.show_assistant")
+    };
     let mut view_items = vec![
-        MenuItem::action(t!("menu.toggle_sidebar"), ToggleSidebar),
-        MenuItem::action(t!("menu.toggle_preview"), TogglePreview),
-        MenuItem::action(t!("menu.toggle_theme"), ToggleTheme),
+        MenuItem::action(sidebar_label, ToggleSidebar),
+        MenuItem::action(assistant_label, ToggleAssistant),
     ];
     if !theme_items.is_empty() {
         view_items.push(MenuItem::separator());
@@ -143,7 +155,25 @@ pub(crate) struct ExtensionCommands(pub(crate) Vec<(String, usize, String)>);
 
 impl Global for ExtensionCommands {}
 
-/// 현재 테마와 확장 명령을 반영해 앱 메뉴를 (재)설치한다.
+/// 사이드바(보관함)와 AI 어시스턴트 패널이 보이는지. `View`의 보기/가리기 항목 이름을 정할 때 읽는다.
+#[derive(Clone, Copy)]
+pub(crate) struct PanelsVisible {
+    pub(crate) sidebar: bool,
+    pub(crate) assistant: bool,
+}
+
+impl Default for PanelsVisible {
+    fn default() -> Self {
+        Self {
+            sidebar: true,
+            assistant: false,
+        }
+    }
+}
+
+impl Global for PanelsVisible {}
+
+/// 현재 테마, 패널 상태, 확장 명령을 반영해 앱 메뉴를 (재)설치한다.
 pub(crate) fn install_menus(cx: &mut App) {
     let theme_names = theme::theme_names(cx);
     let active = theme::active_name(cx);
@@ -151,9 +181,13 @@ pub(crate) fn install_menus(cx: &mut App) {
         .try_global::<ExtensionCommands>()
         .map(|commands| commands.0.clone())
         .unwrap_or_default();
+    let panels = cx
+        .try_global::<PanelsVisible>()
+        .copied()
+        .unwrap_or_default();
 
-    cx.set_menus(build_menus(&theme_names, &active, &commands));
-    let owned: Vec<OwnedMenu> = build_menus(&theme_names, &active, &commands)
+    cx.set_menus(build_menus(&theme_names, &active, panels, &commands));
+    let owned: Vec<OwnedMenu> = build_menus(&theme_names, &active, panels, &commands)
         .into_iter()
         .map(|menu| menu.owned())
         .collect();

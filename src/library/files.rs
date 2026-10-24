@@ -39,6 +39,10 @@ impl GroupKind {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FileKind {
     Image,
+    /// 동영상(ADR-0050).
+    Video,
+    /// 오디오(ADR-0050).
+    Audio,
     Text,
     Pdf,
     Other,
@@ -46,7 +50,13 @@ pub enum FileKind {
 
 impl FileKind {
     /// 필터 메뉴에 보이는 종류. PDF는 아직 따로 거르지 않고 기타에 넣는다.
-    pub const FILTERS: [FileKind; 3] = [FileKind::Image, FileKind::Text, FileKind::Other];
+    pub const FILTERS: [FileKind; 5] = [
+        FileKind::Image,
+        FileKind::Video,
+        FileKind::Audio,
+        FileKind::Text,
+        FileKind::Other,
+    ];
 
     /// 필터에서 묶이는 종류(PDF → 기타).
     pub fn filter_kind(self) -> Self {
@@ -69,6 +79,8 @@ impl FileKind {
             "txt" | "md" | "markdown" | "csv" | "json" | "toml" | "yaml" | "yml" | "xml"
             | "html" | "htm" | "css" => FileKind::Text,
             "pdf" => FileKind::Pdf,
+            ext if crate::media::VIDEO_EXTENSIONS.contains(&ext) => FileKind::Video,
+            ext if crate::media::AUDIO_EXTENSIONS.contains(&ext) => FileKind::Audio,
             _ => FileKind::Other,
         }
     }

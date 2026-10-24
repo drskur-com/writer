@@ -8,7 +8,11 @@
 //! 이미 첨부파일 그룹에 있는 이미지는 "첨부파일" 탭에서 골라 복사 없이 다시 쓴다.
 //! 웹 주소 이미지도 내려받아 첨부파일로 넣는다(미리보기·PDF·ePub이 오프라인에서 같도록).
 //! 라이브러리 밖의 시트에는 첨부파일 그룹이 없어서 원본 파일의 절대 경로와 주소를 그대로 쓴다.
+//!
+//! 동영상·오디오(ADR-0050)도 같은 대화상자로 넣는다. 문법은 이미지와 같고 확장자로 가른다. 웹 주소 탭은
+//! 없고(파일로 넣어야 내보내기에 들어간다), 오디오는 크기·한 페이지 가득을 쓰지 않는다.
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::DialogFooter;
@@ -27,7 +31,8 @@ use super::WriterApp;
 use super::new_project::form_row;
 use super::style::*;
 use crate::markdown::{ImageAlign, ImageOptions};
-use crate::{InsertImage, icons, library, markdown};
+use crate::media::{self, MediaKind};
+use crate::{InsertAudio, InsertImage, InsertVideo, icons, library, markdown};
 
 /// 대화상자 폭.
 const DIALOG_WIDTH: f32 = 520.0;
@@ -105,6 +110,8 @@ struct EditImage {
 
 /// 대화상자 안의 입력 상태.
 struct InsertImageForm {
+    /// 넣을 것의 종류. `None`이면 이미지.
+    kind: Option<MediaKind>,
     edit: Option<EditImage>,
     sheet: PathBuf,
     source: Source,
@@ -152,8 +159,35 @@ fn size_value(input: &Entity<InputState>, cx: &App) -> Option<u32> {
         .filter(|&value| value > 0)
 }
 
+/// 종류마다 다른 문구의 번역 키(`insert.image.*`·`insert.video.*`·`insert.audio.*`).
+fn kind_key(kind: Option<MediaKind>, name: &str) -> String {
+    let prefix = match kind {
+        None => "insert.image",
+        Some(MediaKind::Video) => "insert.video",
+        Some(MediaKind::Audio) => "insert.audio",
+    };
+    format!("{prefix}.{name}")
+}
+
+/// 종류마다 다른 문구.
+fn kind_text(kind: Option<MediaKind>, name: &str) -> SharedString {
+    let key = kind_key(kind, name);
+    let text = t!(&key).to_string();
+    text.into()
+}
+
+/// 종류의 아이콘.
+fn kind_icon(kind: Option<MediaKind>) -> IconName {
+    match kind {
+        None => icons::image(),
+        Some(MediaKind::Video) => icons::video(),
+        Some(MediaKind::Audio) => icons::audio(),
+    }
+}
+
 impl InsertImageForm {
     fn new(
+        kind: Option<MediaKind>,
         app: WeakEntity<WriterApp>,
         sheet: PathBuf,
         attachments: Option<Vec<library::FileItem>>,
@@ -164,7 +198,7 @@ impl InsertImageForm {
         let width = size_input(window, cx);
         let height = size_input(window, cx);
         let caption = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(t!("insert.image.caption_placeholder"))
+            InputState::new(window, cx).placeholder(kind_text(kind, "caption_placeholder"))
         });
         // 입력 칸의 Enter는 대화상자의 확인(Confirm)으로 올라가 `.on_ok`가 맡는다. 여기서 따로
         // 구독하면 확인과 겹쳐 이미지가 두 번 들어갈 수 있다.
@@ -182,14 +216,19 @@ impl InsertImageForm {
                 },
             ));
         }
+        let mut tabs = match attachments {
+            Some(_) => vec![Source::File, Source::Attachment, Source::Url],
+            None => vec![Source::File, Source::Url],
+        };
+        if kind.is_some() {
+            tabs.retain(|tab| *tab != Source::Url);
+        }
         Self {
+            kind,
             edit: None,
             sheet,
             source: Source::File,
-            tabs: match attachments {
-                Some(_) => vec![Source::File, Source::Attachment, Source::Url],
-                None => vec![Source::File, Source::Url],
-            },
+            tabs,
             file: None,
             file_modified: 0,
             file_error: None,
@@ -218,8 +257,16 @@ impl InsertImageForm {
         }
     }
 
-    /// 고른 이미지의 원본 크기(px). URL이거나 읽지 못하면 `None`.
+    /// 고른 이미지(동영상)의 원본 크기(px). URL·오디오이거나 읽지 못하면 `None`.
     fn natural_size(&self) -> Option<(u32, u32)> {
+        match self.kind {
+            Some(MediaKind::Video) => {
+                let info = media::video_info(self.local_path()?)?;
+                return Some((info.width, info.height));
+            }
+            Some(MediaKind::Audio) => return None,
+            None => {}
+        }
         let size = imagesize::size(self.local_path()?).ok()?;
         let (width, height) = (
             u32::try_from(size.width).ok()?,
@@ -277,7 +324,7 @@ impl InsertImageForm {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some(t!("insert.image.choose_prompt").into()),
+            prompt: Some(kind_text(self.kind, "choose_prompt")),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = receiver.await else {
@@ -289,12 +336,18 @@ impl InsertImageForm {
         .detach();
     }
 
-    /// 고른(끌어다 놓은) 파일 중 첫 이미지를 쓴다. 이미지가 없으면 안내를 띄운다.
+    /// 고른(끌어다 놓은) 파일 중 첫 이미지(동영상·오디오)를 쓴다. 없으면 안내를 띄운다.
     fn use_file(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        let kind = self.kind;
         let image = paths.iter().find(|path| {
-            path.extension()
-                .map(|ext| ext.to_string_lossy().to_lowercase())
-                .is_some_and(|ext| library::COVER_EXTENSIONS.contains(&ext.as_str()))
+            let path_str = path.to_string_lossy();
+            match kind {
+                Some(kind) => media::kind_of(&path_str) == Some(kind),
+                None => path
+                    .extension()
+                    .map(|ext| ext.to_string_lossy().to_lowercase())
+                    .is_some_and(|ext| library::COVER_EXTENSIONS.contains(&ext.as_str())),
+            }
         });
         match image {
             Some(path) => {
@@ -304,7 +357,7 @@ impl InsertImageForm {
                 self.refit_size(window, cx);
             }
             None => {
-                self.file_error = Some(t!("insert.image.unsupported").into());
+                self.file_error = Some(kind_text(self.kind, "unsupported"));
             }
         }
         cx.notify();
@@ -425,6 +478,21 @@ impl InsertImageForm {
             }))
             .on_click(cx.listener(|this, _, window, cx| this.pick_file(window, cx)))
             .map(|this| match &self.file {
+                Some(path) if self.kind == Some(MediaKind::Audio) => this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_2()
+                        .text_sm()
+                        .text_color(pal.muted)
+                        .child(Icon::new(icons::audio()).large())
+                        .child(
+                            path.file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                        ),
+                ),
                 Some(path) => this.child(
                     img(crate::thumbnail::source(
                         path.clone(),
@@ -447,8 +515,8 @@ impl InsertImageForm {
                         .gap_2()
                         .text_sm()
                         .text_color(pal.muted)
-                        .child(Icon::new(icons::image()).large())
-                        .child(t!("insert.image.drop_hint")),
+                        .child(Icon::new(kind_icon(self.kind)).large())
+                        .child(kind_text(self.kind, "drop_hint")),
                 ),
             });
         let status = match (&self.file_error, &self.file) {
@@ -508,9 +576,10 @@ impl InsertImageForm {
                 .text_sm()
                 .text_color(pal.muted)
                 .child(Icon::new(icons::attachments()).large())
-                .child(t!("insert.image.no_attachments"))
+                .child(kind_text(self.kind, "no_attachments"))
                 .into_any_element();
         }
+        let fallback_kind = self.kind;
         let thumbnails = self.attachments.iter().enumerate().map(|(ix, file)| {
             let selected = self.attachment.as_ref() == Some(&file.path);
             let picked = file.path.clone();
@@ -545,8 +614,12 @@ impl InsertImageForm {
                     .size_full()
                     .object_fit(ObjectFit::Cover)
                     .with_fallback(move || {
-                        Icon::new(icons::image())
-                            .text_color(pal.muted)
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(Icon::new(kind_icon(fallback_kind)).text_color(pal.muted))
                             .into_any_element()
                     }),
                 )
@@ -686,7 +759,7 @@ impl Render for InsertImageForm {
             })
             .children(self.tabs.iter().map(|tab| {
                 let (icon, label) = match tab {
-                    Source::File => (icons::image(), t!("insert.image.tab_file")),
+                    Source::File => (kind_icon(self.kind), t!("insert.image.tab_file")),
                     Source::Attachment => {
                         (icons::attachments(), t!("insert.image.tab_attachments"))
                     }
@@ -729,6 +802,9 @@ impl Render for InsertImageForm {
         let layout_disabled = self.full_page;
         let size = self.render_size(pal, layout_disabled, cx);
         let align = self.render_align(layout_disabled, cx);
+        // 오디오는 카드라 크기를 고르지 않는다. 한 페이지 가득은 이미지만 쓴다.
+        let sized = self.kind != Some(MediaKind::Audio);
+        let full_page = self.kind.is_none();
         div()
             .flex()
             .flex_col()
@@ -741,14 +817,18 @@ impl Render for InsertImageForm {
                     .flex_col()
                     .gap_4()
                     .when(layout_disabled, |this| this.opacity(0.5))
-                    .child(form_row(pal, t!("insert.image.size"), size))
+                    .when(sized, |this| {
+                        this.child(form_row(pal, t!("insert.image.size"), size))
+                    })
                     .child(form_row(pal, t!("insert.image.align"), align)),
             )
-            .child(form_row(
-                pal,
-                t!("insert.image.placement"),
-                self.render_full_page(pal, cx),
-            ))
+            .when(full_page, |this| {
+                this.child(form_row(
+                    pal,
+                    t!("insert.image.placement"),
+                    self.render_full_page(pal, cx),
+                ))
+            })
             .child(form_row(
                 pal,
                 t!("insert.image.caption"),
@@ -773,7 +853,39 @@ impl WriterApp {
             self.notify(t!("common.open_sheet_first"), window, cx);
             return;
         };
-        self.open_image_dialog(sheet, None, window, cx);
+        self.open_image_dialog(sheet, None, None, window, cx);
+    }
+
+    /// 동영상 삽입 대화상자를 연다(ADR-0050).
+    pub(super) fn on_insert_video(
+        &mut self,
+        _: &InsertVideo,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_media_dialog(MediaKind::Video, window, cx);
+    }
+
+    /// 오디오 삽입 대화상자를 연다(ADR-0050).
+    pub(super) fn on_insert_audio(
+        &mut self,
+        _: &InsertAudio,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_media_dialog(MediaKind::Audio, window, cx);
+    }
+
+    fn open_media_dialog(&mut self, kind: MediaKind, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sheet) = self
+            .editor
+            .as_ref()
+            .map(|editor| editor.path().to_path_buf())
+        else {
+            self.notify(t!("common.open_sheet_first"), window, cx);
+            return;
+        };
+        self.open_image_dialog(sheet, Some(kind), None, window, cx);
     }
 
     pub(super) fn edit_image(
@@ -832,12 +944,14 @@ impl WriterApp {
             source,
             path,
         };
-        self.open_image_dialog(sheet.to_path_buf(), Some(edit), window, cx);
+        let kind = media::kind_of(&edit.destination);
+        self.open_image_dialog(sheet.to_path_buf(), kind, Some(edit), window, cx);
     }
 
     fn open_image_dialog(
         &mut self,
         sheet: PathBuf,
+        kind: Option<MediaKind>,
         edit: Option<EditImage>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -848,7 +962,14 @@ impl WriterApp {
                     group
                         .files
                         .into_iter()
-                        .filter(|file| file.kind == library::FileKind::Image)
+                        .filter(|file| {
+                            file.kind
+                                == match kind {
+                                    None => library::FileKind::Image,
+                                    Some(MediaKind::Video) => library::FileKind::Video,
+                                    Some(MediaKind::Audio) => library::FileKind::Audio,
+                                }
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
@@ -856,7 +977,7 @@ impl WriterApp {
         let app = cx.entity().downgrade();
         let editing = edit.is_some();
         let form = cx.new(|cx| {
-            let mut form = InsertImageForm::new(app, sheet, attachments, window, cx);
+            let mut form = InsertImageForm::new(kind, app, sheet, attachments, window, cx);
             if let Some(edit) = edit {
                 let image = markdown::image_line(&edit.original).unwrap();
                 form.source = edit.source;
@@ -911,9 +1032,9 @@ impl WriterApp {
             dialog
                 .w(px(DIALOG_WIDTH))
                 .title(if editing {
-                    t!("insert.image.edit_title")
+                    kind_text(kind, "edit_title")
                 } else {
-                    t!("insert.image.insert_title")
+                    kind_text(kind, "insert_title")
                 })
                 .close_button(false)
                 // Enter는 대화상자의 확인(Confirm)이다. 넣었거나 내려받기를 시작했으면 `submit`이

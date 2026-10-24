@@ -1,6 +1,7 @@
 //! 배치한 페이지 하나를 그린다. 글자·선은 canvas로, 이미지는 그 위에 겹친 `img`로 그린다.
 
 use gpui_kit::component::{Icon, Sizable as _};
+use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::rc::Rc;
 
@@ -50,12 +51,15 @@ pub(super) fn page(layout: Rc<BookLayout>, index: usize, scale: f32) -> AnyEleme
                 } else {
                     ObjectFit::Contain
                 };
+                let video = matches!(source, ImageFile::Video { .. });
                 let source: ImageSource = match source {
-                    ImageFile::File { path, modified } => crate::thumbnail::source(
-                        path.clone(),
-                        *modified,
-                        bounds.size.width.max(bounds.size.height),
-                    ),
+                    ImageFile::File { path, modified } | ImageFile::Video { path, modified } => {
+                        crate::thumbnail::source(
+                            path.clone(),
+                            *modified,
+                            bounds.size.width.max(bounds.size.height),
+                        )
+                    }
                     ImageFile::Url(uri) => uri.clone().into(),
                 };
                 Some(
@@ -89,6 +93,30 @@ pub(super) fn page(layout: Rc<BookLayout>, index: usize, scale: f32) -> AnyEleme
                                         .into_any_element()
                                 }),
                         )
+                        // 동영상은 포스터 가운데에 재생 표시를 겹친다(ADR-0050).
+                        .when(video, |this| {
+                            let badge = (bounds.size.width.min(bounds.size.height) * 0.25)
+                                .clamp(px(12.), px(48.));
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .size_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        div()
+                                            .size(badge)
+                                            .rounded_full()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .bg(black().opacity(0.55))
+                                            .text_color(white())
+                                            .child(Icon::new(icons::play()).size(badge * 0.5)),
+                                    ),
+                            )
+                        })
                         .into_any_element(),
                 )
             }

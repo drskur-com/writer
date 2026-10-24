@@ -95,6 +95,26 @@ pub fn image() -> IconName {
     IconName::Image
 }
 
+/// 동영상(삽입 대화상자·에디터 안내).
+pub fn video() -> IconName {
+    IconName::Video
+}
+
+/// 오디오(삽입 대화상자·에디터의 오디오 카드).
+pub fn audio() -> IconName {
+    IconName::Music
+}
+
+/// 재생(동영상·오디오 재생 단추).
+pub fn play() -> IconName {
+    IconName::Play
+}
+
+/// 일시 정지.
+pub fn pause() -> IconName {
+    IconName::Pause
+}
+
 /// 첨부파일 그룹(이미지 삽입 대화상자의 "첨부파일" 탭). 그룹 메타 아이콘과 같다.
 pub fn attachments() -> IconName {
     by_name("paperclip")
@@ -105,6 +125,8 @@ pub fn file_kind(kind: crate::library::FileKind) -> IconName {
     use crate::library::FileKind;
     match kind {
         FileKind::Image => IconName::FileImage,
+        FileKind::Video => IconName::FileVideoCamera,
+        FileKind::Audio => IconName::FileVolume,
         FileKind::Text => IconName::FileText,
         FileKind::Pdf => IconName::FileText,
         FileKind::Other => IconName::File,

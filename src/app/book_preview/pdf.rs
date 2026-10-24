@@ -9,7 +9,8 @@ use super::layout::{self, BookLayout, ImageFile, Item};
 use super::{Paper, layout_fonts, load_selection, load_source};
 use crate::export::pdf::{PdfDocument, PdfItem, PdfPage, PdfRun};
 
-/// 배치한 페이지를 PDF 문서로 옮긴다. 웹 이미지는 넣지 않는다.
+/// 배치한 페이지를 PDF 문서로 옮긴다. 웹 이미지는 넣지 않는다. 동영상은 포스터로 그리고, 동영상·오디오 파일은
+/// 첨부파일로 넣는다(ADR-0050).
 pub(super) fn document(layout: &BookLayout, title: &str, authors: &[String]) -> PdfDocument {
     let setup = layout.setup;
     let pages = layout
@@ -25,6 +26,7 @@ pub(super) fn document(layout: &BookLayout, title: &str, authors: &[String]) -> 
         title: title.to_string(),
         authors: authors.to_vec(),
         pages,
+        attachments: layout.media.clone(),
     }
 }
 
@@ -65,6 +67,17 @@ fn item(item: &Item) -> Option<PdfItem> {
             height: f32::from(bounds.size.height),
             path: path.clone(),
             cover: *cover,
+        },
+        Item::Image {
+            bounds,
+            source: ImageFile::Video { path, .. },
+            ..
+        } => PdfItem::Video {
+            x: f32::from(bounds.origin.x),
+            y: f32::from(bounds.origin.y),
+            width: f32::from(bounds.size.width),
+            height: f32::from(bounds.size.height),
+            path: path.clone(),
         },
         Item::Image {
             source: ImageFile::Url(_),

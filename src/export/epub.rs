@@ -212,6 +212,151 @@ impl<'a> EpubBuilder<'a> {
         format!("../{filename}")
     }
 
+    /// 동영상·오디오 파일을 `media/`에 넣고 섹션 파일에서 본 상대 경로를 돌려준다(ADR-0050). 같은 파일은 한 번만.
+    fn embed_media(&mut self, path: PathBuf) -> String {
+        let key = format!("media\u{0}{}", path.to_string_lossy());
+        if let Some(existing) = self.image_dest_map.get(&key) {
+            return format!("../{existing}");
+        }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("bin")
+            .to_ascii_lowercase();
+        self.image_counter += 1;
+        let filename = format!("media/media_{:04}.{ext}", self.image_counter);
+        self.images.push(ImageAsset {
+            id: format!("media_{}", self.image_counter),
+            zip_path: filename.clone(),
+            media_type: crate::media::mime_type(&path),
+            source: AssetSource::File(path),
+            is_cover: false,
+        });
+        self.image_dest_map.insert(key, filename.clone());
+        format!("../{filename}")
+    }
+
+    /// 동영상 포스터(첫 장면 PNG)를 넣고 경로를 돌려준다. 만들 수 없으면(macOS 밖 등) `None`.
+    fn embed_poster(&mut self, path: &Path) -> Option<String> {
+        let key = format!("poster\u{0}{}", path.to_string_lossy());
+        if let Some(existing) = self.image_dest_map.get(&key) {
+            return Some(format!("../{existing}"));
+        }
+        let png = crate::media::poster_png(path)?;
+        self.image_counter += 1;
+        let filename = format!("images/poster_{:04}.png", self.image_counter);
+        self.images.push(ImageAsset {
+            id: format!("img_{}", self.image_counter),
+            zip_path: filename.clone(),
+            source: AssetSource::Bytes(png),
+            media_type: "image/png",
+            is_cover: false,
+        });
+        self.image_dest_map.insert(key, filename.clone());
+        Some(format!("../{filename}"))
+    }
+
+    /// 동영상·오디오 줄: `<video>`·`<audio>`로 넣는다. 재생하지 못하는 리더는 안쪽의 포스터·캡션을 보인다.
+    /// 웹 주소는 링크로, 찾지 못한 파일은 안내 문단으로 둔다.
+    fn media(
+        &mut self,
+        img: &crate::markdown::ImageLine,
+        kind: crate::media::MediaKind,
+        sheet_dir: &Path,
+    ) {
+        use crate::media::MediaKind;
+        let caption = img.alt.trim();
+        if crate::library::is_web_address(&img.destination) {
+            let label = if caption.is_empty() {
+                img.destination.as_str()
+            } else {
+                caption
+            };
+            let sec = self.ensure_section(&self.project.name);
+            sec.html_body.push_str(&format!(
+                "<p class=\"media-link\"><a href=\"{}\">{}</a></p>\n",
+                escape_xml(&img.destination),
+                escape_xml(label)
+            ));
+            return;
+        }
+        let Some(path) = crate::library::resolve_image_path(
+            sheet_dir,
+            Some(&self.project.dir),
+            &img.destination,
+        )
+        .filter(|path| path.is_file()) else {
+            let sec = self.ensure_section(&self.project.name);
+            sec.html_body.push_str(&format!(
+                "<p class=\"missing-image\">[미디어를 찾을 수 없음: {}]</p>\n",
+                escape_xml(&img.destination)
+            ));
+            return;
+        };
+        let poster = match kind {
+            MediaKind::Video => self.embed_poster(&path),
+            MediaKind::Audio => None,
+        };
+        let src = self.embed_media(path);
+        let align = match img.options.align {
+            crate::markdown::ImageAlign::Left => "align-left",
+            crate::markdown::ImageAlign::Center => "align-center",
+            crate::markdown::ImageAlign::Right => "align-right",
+        };
+        let mut style = String::new();
+        if let Some(w) = img.options.width {
+            style.push_str(&format!("width: {w}px; "));
+        }
+        if kind == MediaKind::Video
+            && let Some(h) = img.options.height
+        {
+            style.push_str(&format!("height: {h}px; "));
+        }
+        let style = if style.is_empty() {
+            String::new()
+        } else {
+            format!(" style=\"{}\"", style.trim())
+        };
+        // 재생하지 못하는 리더가 보일 내용.
+        let fallback = match &poster {
+            Some(poster) => format!(
+                "<img src=\"{}\" alt=\"{}\"/>",
+                escape_xml(poster),
+                escape_xml(caption)
+            ),
+            None if caption.is_empty() => String::new(),
+            None => escape_xml(caption),
+        };
+        let element = match kind {
+            MediaKind::Video => format!(
+                "  <video src=\"{}\" controls=\"controls\"{}{style}>{fallback}</video>\n",
+                escape_xml(&src),
+                poster
+                    .as_ref()
+                    .map(|poster| format!(" poster=\"{}\"", escape_xml(poster)))
+                    .unwrap_or_default(),
+            ),
+            MediaKind::Audio => format!(
+                "  <audio src=\"{}\" controls=\"controls\"{style}>{fallback}</audio>\n",
+                escape_xml(&src)
+            ),
+        };
+        let class = match kind {
+            MediaKind::Video => "video",
+            MediaKind::Audio => "audio",
+        };
+        let sec = self.ensure_section(&self.project.name);
+        sec.html_body
+            .push_str(&format!("<figure class=\"{class} {align}\">\n{element}"));
+        if !caption.is_empty() {
+            sec.html_body.push_str(&format!(
+                "  <figcaption>{}</figcaption>\n",
+                escape_xml(caption)
+            ));
+        }
+        sec.html_body.push_str("</figure>\n");
+    }
+
     /// 확장 블록 그림(`t = 0`, 밝은 테마)을 SVG로 넣고 경로를 돌려준다. 같은 이름·인자는 한 번만 넣는다.
     /// 내보내기에서 빼는 블록이면 `Ok(None)`, 그리지 못하면 `Err`(코드 블록으로 둔다).
     fn embed_drawing(
@@ -523,6 +668,10 @@ impl<'a> EpubBuilder<'a> {
                 sec.html_body.push_str("<pre><code>");
                 sec.html_body.push_str(&escape_xml(code));
                 sec.html_body.push_str("</code></pre>\n");
+            }
+            Block::Image(img) if crate::media::kind_of(&img.destination).is_some() => {
+                let kind = crate::media::kind_of(&img.destination).unwrap();
+                self.media(img, kind, sheet_dir);
             }
             Block::Image(img) => {
                 let resolved_path = crate::library::resolve_image_path(
@@ -1185,6 +1334,35 @@ li.task {{
   list-style: none;
 }}
 
+figure.video, figure.audio {{
+  margin: 1.5em 0;
+}}
+
+figure.video video {{
+  max-width: 100%;
+  height: auto;
+}}
+
+figure.video video img {{
+  max-width: 100%;
+  height: auto;
+}}
+
+figure.audio audio {{
+  width: 100%;
+  max-width: 30em;
+}}
+
+figure.video figcaption, figure.audio figcaption {{
+  font-size: 0.85em;
+  color: #666;
+  margin-top: 0.4em;
+}}
+
+p.media-link {{
+  margin: 1em 0;
+}}
+
 p.missing-image {{
   font-size: 0.85em;
   color: #666;
@@ -1794,6 +1972,8 @@ mod image_tests {
             std::fs::write(group.join(GROUP_META_FILE), "").unwrap();
         }
         std::fs::write(attachments.join("a.png"), b"\x89PNG\r\n\x1a\nimage").unwrap();
+        std::fs::write(attachments.join("a.mp3"), b"ID3 sound").unwrap();
+        std::fs::write(attachments.join("a.mp4"), b"not really a movie").unwrap();
         std::fs::create_dir_all(root.join("Extensions")).unwrap();
         std::fs::write(
             root.join("Extensions/dot.lua"),
@@ -1904,6 +2084,40 @@ mod image_tests {
         assert!(
             html.contains("[이미지를 찾을 수 없음: ../Extras/Attachments/없는.png]"),
             "{html}"
+        );
+    }
+
+    #[test]
+    fn audio_and_video_become_playable_elements_with_their_files() {
+        let mut archive = build_with(
+            "![주제가](../Extras/Attachments/a.mp3)\n\n![](../Extras/Attachments/a.mp4){width=320px}\n\n![없음](없는.mov)\n",
+        );
+        let html = section(&mut archive);
+        assert!(
+            html.contains(
+                r#"<audio src="../media/media_0001.mp3" controls="controls">주제가</audio>"#
+            ),
+            "{html}"
+        );
+        assert!(html.contains("<figcaption>주제가</figcaption>"), "{html}");
+        // 가짜 파일이라 포스터는 없다.
+        assert!(
+            html.contains(r#"<video src="../media/media_0002.mp4" controls="controls" style="width: 320px;"></video>"#),
+            "{html}"
+        );
+        assert!(html.contains("[미디어를 찾을 수 없음: 없는.mov]"), "{html}");
+        assert!(archive.by_name("OEBPS/media/media_0001.mp3").is_ok());
+        assert!(archive.by_name("OEBPS/media/media_0002.mp4").is_ok());
+        let mut opf = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("OEBPS/content.opf").unwrap(), &mut opf)
+            .unwrap();
+        assert!(
+            opf.contains(r#"href="media/media_0001.mp3" media-type="audio/mpeg""#),
+            "{opf}"
+        );
+        assert!(
+            opf.contains(r#"href="media/media_0002.mp4" media-type="video/mp4""#),
+            "{opf}"
         );
     }
 

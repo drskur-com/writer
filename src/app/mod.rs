@@ -27,6 +27,7 @@ mod insert_table;
 mod library_ops;
 mod library_panel;
 mod manage_extensions;
+mod media_player;
 mod new_project;
 mod onboarding;
 mod play_window;
@@ -43,11 +44,11 @@ use std::path::PathBuf;
 #[cfg(not(target_os = "macos"))]
 use gpui_kit::component::menu::AppMenuBar;
 
-use crate::menus::install_menus;
+use crate::menus::{PanelsVisible, install_menus};
 use crate::{
     APP_NAME, CloseLibrary, CompileProject, OpenLibrary, QuitApp, SaveSheet, SetTheme, ShowAbout,
-    ToggleBold, ToggleItalic, ToggleLineGroup, TogglePreview, ToggleSidebar, ToggleTheme, icons,
-    library, markdown, theme,
+    ToggleAssistant, ToggleBold, ToggleItalic, ToggleLineGroup, TogglePreview, ToggleSidebar,
+    ToggleTheme, icons, library, markdown, theme,
 };
 use style::*;
 
@@ -322,7 +323,31 @@ impl WriterApp {
     }
 
     fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_visible = !self.sidebar_visible;
+        self.set_sidebar_visible(!self.sidebar_visible, cx);
+    }
+
+    /// 사이드바를 보이거나 가리고, `View` 메뉴 항목 이름을 맞춘다.
+    pub(super) fn set_sidebar_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.sidebar_visible = visible;
+        self.sync_panel_menus(cx);
+    }
+
+    fn on_toggle_assistant(&mut self, _: &ToggleAssistant, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_assistant_visible(!self.assistant_visible, cx);
+    }
+
+    /// 어시스턴트 패널을 보이거나 가리고, `View` 메뉴 항목 이름을 맞춘다.
+    pub(super) fn set_assistant_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.assistant_visible = visible;
+        self.sync_panel_menus(cx);
+    }
+
+    fn sync_panel_menus(&self, cx: &mut Context<Self>) {
+        cx.set_global(PanelsVisible {
+            sidebar: self.sidebar_visible,
+            assistant: self.assistant_visible,
+        });
+        install_menus(cx);
         cx.notify();
     }
 
@@ -629,6 +654,8 @@ impl Render for WriterApp {
             .on_action(cx.listener(Self::on_save_sheet))
             .on_action(cx.listener(Self::on_compile_project))
             .on_action(cx.listener(Self::on_insert_image))
+            .on_action(cx.listener(Self::on_insert_video))
+            .on_action(cx.listener(Self::on_insert_audio))
             .on_action(cx.listener(Self::on_insert_footnote))
             .on_action(cx.listener(Self::on_insert_table))
             .on_action(cx.listener(Self::on_insert_extension))
@@ -638,6 +665,7 @@ impl Render for WriterApp {
             .on_action(cx.listener(Self::on_close_library))
             .on_action(cx.listener(Self::on_show_about))
             .on_action(cx.listener(Self::on_toggle_sidebar))
+            .on_action(cx.listener(Self::on_toggle_assistant))
             .on_action(cx.listener(Self::on_toggle_bold))
             .on_action(cx.listener(Self::on_toggle_italic))
             .on_action(cx.listener(Self::on_toggle_preview))

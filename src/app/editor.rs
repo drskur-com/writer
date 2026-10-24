@@ -429,8 +429,7 @@ impl WriterApp {
             this.child(tool_group(pal).child(
                 icon_button("show-sidebar", icons::panel(), true, pal).on_click(cx.listener(
                     |this, _, _, cx| {
-                        this.sidebar_visible = true;
-                        cx.notify();
+                        this.set_sidebar_visible(true, cx);
                     },
                 )),
             ))

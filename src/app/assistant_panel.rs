@@ -228,8 +228,7 @@ impl WriterApp {
             icon_button("toggle-assistant", icons::assistant(), true, pal)
                 .when(self.assistant_open(), |this| this.bg(pal.active))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.assistant_visible = !this.assistant_visible;
-                    cx.notify();
+                    this.set_assistant_visible(!this.assistant_visible, cx);
                 })),
         )
     }

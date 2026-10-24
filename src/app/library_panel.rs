@@ -375,8 +375,7 @@ impl WriterApp {
                 .child(
                     icon_button("hide-sidebar", icons::panel(), true, pal).on_click(cx.listener(
                         |this, _, _, cx| {
-                            this.sidebar_visible = false;
-                            cx.notify();
+                            this.set_sidebar_visible(false, cx);
                         },
                     )),
                 ),
