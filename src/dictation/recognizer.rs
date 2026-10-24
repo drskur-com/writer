@@ -5,7 +5,7 @@
 //! 문단마다 스트림을 새로 열어 오래 켜 두어도 스트림의 글이 한없이 자라지 않는다.
 //!
 //! 기록 파일은 녹음을 시작하기 전에 정한다(새 기록이면 미리 만들고, 지난 기록이면 그 끝에 잇는다).
-//! 파일 쓰기는 쓰기 스레드만 한다(번역을 켰으면 번역문과 원문 쌍으로). 멈추기를 기다리다 세션이 먼저 끝나도
+//! 파일 쓰기는 쓰기 스레드만 한다. 멈추기를 기다리다 세션이 먼저 끝나도
 //! 남은 소리를 마저 인식해 저장하고, 쓰기 스레드까지 다 쓰면 [`Event::Done`]을 알린다.
 
 use std::cell::{Cell, RefCell};
@@ -21,7 +21,7 @@ use gpui_kit::component::speech::{RecognitionSession, SpeechError, SpeechRecogni
 use gpui_kit::gpui::*;
 use transcribe_cpp::{Model, RunOptions, StreamOptions};
 
-use super::output::{Output, Record, TranslationSetup, write_out};
+use super::output::{Record, write_out};
 
 /// 모델이 받는 소리: 16 kHz 모노(gpui-kit `AudioFormat`의 기본값과 같다).
 const SAMPLE_RATE: usize = 16_000;
@@ -37,17 +37,8 @@ const MAX_PARAGRAPH_MS: i64 = 180_000;
 
 /// 받아쓰기를 쓰는 쪽에 알리는 일.
 pub enum Event {
-    /// 파일 끝에 원문을 덧붙였다. `text`는 덧붙인 줄, `originals`는 그 받아쓰기 원문.
-    Written {
-        text: SharedString,
-        originals: Vec<String>,
-    },
-    /// 에디터 본문의 `line`번째 줄(0부터) 앞에 번역·다듬은 줄(`> …`)을 끼워 넣었다.
-    Inserted { line: usize, text: SharedString },
-    /// 번역·다듬기 답을 기다리는 묶음 수.
-    Pending(usize),
-    /// 번역하지 못해 원문만 썼다.
-    TranslationFailed(SharedString),
+    /// 파일 끝에 받아 적은 문단을 한 줄로 덧붙였다.
+    Written(SharedString),
     /// 작업 스레드가 끝났다. 이제 기록 파일에 더 쓰지 않는다.
     Done,
 }
@@ -56,7 +47,7 @@ pub enum Event {
 enum WorkerEvent {
     Ready,
     Hypothesis(String),
-    Output(Output),
+    Written(String),
     Failed(String),
     Finished,
 }
@@ -70,8 +61,6 @@ pub struct NemotronRecognizer {
     pub model: PathBuf,
     /// 이번 녹음의 기록 파일. 녹음을 시작할 때 읽는다.
     pub target: Rc<RefCell<PathBuf>>,
-    /// 이번 녹음의 번역(ADR-0055). 없으면 원문만 쓴다. 녹음을 시작할 때 읽는다.
-    pub translation: Rc<RefCell<Option<TranslationSetup>>>,
     /// 작업 스레드를 띄웠으면 `true`가 된다. 시작하다 실패했는지(그러면 [`Event::Done`]이 오지 않는다) 본다.
     pub started: Rc<Cell<bool>>,
     pub on_event: EventHandler,
@@ -90,10 +79,9 @@ impl SpeechRecognizer for NemotronRecognizer {
         let (audio_tx, audio_rx) = std_mpsc::channel::<Vec<i16>>();
         let (event_tx, mut events) = mpsc::unbounded();
         let (model, target) = (self.model.clone(), self.target.borrow().clone());
-        let translation = self.translation.borrow().clone();
         std::thread::Builder::new()
             .name("writer-stt".into())
-            .spawn(move || run(&model, &target, translation, audio_rx, event_tx))
+            .spawn(move || run(&model, &target, audio_rx, event_tx))
             .map_err(SpeechError::recognizer)?;
         self.started.set(true);
 
@@ -105,26 +93,7 @@ impl SpeechRecognizer for NemotronRecognizer {
                 cx.update(|cx| match event {
                     WorkerEvent::Ready => sink.ready(cx),
                     WorkerEvent::Hypothesis(text) => sink.hypothesis(text, cx),
-                    WorkerEvent::Output(Output::Inserted { line, text }) => on_event(
-                        Event::Inserted {
-                            line,
-                            text: text.into(),
-                        },
-                        cx,
-                    ),
-                    WorkerEvent::Output(Output::Pending(count)) => {
-                        on_event(Event::Pending(count), cx)
-                    }
-                    WorkerEvent::Output(Output::Written { text, originals }) => on_event(
-                        Event::Written {
-                            text: text.into(),
-                            originals,
-                        },
-                        cx,
-                    ),
-                    WorkerEvent::Output(Output::TranslationFailed(reason)) => {
-                        on_event(Event::TranslationFailed(reason.into()), cx)
-                    }
+                    WorkerEvent::Written(text) => on_event(Event::Written(text.into()), cx),
                     // 녹음 상태가 `SpeechEvent::Error`로 알린다.
                     WorkerEvent::Failed(reason) => {
                         sink.error(SpeechError::recognizer(io::Error::other(reason)), cx);
@@ -169,7 +138,6 @@ impl RecognitionSession for Session {
 fn run(
     model: &Path,
     target: &Path,
-    translation: Option<TranslationSetup>,
     audio: std_mpsc::Receiver<Vec<i16>>,
     events: mpsc::UnboundedSender<WorkerEvent>,
 ) {
@@ -190,8 +158,8 @@ fn run(
             std::thread::Builder::new()
                 .name("writer-stt-out".into())
                 .spawn(move || {
-                    write_out(record, paragraph_rx, translation, |output| {
-                        let _ = output_events.unbounded_send(WorkerEvent::Output(output));
+                    write_out(record, paragraph_rx, |text| {
+                        let _ = output_events.unbounded_send(WorkerEvent::Written(text));
                     })
                 })
                 .map_err(|err| err.to_string())?,
@@ -249,7 +217,7 @@ fn run(
         }
         Ok::<_, String>(())
     })();
-    // 문단 채널을 닫고 쓰기 스레드가 남은 문단(번역 포함)을 다 쓸 때까지 기다린다.
+    // 문단 채널을 닫고 쓰기 스레드가 남은 문단을 다 쓸 때까지 기다린다.
     drop(paragraph_tx);
     let written = match writer.map(std::thread::JoinHandle::join) {
         Some(Ok(Err(err))) => Err(err.to_string()),
@@ -290,7 +258,7 @@ pub fn ensure_record_title(path: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     // `super::*`는 gpui의 `test` 매크로까지 들여와 `#[test]`를 가린다.
-    use super::{Output, SAMPLE_RATE, WorkerEvent, create_record, ensure_record_title, run};
+    use super::{SAMPLE_RATE, WorkerEvent, create_record, ensure_record_title, run};
     use futures::StreamExt as _;
 
     #[test]
@@ -334,7 +302,7 @@ mod tests {
         let (event_tx, events) = futures::channel::mpsc::unbounded();
         let worker = {
             let file = file.clone();
-            std::thread::spawn(move || run(model.as_ref(), &file, None, audio_rx, event_tx))
+            std::thread::spawn(move || run(model.as_ref(), &file, audio_rx, event_tx))
         };
         // 마이크처럼 10 ms씩 보낸다.
         for chunk in speech
@@ -354,7 +322,7 @@ mod tests {
         let paragraphs: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
-                WorkerEvent::Output(Output::Written { text, .. }) => Some(text.clone()),
+                WorkerEvent::Written(text) => Some(text.clone()),
                 WorkerEvent::Failed(reason) => panic!("{reason}"),
                 _ => None,
             })

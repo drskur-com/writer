@@ -46,6 +46,9 @@ pub struct Config {
     pub dictation: DictationConfig,
 }
 
+/// 녹음 중 요약 주기(분).
+pub const SUMMARY_MINUTES: u64 = 1;
+
 /// 받아쓰기 옵션(`[dictation]`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -54,15 +57,15 @@ pub struct DictationConfig {
     pub source: crate::dictation::AudioSource,
     /// 작은 소리를 말소리 크기로 키운다(자동 음량 맞춤).
     pub auto_gain: bool,
-    /// 녹음 중 번역할 언어 코드(`agent::dictation::LANGUAGES`, ADR-0055). 없으면 번역하지 않는다.
-    pub translate_to: Option<String>,
-    /// 녹음 중 몇 분마다 요약한다.
+    /// 녹음 중 [`SUMMARY_MINUTES`]분마다 요약한다(ADR-0055).
     pub summarize: bool,
-    /// 요약 주기(분).
-    pub summary_minutes: u64,
-    /// 번역·요약에 쓸 Bedrock 모델(추론 프로필) ID. 없으면 어시스턴트의 모델.
+    /// 요약을 쓸 언어 코드(`agent::dictation::LANGUAGES`). 없으면 기록의 언어로 쓴다.
+    /// 예전 녹음 중 번역 언어(`translate_to`)를 그대로 잇는다.
+    #[serde(alias = "translate_to")]
+    pub summary_language: Option<String>,
+    /// 요약에 쓸 Bedrock 모델(추론 프로필) ID. 없으면 어시스턴트의 모델.
     pub bedrock_model: Option<String>,
-    /// 번역·요약에 쓸 Token Plan 모델 ID. 없으면 어시스턴트의 모델.
+    /// 요약에 쓸 Token Plan 모델 ID. 없으면 어시스턴트의 모델.
     pub token_plan_model: Option<String>,
 }
 
@@ -71,9 +74,8 @@ impl Default for DictationConfig {
         Self {
             source: Default::default(),
             auto_gain: true,
-            translate_to: None,
             summarize: false,
-            summary_minutes: 5,
+            summary_language: None,
             bedrock_model: None,
             token_plan_model: None,
         }
@@ -81,7 +83,7 @@ impl Default for DictationConfig {
 }
 
 impl DictationConfig {
-    /// 번역·요약에 부를 곳. AI를 설정하지 않았으면 `None`.
+    /// 요약에 부를 곳. AI를 설정하지 않았으면 `None`.
     pub fn backend(&self, prefs: &crate::settings::Prefs) -> Option<crate::agent::Backend> {
         let backend = crate::agent::Backend::from_prefs(prefs)?;
         let model = match backend {
@@ -94,9 +96,9 @@ impl DictationConfig {
         })
     }
 
-    /// 번역 언어.
-    pub fn translation_language(&self) -> Option<&'static crate::agent::dictation::Language> {
-        crate::agent::dictation::Language::find(self.translate_to.as_deref()?)
+    /// 요약 언어.
+    pub fn summary_language(&self) -> Option<&'static crate::agent::dictation::Language> {
+        crate::agent::dictation::Language::find(self.summary_language.as_deref()?)
     }
 }
 

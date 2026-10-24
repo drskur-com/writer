@@ -464,7 +464,7 @@ struct SettingsWindow {
     model_store: Entity<ModelStore>,
     /// 받아쓰기의 LLM 옵션(ADR-0055). 바꾸면 `config.toml`에 저장한다.
     dictation: DictationConfig,
-    translate_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
+    summary_language_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
     dictation_model_picker: Entity<SelectState<SearchableVec<ChoiceItem>>>,
     dictation_models: DictationModels,
     /// 모델 목록을 읽은 곳(`Backend::models_key`). 바뀌면 다시 읽는다.
@@ -643,10 +643,10 @@ impl SettingsWindow {
         let model_store = ModelStore::global(cx);
         model_store.update(cx, |store, cx| store.refresh(cx));
 
-        // 받아쓰기 번역 언어: 맨 앞은 "번역하지 않음".
+        // 받아쓰기 요약 언어: 맨 앞은 "기록의 언어".
         let dictation = Config::load().dictation;
-        let translate_items: Vec<_> = std::iter::once(ChoiceItem {
-            title: t!("settings.dictation.translate.none").into(),
+        let language_items: Vec<_> = std::iter::once(ChoiceItem {
+            title: t!("settings.dictation.summary_language.none").into(),
             value: None,
         })
         .chain(
@@ -658,14 +658,14 @@ impl SettingsWindow {
                 }),
         )
         .collect();
-        let selected_translate = translate_items
+        let selected_language = language_items
             .iter()
-            .position(|item| item.value.as_deref() == dictation.translate_to.as_deref())
+            .position(|item| item.value.as_deref() == dictation.summary_language.as_deref())
             .unwrap_or(0);
-        let translate_picker = cx.new(|cx| {
+        let summary_language_picker = cx.new(|cx| {
             SelectState::new(
-                SearchableVec::new(translate_items),
-                Some(IndexPath::new(selected_translate)),
+                SearchableVec::new(language_items),
+                Some(IndexPath::new(selected_language)),
                 window,
                 cx,
             )
@@ -683,12 +683,12 @@ impl SettingsWindow {
         let subscriptions = vec![
             cx.observe(&model_store, |_, _, cx| cx.notify()),
             cx.subscribe(
-                &translate_picker,
+                &summary_language_picker,
                 |this, _, event: &SelectEvent<SearchableVec<ChoiceItem>>, cx| {
                     let SelectEvent::Confirm(Some(code)) = event else {
                         return;
                     };
-                    this.dictation.translate_to = code.as_ref().map(ToString::to_string);
+                    this.dictation.summary_language = code.as_ref().map(ToString::to_string);
                     this.save_dictation(cx);
                 },
             ),
@@ -818,7 +818,7 @@ impl SettingsWindow {
             aws_profiles,
             model_store,
             dictation,
-            translate_picker,
+            summary_language_picker,
             dictation_model_picker,
             dictation_models: DictationModels::Unavailable,
             dictation_models_key: None,
@@ -831,8 +831,8 @@ impl SettingsWindow {
     fn save_dictation(&mut self, cx: &mut Context<Self>) {
         let mut config = Config::load();
         config.dictation.auto_gain = self.dictation.auto_gain;
-        config.dictation.translate_to = self.dictation.translate_to.clone();
         config.dictation.summarize = self.dictation.summarize;
+        config.dictation.summary_language = self.dictation.summary_language.clone();
         config.dictation.bedrock_model = self.dictation.bedrock_model.clone();
         config.dictation.token_plan_model = self.dictation.token_plan_model.clone();
         if let Err(err) = config.save() {
@@ -1266,22 +1266,8 @@ impl SettingsWindow {
                 .menu_max_h(px(240.0))
                 .into_any_element(),
         };
-        let minutes = self.dictation.summary_minutes;
+        let minutes = crate::config::SUMMARY_MINUTES;
         section
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(t!("settings.dictation.translate"))
-                    .child(
-                        Select::new(&self.translate_picker)
-                            .large()
-                            .focus_ring(false)
-                            .menu_max_h(px(240.0)),
-                    )
-                    .child(hint(t!("settings.dictation.translate_hint").into())),
-            )
             .child(
                 div()
                     .flex()
@@ -1299,6 +1285,19 @@ impl SettingsWindow {
                     .child(hint(
                         t!("settings.dictation.summarize_hint", minutes = minutes).into(),
                     )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(t!("settings.dictation.summary_language"))
+                    .child(
+                        Select::new(&self.summary_language_picker)
+                            .large()
+                            .focus_ring(false)
+                            .menu_max_h(px(240.0)),
+                    ),
             )
             .child(
                 div()

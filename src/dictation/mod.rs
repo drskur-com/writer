@@ -12,7 +12,6 @@ mod output;
 mod recognizer;
 
 pub use capture::{AudioSource, SourceInput};
-pub use output::TranslationSetup;
 pub use recognizer::{
     Event as RecordEvent, NemotronRecognizer, create_record, ensure_record_title,
 };

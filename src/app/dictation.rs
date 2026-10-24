@@ -20,9 +20,7 @@ use gpui_kit::gpui::*;
 
 use super::style::{Palette, icon_button};
 use super::{Selection, WriterApp};
-use crate::dictation::{
-    AudioSource, NemotronRecognizer, RecordEvent as Event, SourceInput, TranslationSetup,
-};
+use crate::dictation::{AudioSource, NemotronRecognizer, RecordEvent as Event, SourceInput};
 use crate::{icons, library};
 
 mod ai;
@@ -40,8 +38,6 @@ pub(super) struct Dictation {
     source: Rc<Cell<AudioSource>>,
     /// 이번 녹음의 기록 파일. 인식기가 녹음을 시작할 때 읽는다.
     target: Rc<RefCell<PathBuf>>,
-    /// 이번 녹음의 번역(ADR-0055). 인식기가 녹음을 시작할 때 읽는다.
-    translation: Rc<RefCell<Option<TranslationSetup>>>,
     /// 인식 작업 스레드를 띄웠는지. 띄우지 못했으면 `Event::Done`이 오지 않는다.
     worker_started: Rc<Cell<bool>>,
     /// 녹음 중(또는 마무리 중)인 기록. 작업 스레드가 끝나야(`Event::Done`) 비운다.
@@ -57,10 +53,6 @@ struct Recording {
     /// 받아 적은 문단 수.
     paragraphs: usize,
     started: Instant,
-    /// 번역·다듬기 답을 기다리는 묶음 수(원문은 이미 기록에 있다).
-    pending: usize,
-    /// 마지막 번역 실패. 원문만 썼다.
-    translation_error: Option<SharedString>,
 }
 
 impl WriterApp {
@@ -126,14 +118,12 @@ impl WriterApp {
             AudioSource::Microphone
         }));
         let target = Rc::new(RefCell::new(PathBuf::new()));
-        let translation = Rc::new(RefCell::new(None));
         let worker_started = Rc::new(Cell::new(false));
         // 작업 스레드의 소식은 창 없이(`&mut App`) 온다. 에디터에 글을 붙이려면 창이 있어야 한다.
         let (app, handle) = (cx.entity().downgrade(), window.window_handle());
         let recognizer = NemotronRecognizer {
             model: model.clone(),
             target: target.clone(),
-            translation: translation.clone(),
             started: worker_started.clone(),
             on_event: Rc::new(move |event, cx| {
                 let app = app.clone();
@@ -171,7 +161,6 @@ impl WriterApp {
             model,
             source,
             target,
-            translation,
             worker_started,
             recording: None,
             error: None,
@@ -239,14 +228,7 @@ impl WriterApp {
         let Some(dictation) = &mut self.dictation else {
             return;
         };
-        // 번역(ADR-0055): 번역 언어를 고르고 AI를 설정했으면 몇 문단씩 모아 번역문과 원문 쌍으로 쓴다.
-        let config = crate::config::Config::load().dictation;
-        let translation = config
-            .backend(cx.global::<crate::settings::Prefs>())
-            .zip(config.translation_language())
-            .map(|(backend, language)| TranslationSetup { backend, language });
         *dictation.target.borrow_mut() = path.clone();
-        *dictation.translation.borrow_mut() = translation;
         dictation.worker_started.set(false);
         dictation.error = None;
         dictation.recording = Some(Recording {
@@ -254,8 +236,6 @@ impl WriterApp {
             created,
             paragraphs: 0,
             started: Instant::now(),
-            pending: 0,
-            translation_error: None,
         });
         let speech = dictation.speech.clone();
         speech.update(cx, |speech, cx| speech.start(cx));
@@ -280,26 +260,12 @@ impl WriterApp {
 
     fn on_dictation_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            Event::Written { text, originals } => {
+            Event::Written(text) => {
                 if let Some(recording) = self.recording_mut() {
-                    recording.paragraphs += originals.len();
+                    recording.paragraphs += 1;
                 }
-                self.on_written(None, &text, window, cx);
-                self.on_summary_written(&originals, cx);
-            }
-            Event::Inserted { line, text } => self.on_written(Some(line), &text, window, cx),
-            Event::Pending(count) => {
-                if let Some(recording) = self.recording_mut() {
-                    recording.pending = count;
-                }
-                cx.notify();
-            }
-            Event::TranslationFailed(reason) => {
-                if let Some(recording) = self.recording_mut() {
-                    recording.translation_error =
-                        Some(t!("dictation.translation_failed", err = reason).into());
-                }
-                cx.notify();
+                self.on_written(&text, window, cx);
+                self.on_summary_written(&text, cx);
             }
             Event::Done => self.finish_recording(window, cx),
         }
@@ -311,16 +277,9 @@ impl WriterApp {
             .and_then(|dictation| dictation.recording.as_mut())
     }
 
-    /// 쓰기 스레드가 기록에 쓴 줄을 열린 에디터와 목록 미리보기에도 반영한다. `line`이 있으면 그 줄(0부터)
-    /// 앞에 끼워 넣고(번역·다듬은 줄), 없으면 끝에 덧붙인다(원문). 에디터 본문은 쓰기 스레드가 든 기록과 줄이
-    /// 같다(녹음 전에 저장했고, 녹음 중에는 읽기 전용이다).
-    fn on_written(
-        &mut self,
-        line: Option<usize>,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// 쓰기 스레드가 기록 끝에 덧붙인 문단을 열린 에디터와 목록 미리보기에도 반영한다. 에디터 본문은 쓰기
+    /// 스레드가 든 기록과 줄이 같다(녹음 전에 저장했고, 녹음 중에는 읽기 전용이다).
+    fn on_written(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.recording_path().map(Path::to_path_buf) else {
             return;
         };
@@ -328,11 +287,12 @@ impl WriterApp {
             let paragraph = text.to_string();
             editor.state().update(cx, |state, cx| {
                 let value = state.value();
-                let (at, insert) = match line.and_then(|line| line_start(&value, line)) {
-                    Some(at) => (at, format!("{paragraph}\n")),
-                    None if value.is_empty() || value.ends_with('\n') => (value.len(), paragraph),
-                    None => (value.len(), format!("\n{paragraph}")),
+                let insert = if value.is_empty() || value.ends_with('\n') {
+                    paragraph
+                } else {
+                    format!("\n{paragraph}")
                 };
+                let at = value.len();
                 state.set_selected_range(at..at, cx);
                 state.replace(insert, window, cx);
                 // 붙인 글이 보이게 맨 아래로 내린다(넘치는 값은 다음 레이아웃에서 맨 아래로 맞춰진다).
@@ -602,7 +562,7 @@ impl WriterApp {
             .into_any_element()
     }
 
-    /// 녹음 중: 일시 정지, 파형, 지난 시간, 번역·다듬기를 기다리는 묶음 수와 요약 보기, 지금 말하는 글.
+    /// 녹음 중: 일시 정지, 파형, 지난 시간, 요약 보기, 지금 말하는 글.
     fn render_recording(
         &self,
         dictation: &Dictation,
@@ -633,8 +593,6 @@ impl WriterApp {
             .is_capturing()
             .then(|| crate::media::format_time(recording.started.elapsed()));
         let summary_button = self.render_live_summary(cx);
-        let pending = (recording.pending > 0)
-            .then(|| t!("dictation.pending", count = recording.pending).to_string());
 
         div()
             .flex()
@@ -660,16 +618,15 @@ impl WriterApp {
                             .children(elapsed),
                     ),
             )
-            .when(summary_button.is_some() || pending.is_some(), |this| {
+            .when_some(summary_button, |this, button| {
                 this.child(
                     div()
                         .flex()
                         .items_center()
-                        .gap_2()
+                        .justify_end()
                         .text_xs()
                         .text_color(pal.muted)
-                        .child(div().flex_1().children(pending))
-                        .children(summary_button),
+                        .child(button),
                 )
             })
             .when(!hypothesis.is_empty(), |this| {
@@ -682,12 +639,6 @@ impl WriterApp {
                         .child(hypothesis),
                 )
             })
-            .children(
-                recording
-                    .translation_error
-                    .clone()
-                    .map(|error| div().text_xs().text_color(pal.danger).child(error)),
-            )
             .into_any_element()
     }
 
@@ -699,17 +650,6 @@ impl WriterApp {
                 .is_some_and(|lib| path.parent() == Some(lib.stt.path.as_path()))
         })
     }
-}
-
-/// `text`의 `line`번째 줄(0부터)이 시작하는 바이트 위치. 줄이 그만큼 없으면 `None`(끝에 덧붙인다).
-fn line_start(text: &str, line: usize) -> Option<usize> {
-    if line == 0 {
-        return (!text.is_empty()).then_some(0);
-    }
-    text.match_indices('\n')
-        .nth(line - 1)
-        .map(|(at, _)| at + 1)
-        .filter(|&at| at < text.len())
 }
 
 /// 녹음 버튼: 둥근 버튼 안의 빨간 점.
@@ -744,23 +684,5 @@ fn error_message(error: &SpeechError) -> SharedString {
         SpeechError::PermissionDenied => t!("dictation.error.permission").into(),
         SpeechError::NoInputDevice => t!("dictation.error.no_device").into(),
         other => t!("dictation.error.other", err = other.to_string()).into(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    // `super::*`는 gpui의 `test` 매크로까지 들여와 `#[test]`를 가린다.
-    use super::line_start;
-
-    #[test]
-    fn line_start_finds_insert_points() {
-        let text = "# 제목\n첫\n둘";
-        assert_eq!(line_start(text, 0), Some(0));
-        assert_eq!(line_start(text, 1), Some("# 제목\n".len()));
-        assert_eq!(line_start(text, 2), Some("# 제목\n첫\n".len()));
-        // 끝 뒤면 덧붙인다.
-        assert_eq!(line_start(text, 3), None);
-        assert_eq!(line_start("첫\n", 1), None);
-        assert_eq!(line_start("", 0), None);
     }
 }

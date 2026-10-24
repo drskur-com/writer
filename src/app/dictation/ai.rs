@@ -1,4 +1,4 @@
-//! 받아쓰기의 녹음 중 요약(ADR-0055). 녹음 중 번역은 쓰기 스레드(`dictation::output`)가 한다.
+//! 받아쓰기의 녹음 중 요약(ADR-0055). 받아 적은 원문을 몇 분마다 고른 언어로 요약한다.
 //!
 //! 파일 하나에는 쓰는 쪽이 하나다. 요약은 기록과 짝인 요약 파일(`STT/.summaries/<기록>.md`)에만 쓰고,
 //! 녹음이 끝난 뒤 사용자가 고르면 기록 맨 끝에 넣는다. 요약은 "요약 보기"로 녹음 막대 위쪽에 펼쳐 본다.
@@ -62,15 +62,20 @@ fn summary_heading() -> String {
     format!("## {}", t!("dictation.summary.heading"))
 }
 
-/// 본문(에디터 줄)의 요약 구간: 머리줄과 그 뒤의 글머리표 줄. (시작 줄, 끝 줄(제외)).
+/// 본문(에디터 줄)의 요약 구간: 머리줄과 그 뒤의 주제 제목(`### `)·글머리표 줄. (시작 줄, 끝 줄(제외)).
 fn summary_section(lines: &[&str]) -> Option<(usize, usize)> {
     let heading = summary_heading();
     let start = lines.iter().position(|line| line.trim_end() == heading)?;
     let end = lines[start + 1..]
         .iter()
-        .position(|line| !line.starts_with("- "))
+        .position(|line| !is_summary_line(line))
         .map_or(lines.len(), |offset| start + 1 + offset);
     Some((start, end))
+}
+
+/// 요약의 줄(주제 제목 또는 글머리표)인지.
+fn is_summary_line(line: &str) -> bool {
+    line.starts_with("### ") || line.starts_with("- ")
 }
 
 /// 본문의 요약 구간을 지우고(있으면) 맨 끝에 `summary`로 새로 넣는다. 받아 적은 글을 다 읽은 뒤에 보는
@@ -118,8 +123,8 @@ impl WriterApp {
         self.dictation_ai.summary = Some(SummaryJob {
             record: record.to_path_buf(),
             backend,
-            language: config.translation_language(),
-            interval: Duration::from_secs(config.summary_minutes.max(1) * 60),
+            language: config.summary_language(),
+            interval: Duration::from_secs(crate::config::SUMMARY_MINUTES * 60),
             text: previous,
             unsummarized: String::new(),
             last: Instant::now(),
@@ -129,14 +134,12 @@ impl WriterApp {
     }
 
     /// 쓰기 스레드가 기록에 덧붙인 원문을 요약할 글에 더하고, 때가 되었으면 요약한다.
-    pub(super) fn on_summary_written(&mut self, originals: &[String], cx: &mut Context<Self>) {
+    pub(super) fn on_summary_written(&mut self, paragraph: &str, cx: &mut Context<Self>) {
         let Some(job) = &mut self.dictation_ai.summary else {
             return;
         };
-        for original in originals {
-            job.unsummarized.push_str(original);
-            job.unsummarized.push('\n');
-        }
+        job.unsummarized.push_str(paragraph);
+        job.unsummarized.push('\n');
         self.run_summary(false, cx);
     }
 
@@ -380,11 +383,16 @@ impl WriterApp {
                 })
             })
             .when(!empty, |this| {
-                this.children(
-                    text.trim()
-                        .lines()
-                        .map(|line| div().child(SharedString::from(line.to_string()))),
-                )
+                this.children(text.trim().lines().map(|line| {
+                    match line.strip_prefix("### ") {
+                        // 주제 제목: 굵게, 앞 주제와 조금 띄운다.
+                        Some(title) => div()
+                            .pt_1()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(SharedString::from(title.to_string())),
+                        None => div().child(SharedString::from(line.to_string())),
+                    }
+                }))
             });
         Some(
             div()
@@ -471,10 +479,12 @@ mod tests {
     fn summary_goes_to_end_and_replaces_old_section() {
         let heading = summary_heading();
         let body = "# 받아쓰기 2026-10-25 10:00\n첫 문단\n둘째 문단\n";
-        let once = with_summary(body, "- 하나\n\n- 둘\n");
+        let once = with_summary(body, "### 주제\n- 하나\n\n- 둘\n");
         assert_eq!(
             once,
-            format!("# 받아쓰기 2026-10-25 10:00\n첫 문단\n둘째 문단\n{heading}\n- 하나\n- 둘\n")
+            format!(
+                "# 받아쓰기 2026-10-25 10:00\n첫 문단\n둘째 문단\n{heading}\n### 주제\n- 하나\n- 둘\n"
+            )
         );
         // 이어서 녹음한 뒤 다시 넣으면 옛 구간은 지우고 새 끝에 넣는다.
         let continued = format!("{once}셋째 문단\n");
