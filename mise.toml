@@ -2,7 +2,17 @@
 rust = "latest"
 sccache = "latest"
 "cargo:cargo-watch" = "latest"
-"cargo:cargo-bundle" = "latest"
+cmake = "latest"
+
+[env]
+# transcribe.cpp(ggml) C++ 소스의 UTF-8 주석을 한국어 Windows 기본 코드페이지(949)로 읽으면
+# 주석 끝의 multibyte 문자가 개행을 삼켜 문법 오류가 난다. MSVC에 UTF-8 소스임을 알려 준다.
+CL = "-utf-8"
+
+# Vulkan SDK(transcribe-cpp의 vulkan·dynamic-backends 기능). VULKAN_SDK가 이미 있으면 그 값을,
+# 없으면 기본 설치 경로를 쓴다. SDK를 다른 버전으로 옮겼다면 아래 기본값만 고치면 된다.
+VULKAN_SDK = "{{env.VULKAN_SDK | default(value='C:/VulkanSDK/1.4.363.0')}}"
+_.path = ["{{env.VULKAN_SDK}}/Bin"]
 
 [tasks.check]
 description = "빠른 타입 체크 (컴파일 X)"
@@ -22,8 +32,11 @@ env = { CARGO_INCREMENTAL = "1" }
 run = "cargo build"
 
 [tasks.bundle]
-description = "macOS .app 번들 만들기 (target/release/bundle/osx)"
-run = "cargo bundle --release"
+description = "번들 만들기 (target/release/bundle: macOS .app, Windows .msi·.exe)"
+# crates.io의 cargo-bundle 대신 vendor/cargo-bundle 사본을 그대로 빌드해 쓴다(Windows 쪽 패치 포함).
+# cargo-bundle은 현재 디렉터리의 Cargo.toml을 대상으로 삼으므로 실행 위치는 저장소 루트다.
+# 앞쪽 `--release`는 cargo-bundle 자체를, `bundle` 뒤쪽 `--release`는 번들할 Writer를 릴리스로 빌드한다.
+run = "cargo run --locked --release --manifest-path vendor/cargo-bundle/Cargo.toml -- bundle --release"
 
 [tasks.clean-cache]
 description = "sccache 통계 확인"

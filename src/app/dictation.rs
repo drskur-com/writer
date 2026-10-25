@@ -528,7 +528,11 @@ impl WriterApp {
         let choices = AudioSource::available();
         let hint = match current {
             AudioSource::Microphone => None,
-            AudioSource::System => Some(t!("dictation.source.hint_system")),
+            AudioSource::System => Some(if cfg!(target_os = "windows") {
+                t!("dictation.source.hint_system_windows")
+            } else {
+                t!("dictation.source.hint_system")
+            }),
             AudioSource::Both => Some(t!("dictation.source.hint_both")),
         };
         // 받아쓰기 기록을 골랐으면 그 끝에 이어서 녹음하고, 아니면 새 기록을 만든다.

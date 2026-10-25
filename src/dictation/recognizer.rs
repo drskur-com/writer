@@ -316,4 +316,65 @@ mod tests {
         };
         replay(&model, refiner_from_env(), &read_wav(&wav));
     }
+
+    /// 긴 녹음(`WRITER_STT_WAV`)을 넣으며 자막(`Hypothesis`) 이벤트의 벽시계 시각을 찍는다. 실시간보다
+    /// 늦어지는지(자막이 멈추는 까닭) 본다. `--ignored --nocapture`로 돌린다.
+    #[test]
+    #[ignore]
+    fn hypothesis_timing_on_long_recording() {
+        let (Ok(model), Ok(wav)) = (
+            std::env::var("WRITER_STT_MODEL"),
+            std::env::var("WRITER_STT_WAV"),
+        ) else {
+            return;
+        };
+        let speech = read_wav(&wav);
+        let total = speech.len() as f64 / SAMPLE_RATE as f64;
+        // Windows는 백엔드를 실행 중에 불러오는 빌드라 모델을 부르기 전에 등록해야 한다(앱 main이 하는 일).
+        super::super::init_backends();
+        let dir = std::env::temp_dir().join(format!("writer-stt-timing-{}", std::process::id()));
+        let target = create_record(&dir).unwrap();
+        let setup = RecordingSetup {
+            target,
+            refiner: None,
+            audio_file: None,
+        };
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        let (event_tx, events) = futures::channel::mpsc::unbounded();
+        std::thread::spawn(move || run(&PathBuf::from(model), setup, audio_rx, event_tx));
+        let started = std::time::Instant::now();
+        let mut sent_ms = 0;
+        for chunk in speech.chunks(160) {
+            audio_tx.send(chunk.to_vec()).unwrap();
+            sent_ms += 10;
+            // 벽시계로 실시간을 흉내 낸다(진짜 마이크처럼). 녹음 길이만큼 걸린다.
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        drop(audio_tx);
+        let events: Vec<_> = futures::executor::block_on(events.collect());
+        println!("음성 길이 {total:.1}초, 재생 벽시계 {:.1}초", started.elapsed().as_secs_f64());
+        let mut printed = 0;
+        for event in &events {
+            if let WorkerEvent::Hypothesis(text) = event {
+                printed += 1;
+                if printed % 20 == 0 || text.is_empty() {
+                    println!(
+                        "[자막 갱신] 벽시계 {:.1}초 길이 {} 글자",
+                        started.elapsed().as_secs_f64(),
+                        text.chars().count()
+                    );
+                }
+            }
+        }
+        println!("자막 갱신 {printed}회");
+        for event in &events {
+            if let WorkerEvent::Failed(reason) = event {
+                println!("실패: {reason}");
+            }
+            if let WorkerEvent::Written(text) = event {
+                println!("문단({}자): {}", text.chars().count(), &text[..text.len().min(120)]);
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

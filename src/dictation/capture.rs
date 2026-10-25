@@ -168,15 +168,15 @@ impl AudioInput for SourceInput {
         }
         if source.uses_system() {
             // 출력 장치로 입력 스트림을 열면 cpal이 루프백으로 그 장치에 나가는 소리를 받는다.
-            let device = host
-                .default_output_device()
-                .ok_or(SpeechError::NoInputDevice)?;
+            let device = host.default_output_device().ok_or_else(no_output_error)?;
             let config = device.default_output_config().map_err(system_error)?;
             rates.push(config.sample_rate());
             streams.push(
                 open(&device, config, rates.len() - 1, tx.clone()).map_err(
                     |error| match error {
                         SpeechError::Input(error) => system_error(error),
+                        // `open`은 장치가 사라졌을 때(DeviceNotAvailable)만 이 오류를 낸다.
+                        SpeechError::NoInputDevice => no_output_error(),
                         other => other,
                     },
                 )?,
@@ -239,11 +239,32 @@ fn input_error(error: cpal::Error) -> SpeechError {
     }
 }
 
-/// 시스템 소리를 열 수 없을 때. 흔한 까닭(macOS 버전·권한)을 함께 알린다.
+/// 시스템 소리를 열 수 없을 때. 흔한 까닭(macOS는 버전·권한, Windows는 기본 출력 장치)을 함께 알린다.
 fn system_error(error: impl std::fmt::Display) -> SpeechError {
+    #[cfg(target_os = "windows")]
+    let message = t!(
+        "dictation.error.system_audio_windows",
+        err = error.to_string()
+    );
+    #[cfg(not(target_os = "windows"))]
+    let message = t!("dictation.error.system_audio", err = error.to_string());
+    SpeechError::input(io::Error::other(message.into_owned()))
+}
+
+/// 시스템 소리를 받을 기본 출력 장치가 없을 때. 마이크 오류("마이크를 찾을 수 없습니다")로 보이면 안 된다.
+fn no_output_error() -> SpeechError {
     SpeechError::input(io::Error::other(
-        t!("dictation.error.system_audio", err = error.to_string()).into_owned(),
+        t!("dictation.error.system_no_output").into_owned(),
     ))
+}
+
+/// 이 스트림 오류가 녹음을 끝내야 하는 것인지. 한순간 끊김(`Xrun`)·기본 장치 바뀜(`DeviceChanged`, cpal이
+/// 새 장치로 따라간다)·실시간 우선순위 거절(`RealtimeDenied`, 지연만 늘어난다)은 소리가 이어지므로 넘긴다.
+fn fatal(error: &cpal::Error) -> bool {
+    !matches!(
+        error.kind(),
+        ErrorKind::Xrun | ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied
+    )
 }
 
 enum Capture {
@@ -303,8 +324,7 @@ where
                 let _ = tx.unbounded_send((track, Capture::Samples(mono)));
             },
             move |error| {
-                // 기본 장치가 바뀌면 cpal이 알아서 따라간다. 스트림은 그대로라 실패가 아니다.
-                if error.kind() != ErrorKind::DeviceChanged {
+                if fatal(&error) {
                     let _ = error_tx.unbounded_send((track, Capture::Error(error.to_string())));
                 }
             },
@@ -457,7 +477,8 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioFormat, AutoGain, Converter, GAIN_BLOCK, MAX_GAIN, MAX_LAG, Mixer, TARGET_RMS,
+        AudioFormat, AutoGain, Converter, ErrorKind, GAIN_BLOCK, MAX_GAIN, MAX_LAG, Mixer,
+        TARGET_RMS, fatal,
     };
 
     fn rms(samples: &[i16]) -> f32 {
@@ -501,6 +522,24 @@ mod tests {
         let loud = gain.process(&tone(0.9, 1_600));
         assert!(loud.iter().all(|&s| s > i16::MIN));
         assert!(gain.gain < 2.0, "{}", gain.gain);
+    }
+
+    #[test]
+    fn stream_glitches_do_not_end_the_recording() {
+        for kind in [
+            ErrorKind::Xrun,
+            ErrorKind::DeviceChanged,
+            ErrorKind::RealtimeDenied,
+        ] {
+            assert!(!fatal(&cpal::Error::new(kind)), "{kind:?}");
+        }
+        for kind in [
+            ErrorKind::DeviceNotAvailable,
+            ErrorKind::StreamInvalidated,
+            ErrorKind::BackendError,
+        ] {
+            assert!(fatal(&cpal::Error::new(kind)), "{kind:?}");
+        }
     }
 
     #[test]

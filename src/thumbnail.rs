@@ -75,12 +75,16 @@ pub fn png(path: &std::path::Path, side: u32) -> Option<Vec<u8>> {
             .thumbnail(key.size, key.size)
             .into_rgba8(),
     );
-    let mut rgba = frame.into_buffer();
+    let rgba = frame.into_buffer();
     // macOS 썸네일은 BGRA다.
     #[cfg(target_os = "macos")]
-    for pixel in rgba.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
-    }
+    let rgba = {
+        let mut rgba = rgba;
+        for pixel in rgba.as_chunks_mut::<4>().0 {
+            pixel.swap(0, 2);
+        }
+        rgba
+    };
     let mut out = Vec::new();
     rgba.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
         .ok()?;
