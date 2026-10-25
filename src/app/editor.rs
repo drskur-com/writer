@@ -439,7 +439,13 @@ impl WriterApp {
                 .child(icon_button("nav-back", icons::back(), false, pal))
                 .child(icon_button("nav-forward", icons::forward(), false, pal)),
         )
-        .child(tool_group(pal).child(icon_button("search", icons::search(), false, pal)))
+        .child(tool_group(pal).child(
+            icon_button("search", icons::search(), self.library.is_some(), pal).on_click(
+                cx.listener(|this, _, window, cx| {
+                    this.on_search_sheets(&crate::SearchSheets, window, cx)
+                }),
+            ),
+        ))
         .child(div().flex_1())
         // 파일 뷰어에서는 편집 도구 대신 파일 열기·보기·정보 버튼을 둔다.
         .map(|this| match &self.open_file {

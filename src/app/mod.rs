@@ -36,6 +36,7 @@ mod onboarding;
 mod play_window;
 mod project_panel;
 mod sheet_list;
+mod sheet_search;
 pub(crate) mod style;
 
 use gpui_kit::component::notification::Notification;
@@ -685,6 +686,7 @@ impl Render for WriterApp {
             .on_action(cx.listener(Self::on_insert_table))
             .on_action(cx.listener(Self::on_insert_extension))
             .on_action(cx.listener(Self::on_insert_special_char))
+            .on_action(cx.listener(Self::on_search_sheets))
             .on_action(cx.listener(Self::on_toggle_line_group))
             .on_action(cx.listener(Self::on_open_library))
             .on_action(cx.listener(Self::on_close_library))

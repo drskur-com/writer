@@ -86,6 +86,8 @@ hf-hub = "1"
 cpal = "0.18"
 # 받아쓰기 인식(ADR-0054): transcribe.cpp(ggml)로 Nemotron GGUF를 스트리밍으로 돌린다. macOS는 Metal, 그 밖은 CPU.
 transcribe-cpp = "0.4"
+# 시트 본문 검색. ripgrep의 검색 엔진(grep-searcher + grep-regex)을 라이브러리로 쓴다.
+grep = "0.4.1"
 
 # 번들 없이 실행할 때(`cargo run`)도 Dock에 앱 아이콘을 보인다. 버전은 gpui가 쓰는 것과 맞춘다.
 [target.'cfg(target_os = "macos")'.dependencies]

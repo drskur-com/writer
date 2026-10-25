@@ -10,8 +10,8 @@ use crate::InsertOcrText;
 use crate::{
     CloseLibrary, CompileProject, InsertAudio, InsertExtension, InsertFootnote, InsertImage,
     InsertSpecialChar, InsertTable, InsertVideo, ManageExtensions, NewSheet, OpenDictation,
-    OpenLibrary, OpenSettings, QuitApp, RunExtensionCommand, SaveSheet, SetTheme, ShowAbout,
-    ToggleAssistant, ToggleBold, ToggleItalic, ToggleLineGroup, ToggleSidebar, theme,
+    OpenLibrary, OpenSettings, QuitApp, RunExtensionCommand, SaveSheet, SearchSheets, SetTheme,
+    ShowAbout, ToggleAssistant, ToggleBold, ToggleItalic, ToggleLineGroup, ToggleSidebar, theme,
 };
 
 /// 메뉴 트리.
@@ -74,6 +74,8 @@ pub(crate) fn build_menus(
         MenuItem::action(t!("menu.italic"), ToggleItalic),
         MenuItem::separator(),
         MenuItem::action(t!("menu.toggle_line_group"), ToggleLineGroup),
+        MenuItem::separator(),
+        MenuItem::action(t!("menu.search_sheets"), SearchSheets),
     ];
     #[cfg(target_os = "macos")]
     {

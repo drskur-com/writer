@@ -24,6 +24,7 @@ mod layout;
 mod manuscript;
 mod meta;
 mod preview;
+mod search;
 mod style;
 // 할 일 화면(ADR-0024 2단계)에서 쓴다. 그 전까지는 테스트에서만 쓴다.
 #[allow(dead_code)]
@@ -44,6 +45,7 @@ pub use meta::{
     set_sort_descending, trash_sheets, unglue_sheets, update_group, update_project,
 };
 pub use preview::{Preview, read_preview};
+pub use search::{SearchHit, search_sheets};
 pub use style::{
     Align, FONT_WEIGHTS, HeadingNumbers, Numbering, PREFIX_NUMBER, Placement, ResolvedStyle,
     StyleSpec, StyleTarget, Styles, VerticalAlign, import_styles, read_styles, write_styles,

@@ -56,6 +56,7 @@ actions!(
         InsertOcrText,
         InsertExtension,
         InsertSpecialChar,
+        SearchSheets,
         ManageExtensions,
         ToggleLineGroup,
         CompileProject,
@@ -156,6 +157,11 @@ fn main() {
                 #[cfg(target_os = "macos")]
                 KeyBinding::new("ctrl-cmd-space", InsertSpecialChar, None),
                 KeyBinding::new("ctrl-alt-space", InsertSpecialChar, None),
+                // cmd-shift-f는 에디터의 바꾸기다.
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-alt-f", SearchSheets, None),
+                #[cfg(not(target_os = "macos"))]
+                KeyBinding::new("ctrl-shift-f", SearchSheets, None),
             ]);
 
             // 저장된 라이브러리를 열어본다(없거나 실패하면 온보딩).
