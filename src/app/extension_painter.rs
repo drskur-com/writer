@@ -12,14 +12,10 @@
 use std::cell::RefCell;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
 
 use gpui_kit::gpui::*;
 
 use crate::extension::{self, Shape, render::Renderer};
-
-/// 그림 하나의 처리 시간이 이보다 길면 알린다(개발 빌드에서만).
-const SLOW_RENDER_MS: f64 = 8.0;
 
 /// 렌더 스레드 수 상한.
 const MAX_THREADS: usize = 4;
@@ -189,21 +185,9 @@ fn submit(
 }
 
 fn render(renderer: &mut Renderer, job: &Job) -> Option<RenderImage> {
-    let started = Instant::now();
     let pixels = renderer.render(&job.shapes, job.scale, job.width, job.height, None);
     let data = extension::render::to_bgra(pixels);
     let buffer = image::RgbaImage::from_raw(job.width, job.height, data)?;
-    if cfg!(debug_assertions) {
-        let ms = started.elapsed().as_secs_f64() * 1000.0;
-        if ms > SLOW_RENDER_MS {
-            eprintln!(
-                "확장 그림 {}×{}px, 모양 {}개: {ms:.1}ms",
-                job.width,
-                job.height,
-                job.shapes.len()
-            );
-        }
-    }
     Some(RenderImage::new([image::Frame::new(buffer)]))
 }
 
