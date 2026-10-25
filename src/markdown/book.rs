@@ -447,6 +447,18 @@ impl Walk<'_> {
     fn line_span(&self, node: &Node) -> Option<(usize, usize)> {
         let position = node.position()?;
         let (start, end) = (position.start.line, position.end.line);
+        // 목록 노드는 뒤따르는 빈 줄까지 범위로 삼킨다(mdast). 블록 사이 빈 줄을 셀 때는 내용의
+        // 마지막 줄로 되돌린다. 다른 노드는 끝 줄이 곧 내용이므로 그대로다.
+        let is_blank = |line: usize| {
+            self.source
+                .lines()
+                .nth(line - 1)
+                .is_some_and(|text| text.trim().is_empty())
+        };
+        let end = (start..=end)
+            .rev()
+            .find(|line| !is_blank(*line))
+            .unwrap_or(start);
         Some(
             self.groups
                 .iter()
@@ -754,6 +766,62 @@ mod tests {
     }
 
     #[test]
+    fn blank_lines_around_lists_count() {
+        // 목록 노드는 뒤따르는 빈 줄까지 범위로 삼키므로(mdast), 내용 끝으로 되돌려야 빈 줄이 남는다.
+        // 인용·문단과 같은 규칙을 목록도 따른다.
+        for saved in [
+            crate::text_transform::to_markdown("첫 문장\n\n- 하나\n- 둘\n\n둘째 문장"),
+            crate::text_transform::to_markdown("첫 문장\n\n1. 하나\n1. 둘\n\n둘째 문장"),
+        ] {
+            assert_eq!(
+                manuscript_blocks(&saved, true),
+                vec![
+                    Block::Paragraph(plain("첫 문장")),
+                    Block::BlankLines(1),
+                    Block::List {
+                        ordered: saved.contains("1."),
+                        start: 1,
+                        items: vec![
+                            ListItem { checked: None, blocks: vec![Block::Paragraph(plain("하나"))] },
+                            ListItem { checked: None, blocks: vec![Block::Paragraph(plain("둘"))] },
+                        ],
+                    },
+                    Block::BlankLines(1),
+                    Block::Paragraph(plain("둘째 문장")),
+                ],
+                "{saved}"
+            );
+            // 줄바꿈을 유지하지 않으면 빈 줄은 표준처럼 버린다.
+            let blocks = manuscript_blocks(&saved, false);
+            assert!(!blocks.iter().any(|b| matches!(b, Block::BlankLines(_))));
+        }
+    }
+
+    #[test]
+    fn blank_lines_around_line_groups_and_fences_count() {
+        // 서로 다른 두 줄 묶음(펜스) 사이의 빈 줄도 문단 경계처럼 k+1 규칙으로 저장되므로
+        // 줄바꿈 유지 시 간격으로 남는다.
+        let saved = crate::text_transform::to_markdown(":::\nA\n:::\n\n:::\nB\n:::");
+        assert_eq!(
+            manuscript_blocks(&saved, true),
+            vec![
+                Block::Lines(plain("A")),
+                Block::BlankLines(1),
+                Block::Lines(plain("B")),
+            ]
+        );
+        let saved = crate::text_transform::to_markdown("```\nA\n```\n\n```\nB\n```");
+        assert_eq!(
+            manuscript_blocks(&saved, true),
+            vec![
+                Block::Code("A".into()),
+                Block::BlankLines(1),
+                Block::Code("B".into()),
+            ]
+        );
+    }
+
+    #[test]
     fn manuscript_line_breaks_keep_paragraphs_and_blank_lines() {
         // 에디터의 각 줄은 문단으로 남는다.
         let saved = crate::text_transform::to_markdown("첫 문장\n둘째 문장");
@@ -1025,3 +1093,4 @@ mod tests {
         );
     }
 }
+

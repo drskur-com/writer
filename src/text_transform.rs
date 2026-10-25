@@ -629,11 +629,15 @@ fn join(out: &mut String, lines: &[Line<'_>], gap: impl Fn(&Line<'_>, &Line<'_>)
 }
 
 /// 두 줄이 같은 펜스나 줄 묶음 안에 있는지(사이를 원문 그대로 둔다).
-fn same_block(prev: Kind, next: Kind) -> bool {
-    matches!(
-        (prev, next),
-        (Kind::Verbatim, Kind::Verbatim) | (Kind::Grouped, Kind::Grouped)
-    )
+/// 펜스·묶음 안의 빈 줄은 종류가 `Verbatim`·`Grouped`인 빈 줄 Line으로 남으므로
+/// `blanks_before`가 0이다. 바깥 빈 줄(`blanks_before` > 0)을 두고 마주 보는 같은 종류는
+/// 서로 다른 두 블록의 경계니 원문 그대로 두지 않는다.
+fn same_block(prev: &Line<'_>, next: &Line<'_>) -> bool {
+    next.blanks_before == 0
+        && matches!(
+            (prev.kind, next.kind),
+            (Kind::Verbatim, Kind::Verbatim) | (Kind::Grouped, Kind::Grouped)
+        )
 }
 
 /// 에디터 본문 → 저장할 마크다운.
@@ -646,7 +650,7 @@ pub fn to_markdown(editor: &str) -> String {
     }
     let mut out = String::with_capacity(editor.len() + lines.len());
     join(&mut out, &lines, |prev, next| {
-        if same_block(prev.kind, next.kind) {
+        if same_block(prev, next) {
             // 펜스·줄 묶음 안의 빈 줄은 원문 그대로.
             return "\n".repeat(next.blanks_before + 1);
         }
@@ -678,7 +682,7 @@ pub fn to_editor(markdown: &str) -> String {
             continue;
         }
         let prev = &lines[ix - 1];
-        if same_block(prev.kind, line.kind) {
+        if same_block(prev, line) {
             out.push_str(&"\n".repeat(line.blanks_before + 1));
         } else if line.blanks_before > 0 {
             // 빈 줄 하나는 문단 경계, 나머지는 에디터의 빈 줄.
@@ -779,6 +783,24 @@ mod tests {
     fn table_runs_skip_fences_and_groups() {
         let text = "| a |\n|---|\n본문\n```\n| 코드 |\n```\n:::\n| 묶음 |\n:::\n| b |";
         assert_eq!(table_runs(text), [0..2, 9..10]);
+    }
+
+    #[test]
+    fn blank_lines_between_distinct_fenced_blocks_are_boundaries() {
+        // 서로 다른 두 줄 묶음·펜스 사이의 빈 줄은 블록 경계다(k+1 규칙). 안의 빈 줄만 원문 그대로다.
+        // 경계를 같은 묶음으로 보면 빈 줄 하나만 저장되어 프리뷰에서 간격이 사라진다.
+        round_trips(":::\nA\n:::\n\n:::\nB\n:::");
+        assert_eq!(
+            to_markdown(":::\nA\n:::\n\n:::\nB\n:::"),
+            ":::\nA\n:::\n\n\n:::\nB\n:::"
+        );
+        round_trips("```\nA\n```\n\n```\nB\n```");
+        assert_eq!(
+            to_markdown("```\nA\n```\n\n```\nB\n```"),
+            "```\nA\n```\n\n\n```\nB\n```"
+        );
+        // 안의 빈 줄은 그대로다.
+        assert_eq!(to_markdown(":::\nA\n\nB\n:::"), ":::\nA\n\nB\n:::");
     }
 
     #[test]
