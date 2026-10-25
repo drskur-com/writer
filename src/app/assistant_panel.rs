@@ -963,8 +963,10 @@ impl WriterApp {
         cx: &mut Context<Self>,
     ) {
         let finished = matches!(event, agent::ChatEvent::Done | agent::ChatEvent::Failed(_));
-        if let agent::ChatEvent::SetModel(model) = &event {
-            self.choose_assistant_model(model, window, cx);
+        match &event {
+            agent::ChatEvent::SetModel(model) => self.choose_assistant_model(model, window, cx),
+            agent::ChatEvent::Changed => self.sync_open_sheet(window, cx),
+            _ => {}
         }
         let chat = &mut self.assistant_chat;
         if let Some(sent) = chat.conversation.apply(event) {
@@ -1293,7 +1295,13 @@ fn change_card(
     };
     let card_id = card.id;
     let decide = |approve: bool| {
-        cx.listener(move |this: &mut WriterApp, _: &ClickEvent, _, cx| {
+        cx.listener(move |this: &mut WriterApp, _: &ClickEvent, window, cx| {
+            // 보낸 뒤 에디터에서 고친 글을 먼저 저장한다. 그래야 모델이 읽은 뒤 시트가 바뀌었으면
+            // 쓰기가 멈추고, 저장하지 않은 변경이 모델이 쓴 내용을 덮어쓰지 않는다.
+            if approve && let Err(err) = this.save_open_sheet(cx) {
+                this.notify(t!("assistant.error.save_sheet", err = err), window, cx);
+                return;
+            }
             this.assistant_chat.conversation.decide(card_id, approve);
             cx.notify();
         })

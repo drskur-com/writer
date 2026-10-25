@@ -344,9 +344,12 @@ async fn approve(
     match answer.await.ok()? {
         true => {
             let output = workspace.commit(change);
-            if output.text.starts_with("Error:") {
-                tx.unbounded_send(ChatEvent::ChangeFailed(id)).ok();
-            }
+            let event = if output.text.starts_with("Error:") {
+                ChatEvent::ChangeFailed(id)
+            } else {
+                ChatEvent::Changed
+            };
+            tx.unbounded_send(event).ok();
             Some(output.text)
         }
         false => Some(DECLINED.to_string()),

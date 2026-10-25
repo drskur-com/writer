@@ -128,6 +128,8 @@ pub enum ChatEvent {
     ApproveFetch(FetchApproval),
     /// 승인한 변경을 쓰지 못했다(카드 번호).
     ChangeFailed(u64),
+    /// 승인한 변경을 썼다. 화면은 폴더 감시를 기다리지 않고 열린 시트를 곧바로 맞춘다.
+    Changed,
     /// 어시스턴트가 부를 모델을 이 ID로 바꿨다(`set_model`). 다음 말부터 쓴다.
     SetModel(String),
     /// 답이 끝났다.
@@ -395,8 +397,8 @@ impl Conversation {
                 self.set_change_state(id, ChangeState::Failed);
                 None
             }
-            // 설정은 화면이 바꾼다. 대화에는 도구 줄(`Tool`)만 남는다.
-            ChatEvent::SetModel(_) => None,
+            // 설정·열린 시트는 화면이 맞춘다. 대화에는 도구 줄(`Tool`)만 남는다.
+            ChatEvent::SetModel(_) | ChatEvent::Changed => None,
             ChatEvent::Done => {
                 self.streaming = false;
                 self.drop_pending();
