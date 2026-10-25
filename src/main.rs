@@ -1,4 +1,6 @@
 #![recursion_limit = "512"]
+// 릴리스 빌드는 Windows GUI 서브시스템으로 — 없으면 실행할 때 콘솔 창이 함께 뜬다.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 #[macro_use]
 extern crate rust_i18n;
