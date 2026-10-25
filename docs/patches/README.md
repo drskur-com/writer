@@ -2,7 +2,6 @@
 
 writer는 gpui-base 0.8.0을 `vendor/gpui-base`에 두고 `[patch.crates-io]`로 연결한다(ADR-0006).
 에디터의 줄 스타일·줄 블록·접힌 줄·줄 오버레이·스크롤 보정이 이 패치다.
-
 ## 지금 상태: `gpui-base-0.8.0-writer.patch`
 
 원본 0.8.0(`a/src`) → 지금 vendor(`b/src`)의 전체 차이다. 깨끗한 0.8.0에 `patch -p1`로 적용하면
@@ -54,3 +53,55 @@ t=$(mktemp -d); ln -s <원본 gpui-base> $t/a; ln -s "$PWD/vendor/gpui-base" $t/
 | `gpui-base-0.8.0-line-overlay.patch` | ADR-0023 줄 오버레이 |
 | `gpui-base-0.8.0-inline-objects.patch` | ADR-0036 인라인 객체(에디터의 파생 토큰, 객체 행 배치·줄바꿈) |
 | `gpui-base-0.8.0-overscroll-tolerance.patch`, `gpui-base-0.8.0-scroll-reverse.patch` | 스크롤 보정 |
+
+# gpui-component 패치
+
+writer는 gpui-component 0.8.0도 `vendor/gpui-component`에 두고 `[patch.crates-io]`로 연결한다.
+지금은 찾기(ctrl+F) 검색창의 한글 입력 버그 하나만 고친다. 고친 판이 나오면 지운다.
+
+## 지금 상태: `gpui-component-0.8.0-search-echo-ime.patch`
+
+원본 0.8.0(`a/src`) → 지금 vendor(`b/src`)의 전체 차이다. 깨끗한 0.8.0에 `patch -p1`로 적용하면
+vendor와 같아진다.
+
+- **증상**: 시트 편집기에서 찾기(ctrl+F) 검색창에 한글을 치면 입력한 글자가 사라진다.
+  첫 글자를 완성하고 둘째 글자로 넘어갈 때 검색창이 전체 선택되고, 이어서 치면 확정된
+  글자까지 지워진다.
+- **원인**: 검색창이 자기가 쓴 쿼리를 세션에 메아리로 돌려보내는데, `input/overlay.rs`의
+  메아리 판별이 그것을 바깥 변경으로 잘못 읽어 검색창을 다시 연다(`set_value` +
+  `select_all` + 포커스). 조합 중인 한글은 이 전체 선택을 다음 조합 글자가 대체해 버려
+  입력한 글자가 지워진다. 잘못 읽는 이유는 두 가지다.
+  1. **앵커**: 쿼리가 바뀔 때마다 세션의 앵커(`anchor_offset`)가 다시 잡히므로(첫 글자 확정
+     `None → Some`, 찾기 이동으로 에디터가 스크롤된 뒤 값 변화) 앵커까지 같아야 메아리로
+     보는 판별은 자기 입력을 곧바로 놓친다.
+  2. **검색창 값**: 판별이 "검색창이 지금 가진 값 == 세션 쿼리"를 메아리의 근거로 쓰는데,
+     조합 중인 글자(marked text)는 `InputEvent::Change`를 내지 않아 세션에 가지 않는다.
+     한글 IME는 한 키에서 앞 글자를 확정하고 다음 글자를 조합하므로, 확정("하")이 세션에
+     들어가고 곧바로 검색창에는 조합 중 글자("하ㄴ")가 뜬다. 다음 프레임에서 두 값이
+     달라 바깥 변경으로 읽히고, `set_value`가 조합 중 글자를 지운 뒤 "하"를 전체 선택한다.
+- **고침**: 메아리 판별에서 앵커 비교와 검색창 값 비교를 모두 빼고, 검색창이 세션에
+  마지막으로 쓴 쿼리(`SearchPanel::last_written_query`, `wrote_query`)를 대신 본다. 이것이
+  조합 중 글자와 무관하게 자기 메아리를 알아보는 유일한 값이다. 되부름(단축키 두 번)은
+  여전히 활성화 개정(`activation_revision`)이 잡고, 바깥에서 쿼리를 바꾼 경우는 검색창이
+  쓴 적이 없는 쿼리라 메아리가 아니다.
+  회귀 테스트 두 개를 함께 넣었다: `typing_in_the_search_field_keeps_the_field_untouched`
+  (앵커·찾기 이동), `a_preedit_after_a_commit_is_not_an_external_query_change`(확정 뒤 조합).
+  패치는 `input/overlay.rs`(판별)와 `input/search.rs`(마지막으로 쓴 쿼리) 두 파일을 고친다.
+
+## gpui-component를 올릴 때
+
+1. 새 버전을 `vendor/gpui-component`에 받고 이 패치를 `patch -p1`로 적용한다. 충돌은
+   `input/overlay.rs`의 메아리 판별과 `input/search.rs`의 쿼리 쓰기에서만 난다.
+2. 테스트는 `vendor/gpui-component` 안에서 `cargo test --lib`로 돌린다. 원본 패키지에는
+   모노리포의 테스트 자료가 빠져 있어 그대로는 컴파일이 안 된다. gpui-kit 저장소(버전 맞는
+   태그)에서 잠시 받아 와 다음 자리에 두면 된다(끝나면 지운다).
+   - `assets/assets/icons/arrow-up.svg`, `assets/assets/icons/search.svg` → `vendor/assets/assets/icons/`
+   - `base/src/dock/mod.rs` → `vendor/base/src/dock/`
+   - `examples/fixtures/test.md` → 저장소 루트 `examples/fixtures/`
+   - `themes/aurora.json` → 저장소 루트 `themes/`(**앱이 사용자 테마로 읽는 자리라 꼭 지운다**)
+3. 새 차이로 이 패치를 다시 만든다.
+
+```sh
+t=$(mktemp -d); ln -s <원본 gpui-component> $t/a; ln -s "$PWD/vendor/gpui-component" $t/b
+(cd $t && diff -ruN a/src b/src) > docs/patches/gpui-component-<버전>-search-echo-ime.patch
+```

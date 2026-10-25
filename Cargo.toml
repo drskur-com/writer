@@ -150,3 +150,8 @@ gpui-base = { path = "vendor/gpui-base" }
 # Bedrock이 Claude의 도구 호출에 `"type": "tool_use"`를 붙이면서 rig-bedrock 0.45가 그것을 호스트 도구로
 # 잘못 읽어 호출이 사라진다(답이 오지 않는다). streaming.rs 한 줄을 고친 사본. 고친 판이 나오면 지운다.
 rig-bedrock = { path = "vendor/rig-bedrock" }
+# 에디터 찾기(ctrl+F) 검색창에서 한글(IME)을 치면 입력한 글자가 사라진다. 검색창이 자기가 쓴 쿼리의
+# 메아리를 바깥 변경으로 잘못 읽고 매 글자마다 `select_all`로 검색창을 다시 열기 때문이다. 검색창
+# 패널(`input/overlay.rs`)의 메아리 판별에서 앵커·검색창 값 비교를 빼고 검색창이 세션에 마지막으로
+# 쓴 쿼리(`input/search.rs`)를 보게 한 사본. 고친 판이 나오면 지운다.
+gpui-component = { path = "vendor/gpui-component" }
