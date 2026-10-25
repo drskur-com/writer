@@ -36,7 +36,9 @@ description = "번들 만들기 (target/release/bundle: macOS .app, Windows .msi
 # crates.io의 cargo-bundle 대신 vendor/cargo-bundle 사본을 그대로 빌드해 쓴다(Windows 쪽 패치 포함).
 # cargo-bundle은 현재 디렉터리의 Cargo.toml을 대상으로 삼으므로 실행 위치는 저장소 루트다.
 # 앞쪽 `--release`는 cargo-bundle 자체를, `bundle` 뒤쪽 `--release`는 번들할 Writer를 릴리스로 빌드한다.
-run = "cargo run --locked --release --manifest-path vendor/cargo-bundle/Cargo.toml -- bundle --release"
+# Windows 기본 형식 `msi`(msi 크레이트로 직접 만든다)는 Windows Installer가 열지 못한다(0x80004005,
+# 오류 1620). WiX로 만드는 `wxsmsi` 형식을 쓴다. .NET SDK가 있어야 한다(없으면 `winget install Microsoft.DotNet.SDK.8`).
+run = "cargo run --locked --release --manifest-path vendor/cargo-bundle/Cargo.toml -- bundle --release --format wxsmsi"
 
 [tasks.clean-cache]
 description = "sccache 통계 확인"
