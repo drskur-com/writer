@@ -279,6 +279,11 @@ pub fn all_sheets() -> IconName {
     IconName::Layers
 }
 
+/// 메모의 할 일을 모은 보기(ADR-0024).
+pub fn todos() -> IconName {
+    IconName::ListTodo
+}
+
 /// 프로젝트 화면 → 라이브러리로 돌아가기.
 pub fn back_to_library() -> IconName {
     IconName::ChevronsLeft

@@ -229,9 +229,163 @@ fn is_date(word: &str) -> bool {
         })
 }
 
+/// 할 일 줄의 체크를 뒤집은 줄. 체크하면 끝에 `✅ today`를 붙이고, 풀면 `✅ 날짜`를 뗀다.
+/// 할 일 줄이 아니면 `None`.
+///
+/// 체크 상자 글자(`marker.check`) 앞은 바꾸지 않는다. 에디터는 그 자리부터 줄 끝까지만 바꾼다.
+pub fn toggle_todo(line: &str, today: &str) -> Option<String> {
+    let marker = task_marker(line)?;
+    let mut out = String::with_capacity(line.len() + 16);
+    out.push_str(&line[..marker.check]);
+    out.push(if marker.checked { ' ' } else { 'x' });
+    out.push_str(&remove_done(&line[marker.check + 1..]));
+    if !marker.checked {
+        out.truncate(out.trim_end().len());
+        out.push(' ');
+        out.push(DONE_SIGNIFIER);
+        out.push(' ');
+        out.push_str(today);
+    }
+    Some(out)
+}
+
+const DONE_SIGNIFIER: char = '✅';
+
+/// 글에서 완료일 표기(`✅ YYYY-MM-DD`)를 앞 공백과 함께 뺀다. 날짜가 없는 `✅`는 남긴다.
+fn remove_done(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(DONE_SIGNIFIER) {
+        let after = &rest[at + DONE_SIGNIFIER.len_utf8()..];
+        let after = after.strip_prefix('\u{fe0f}').unwrap_or(after);
+        let gap = after.len() - after.trim_start_matches([' ', '\t']).len();
+        let date = &after[gap..];
+        let is_signifier = rest[..at].ends_with([' ', '\t'])
+            && gap > 0
+            && date.get(..10).is_some_and(is_date)
+            && date[10..].chars().next().is_none_or(char::is_whitespace);
+        if is_signifier {
+            out.push_str(rest[..at].trim_end_matches([' ', '\t']));
+            rest = &date[10..];
+        } else {
+            let end = at + DONE_SIGNIFIER.len_utf8();
+            out.push_str(&rest[..end]);
+            rest = &rest[end..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 원문에서 할 일 줄을 찾아 (줄 번호, 원문이 같은 줄 가운데 몇 번째인지)를 돌려준다.
+///
+/// 색인의 `line`번 줄이 `source`면 그 줄이다. 그 사이 줄이 밀렸으면 원문이 같은 줄이 하나뿐일 때만
+/// 그 줄로 본다(여럿이면 어느 것인지 모른다). 몇 번째인지는 줄 번호가 다른 본문(에디터)에서
+/// 같은 줄을 찾을 때 쓴다([`nth_line`]).
+pub fn locate_todo(text: &str, line: usize, source: &str) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = text
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r'))
+        .collect();
+    let row = if lines.get(line) == Some(&source) {
+        line
+    } else {
+        let mut same = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, text)| **text == source);
+        let (row, _) = same.next()?;
+        if same.next().is_some() {
+            return None;
+        }
+        row
+    };
+    let nth = lines[..row].iter().filter(|text| **text == source).count();
+    Some((row, nth))
+}
+
+/// `text`에서 원문이 `source`인 줄 가운데 `nth`번째(0부터)의 줄 번호.
+pub fn nth_line(text: &str, source: &str, nth: usize) -> Option<usize> {
+    text.split('\n')
+        .enumerate()
+        .filter(|(_, line)| line.trim_end_matches('\r') == source)
+        .nth(nth)
+        .map(|(row, _)| row)
+}
+
+/// 원문 `text`에서 할 일(`line`번 줄, 원문 `source`)의 체크를 뒤집은 글. 줄을 찾지 못하면 `None`.
+/// 다른 줄과 줄바꿈(`\r\n`)은 그대로 둔다.
+pub fn toggle_todo_in(text: &str, line: usize, source: &str, today: &str) -> Option<String> {
+    let (row, _) = locate_todo(text, line, source)?;
+    let mut out = String::with_capacity(text.len() + 16);
+    for (ix, piece) in text.split('\n').enumerate() {
+        if ix > 0 {
+            out.push('\n');
+        }
+        if ix == row {
+            let body = piece.trim_end_matches('\r');
+            out.push_str(&toggle_todo(body, today)?);
+            out.push_str(&piece[body.len()..]);
+        } else {
+            out.push_str(piece);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toggling_adds_and_removes_done_date() {
+        let today = "2026-10-25";
+        assert_eq!(
+            toggle_todo("- [ ] 원고 보내기 📅 2026-10-30 #출판", today).as_deref(),
+            Some("- [x] 원고 보내기 📅 2026-10-30 #출판 ✅ 2026-10-25")
+        );
+        assert_eq!(
+            toggle_todo("  - [x] 원고 보내기 ✅ 2026-10-20 #출판", today).as_deref(),
+            Some("  - [ ] 원고 보내기 #출판")
+        );
+        // 끝 공백은 날짜 앞에서 정리한다. 이미 있던 완료일은 오늘로 바뀐다.
+        assert_eq!(
+            toggle_todo("- [ ] 전화 ✅ 2026-01-01  ", today).as_deref(),
+            Some("- [x] 전화 ✅ 2026-10-25")
+        );
+        // 날짜 없는 ✅와 단어에 붙은 ✅는 표기가 아니다.
+        assert_eq!(
+            toggle_todo("- [x] 확인✅ 2026-10-20 끝 ✅", today).as_deref(),
+            Some("- [ ] 확인✅ 2026-10-20 끝 ✅")
+        );
+        assert_eq!(
+            toggle_todo("1. [ ] 첫째", today).as_deref(),
+            Some("1. [x] 첫째 ✅ 2026-10-25")
+        );
+        assert_eq!(toggle_todo("그냥 문단", today), None);
+    }
+
+    #[test]
+    fn locates_shifted_todo_only_when_unique() {
+        let text = "- [ ] 하나\n\n- [ ] 둘\n- [ ] 하나\n";
+        assert_eq!(locate_todo(text, 3, "- [ ] 하나"), Some((3, 1)));
+        // 둘째 줄이 밀려 한 줄 아래로 갔다.
+        assert_eq!(locate_todo(text, 1, "- [ ] 둘"), Some((2, 0)));
+        // 같은 줄이 둘이면 어느 것인지 모른다.
+        assert_eq!(locate_todo(text, 1, "- [ ] 하나"), None);
+        assert_eq!(locate_todo(text, 0, "- [ ] 없음"), None);
+        assert_eq!(nth_line("- [ ] 하나\n- [ ] 하나", "- [ ] 하나", 1), Some(1));
+    }
+
+    #[test]
+    fn toggles_in_text_keeping_line_endings() {
+        let text = "# 메모\r\n- [ ] 일\r\n끝";
+        assert_eq!(
+            toggle_todo_in(text, 1, "- [ ] 일", "2026-10-25").as_deref(),
+            Some("# 메모\r\n- [x] 일 ✅ 2026-10-25\r\n끝")
+        );
+        assert_eq!(toggle_todo_in(text, 1, "- [ ] 다른 일", "2026-10-25"), None);
+    }
 
     #[test]
     fn reads_title_dates_tags_notes_and_checklist() {

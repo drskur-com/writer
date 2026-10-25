@@ -126,10 +126,12 @@ impl WriterApp {
     // --- 폴더 감시 ---------------------------------------------------------
 
     /// 현재 라이브러리 루트 감시를 (다시) 시작한다. 변경이 오면 잠깐 모았다가 다시 스캔한다.
+    /// 할 일 색인(ADR-0024)도 새로 만들고, 이후에는 바뀐 경로만 다시 읽는다.
     pub(super) fn start_watching(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.watcher = None;
         self.refresh_extension_commands(cx);
         self.refresh_library_themes(cx);
+        self.load_todos(cx);
         let Some(root) = self.library.as_ref().map(|lib| lib.root.clone()) else {
             return;
         };
@@ -142,12 +144,16 @@ impl WriterApp {
         };
         let task = cx.spawn_in(window, async move |this, cx| {
             use futures::StreamExt as _;
-            while events.next().await.is_some() {
+            while let Some(mut changed) = events.next().await {
                 // 저장·이동은 이벤트가 여러 개 연달아 온다. 잠깐 기다렸다가 한꺼번에 처리한다.
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(150))
                     .await;
-                while events.try_recv().is_ok() {}
+                while let Ok(more) = events.try_recv() {
+                    changed.extend(more);
+                }
+                changed.sort();
+                changed.dedup();
 
                 // 디스크 I/O는 백그라운드에서 하고, 결과 반영만 UI 스레드에서 한다.
                 let scan_root = root.clone();
@@ -157,6 +163,7 @@ impl WriterApp {
                     .await;
                 if this
                     .update_in(cx, |this, window, cx| {
+                        this.refresh_todos(&changed, cx);
                         this.apply_scan(&root, scanned, window, cx)
                     })
                     .is_err()
@@ -859,8 +866,8 @@ impl WriterApp {
         let root = lib.root.clone();
         let dir = match self.effective_selection() {
             Some(Selection::Group(path)) => path,
-            // "모두"(메모)에서는 Inbox에 만든다.
-            Some(Selection::Section(library::SectionKind::Notes)) | None => root
+            // "모두"(메모)·할 일에서는 Inbox에 만든다.
+            Some(Selection::Section(library::SectionKind::Notes) | Selection::Todos) | None => root
                 .join(library::SectionKind::Notes.dir())
                 .join(library::DEFAULT_INBOX),
             Some(Selection::Section(kind)) => root.join(kind.dir()),

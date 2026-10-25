@@ -223,7 +223,9 @@ impl WriterApp {
             }
         });
 
-        let list: AnyElement = if let Some(mut files) = files {
+        let list: AnyElement = if current == Some(Selection::Todos) {
+            self.render_todo_list(cx, pal)
+        } else if let Some(mut files) = files {
             let (path, sort) = sort.clone().expect("파일 그룹은 그룹 선택에서만 나온다");
             self.sort_files(&mut files, sort);
             if let Some(kind) = self.file_filter {
@@ -255,7 +257,7 @@ impl WriterApp {
             let list_key = match &current {
                 Some(Selection::Group(path)) => path.display().to_string(),
                 Some(Selection::Section(kind)) => kind.dir().to_string(),
-                None => String::new(),
+                Some(Selection::Todos) | None => String::new(),
             };
             // 접합은 수동 순서에서만 뜻이 있다(앞 시트에 이어짐).
             let glued: Vec<bool> = sheets

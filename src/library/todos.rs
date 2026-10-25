@@ -183,6 +183,11 @@ impl TodoIndex {
     }
 }
 
+/// 오늘 날짜(`YYYY-MM-DD`, 이 기기의 시간대). 완료일(`✅`)과 할 일 묶음(오늘·기한 지남)에 쓴다.
+pub fn today() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
 /// 캐시의 색인을 읽는다. 읽기 규칙 버전이 다르거나 읽지 못하면 빈 색인(전부 다시 읽는다).
 fn read_cache(cache: &Cache) -> BTreeMap<String, FileEntry> {
     let read = || -> Result<BTreeMap<String, FileEntry>, redb::Error> {

@@ -38,6 +38,7 @@ mod project_panel;
 mod sheet_list;
 mod sheet_search;
 pub(crate) mod style;
+mod todo_list;
 
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::*;
@@ -64,11 +65,13 @@ struct GroupSort {
     choosable: bool,
 }
 
-/// 사이드바에서 선택된 항목(섹션 또는 그룹).
+/// 사이드바에서 선택된 항목(섹션, 그룹, 할 일).
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Selection {
     Section(library::SectionKind),
     Group(PathBuf),
+    /// 메모의 할 일을 모은 보기(ADR-0024).
+    Todos,
 }
 
 /// 그룹을 옮길 수 있는 범위. 같은 범위 안의 그룹끼리만 하위로 옮길 수 있다.
@@ -134,6 +137,8 @@ pub(crate) struct WriterApp {
     book_style: Option<Entity<book_style::BookStyleView>>,
     /// 파일 그룹 목록에서 보여 줄 파일 종류. None이면 모두.
     file_filter: Option<library::FileKind>,
+    /// 메모의 할 일 색인과 그 보기의 상태(ADR-0024).
+    todos: todo_list::Todos,
     /// 받아쓰기(ADR-0054). 처음 녹음할 때 만든다.
     dictation: Option<dictation::Dictation>,
     /// 받아쓰기의 녹음 중 요약(ADR-0055).
@@ -204,6 +209,7 @@ impl WriterApp {
             open_file: None,
             book_style: None,
             file_filter: None,
+            todos: Default::default(),
             dictation: None,
             dictation_ai: Default::default(),
             _quit_subscription: quit_subscription,
@@ -310,6 +316,7 @@ impl WriterApp {
         self.watcher = None;
         self.preview_task = None;
         self.previews.clear();
+        self.todos = Default::default();
         self.library = None;
         self.refresh_extension_commands(cx);
         self.refresh_library_themes(cx);
@@ -482,6 +489,8 @@ impl WriterApp {
                 self.sort_sheets(&mut sheets, self.sort_for(path));
                 sheets
             }
+            // 할 일이 있는 메모. 목록에 메모 제목을 보이려고 미리보기를 읽는다.
+            Selection::Todos => self.todo_sheets(),
         }
     }
 
@@ -621,6 +630,7 @@ impl WriterApp {
         match selection {
             Selection::Section(library::SectionKind::Notes) => t!("library.all").to_string(),
             Selection::Section(kind) => kind.title().to_string(),
+            Selection::Todos => t!("library.todos.title").to_string(),
             Selection::Group(path) => self
                 .library
                 .as_ref()

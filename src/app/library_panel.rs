@@ -194,6 +194,23 @@ impl WriterApp {
                         )
                         .into_any_element(),
                     );
+                    // 메모의 할 일을 모은 보기(ADR-0024).
+                    let selected = current.as_ref() == Some(&Selection::Todos);
+                    rows.push(
+                        self.library_row(
+                            cx,
+                            pal,
+                            "todos".into(),
+                            icons::todos(),
+                            t!("library.todos.title").into(),
+                            None,
+                            selected,
+                            Selection::Todos,
+                            0,
+                            Disclosure::None,
+                        )
+                        .into_any_element(),
+                    );
                 }
 
                 let mut has_group = false;

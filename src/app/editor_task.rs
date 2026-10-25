@@ -1,5 +1,5 @@
 //! 에디터의 할 일 체크 상자(ADR-0023): GFM 할 일 항목(`- [ ] 일정`)의 기호 자리에 ☐·☑를 그리고,
-//! 누르면 원문의 `[ ]`↔`[x]`를 바꾼다.
+//! 누르면 원문의 `[ ]`↔`[x]`를 바꾸고 완료일(`✅ 날짜`, ADR-0024)을 붙이거나 뗀다.
 //!
 //! 체크 상자는 줄 오버레이(gpui-base 패치)로 기호 위에 덮어 그린다. 원문은 그대로 남고, 커서가
 //! 그 줄에 들어오면 오버레이가 빠져 `- [ ] ` 글자를 고칠 수 있다.
@@ -12,7 +12,7 @@ use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 
 use super::style::Palette;
-use crate::{icons, markdown};
+use crate::{icons, library, markdown};
 
 /// 체크 상자 한 변의 길이(줄 높이에 대한 비율과 한도).
 const BOX_SCALE: f32 = 0.55;
@@ -85,27 +85,31 @@ fn render(overlay: &LineOverlayContext, editor: WeakEntity<EditorState>, cx: &Ap
                 .update(cx, |state, cx| toggle(state, line, check, window, cx))
                 .ok();
         })
-        .child(
-            div()
-                .size(side)
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(3.))
-                .border_1()
-                .map(|this| {
-                    if checked {
-                        this.bg(pal.tint).border_color(pal.tint).child(
-                            Icon::new(icons::task_done())
-                                .size(side * 0.8)
-                                .text_color(pal.tint_foreground),
-                        )
-                    } else {
-                        this.border_color(pal.muted)
-                    }
-                }),
-        )
+        .child(check_box(side, checked, pal))
         .into_any_element()
+}
+
+/// 할 일 체크 상자 모양. 에디터와 할 일 목록이 같이 쓴다.
+pub(super) fn check_box(side: Pixels, checked: bool, pal: Palette) -> Div {
+    div()
+        .size(side)
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(3.))
+        .border_1()
+        .map(|this| {
+            if checked {
+                this.bg(pal.tint).border_color(pal.tint).child(
+                    Icon::new(icons::task_done())
+                        .size(side * 0.8)
+                        .text_color(pal.tint_foreground),
+                )
+            } else {
+                this.border_color(pal.muted)
+            }
+        })
 }
 
 /// `line`번 줄의 할 일 체크를 뒤집는다. 그 사이 줄이 바뀌어 같은 자리에 체크 상자가 없으면 그대로 둔다.
@@ -132,7 +136,15 @@ fn toggle(
     else {
         return;
     };
+    let Some(toggled) = markdown::toggle_todo(line_text, &library::today()) else {
+        return;
+    };
+    // 체크 상자 글자부터 줄 끝까지 한 번에 바꾼다(완료일 `✅`도 함께, 되돌리기 한 번).
     let offset = start + marker.check;
-    let mark = if marker.checked { " " } else { "x" };
-    state.replace_range_keeping_selections(offset..offset + 1, mark, window, cx);
+    state.replace_range_keeping_selections(
+        offset..start + line_text.len(),
+        &toggled[marker.check..],
+        window,
+        cx,
+    );
 }
